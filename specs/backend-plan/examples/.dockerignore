@@ -1,0 +1,27 @@
+.git
+.gitignore
+node_modules
+dist
+coverage
+.pnpm-store
+.env
+.env.*
+!.env.*.example
+config/app-reference.local.json
+.references
+huahuo-app
+huahuo-app-reference
+Flutter
+var
+backups
+*.zip
+*.pem
+*.key
+infra/certs/*
+specs
+# 不依赖整个App checkout构建；App放后端目录之外仍应保留防误复制规则。
+
+config/*.local.json
+docs/local
+*.local.log
+# build context必须是huahuo-server；ignore不是允许context包含Code的理由。

@@ -1,0 +1,17 @@
+{
+  "repoUrl": "https://github.com/kyriswu/huahuo-app",
+  "localPath": "../huahuo-app",
+  "pathBase": "backend-root",
+  "backendDirectoryName": "huahuo-server",
+  "sourceMode": "local-first",
+  "preferredRef": null,
+  "baselineCommit": null,
+  "readOnly": true,
+  "checkRemoteAtStageStart": false,
+  "checkLocalChangesAtStageStart": true,
+  "autoClone": false,
+  "autoPull": false,
+  "includeInDockerBuild": false,
+  "allowSourceCopyWithoutGit": true,
+  "rules": "相对路径相对huahuo-server根解析，不相对config目录。只在宿主编码期使用；本机源码可用则不访问GitHub。不修改App或运行会写入App的构建。真实路径/凭据不提交。"
+}

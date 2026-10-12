@@ -1,0 +1,224 @@
+name: ${COMPOSE_PROJECT_NAME:-huahuo-server-dev}
+
+x-backend: &backend
+  image: ${BACKEND_IMAGE:-huahuo-server:dev}
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      NODE_IMAGE: ${NODE_IMAGE:-node:24.14.0-bookworm-slim}
+      PNPM_VERSION: ${PNPM_VERSION:-10.15.1}
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,nosuid,noexec,size=128m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  networks: [backend]
+  logging:
+    driver: json-file
+    options:
+      max-size: '10m'
+      max-file: '3'
+
+x-app-env: &app-env
+  NODE_ENV: production
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  PROVIDER_MODE: ${PROVIDER_MODE:-disabled}
+  ALLOW_MOCK_PROVIDERS: ${ALLOW_MOCK_PROVIDERS:-false}
+  DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-disable}
+  DATABASE_SSL_CA_FILE: ${DATABASE_SSL_CA_FILE:-}
+  DATABASE_STATEMENT_TIMEOUT_MS: ${DATABASE_STATEMENT_TIMEOUT_MS:-5000}
+  DB_SCHEMA_MIN_VERSION: ${DB_SCHEMA_MIN_VERSION:-8}
+  BILLING_MODE: ${BILLING_MODE:-development}
+  BILLING_POLICY_VERSION: ${BILLING_POLICY_VERSION:-credit-policy-v1}
+  TAG_EXTRACTOR_PROVIDER: ${TAG_EXTRACTOR_PROVIDER:-disabled}
+  REDIS_CACHE_URL: ${REDIS_CACHE_URL:-redis://redis:6379/0}
+  REDIS_QUEUE_URL: ${REDIS_QUEUE_URL:-redis://redis:6379/1}
+  TASK_LEASE_MS: ${TASK_LEASE_MS:-15000}
+  TASK_REDELIVERY_MS: ${TASK_REDELIVERY_MS:-30000}
+  SCHEDULER_INTERVAL_MS: ${SCHEDULER_INTERVAL_MS:-1000}
+  REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-huahuo-dev}
+
+x-runtime-deps: &runtime-deps
+  migrate:
+    condition: service_completed_successfully
+  redis:
+    condition: service_healthy
+
+x-health: &health
+  test: ['CMD', 'node', 'scripts/healthcheck.mjs']
+  interval: 5s
+  timeout: 8s
+  retries: 4
+  start_period: 10s
+
+services:
+  api-server:
+    <<: *backend
+    command: ['node', 'dist/entrypoints/api-server.js']
+    environment:
+      <<: *app-env
+      SERVICE_ROLE: api-server
+      HOST: 0.0.0.0
+      PORT: '3000'
+      HEALTHCHECK_URL: http://127.0.0.1:3000/health/ready
+      DATABASE_URL: ${DATABASE_API_URL:?Set runtime API database URL}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX_API:-10}
+      APP_PUBLIC_BASE_URL: ${APP_PUBLIC_BASE_URL:-http://localhost:3000}
+      INTERNAL_API_BASE_URL: http://api-server:3000
+      APP_TOKEN_SECRET: ${APP_TOKEN_SECRET:?Generate a development secret}
+      ENABLE_DEMO_TASKS: ${ENABLE_DEMO_TASKS:-false}
+      SMS_PROVIDER: ${SMS_PROVIDER:-disabled}
+      SHOW_TEST_OTP: ${SHOW_TEST_OTP:-false}
+      USER_AGREEMENT_VERSION: ${USER_AGREEMENT_VERSION:-}
+      PRIVACY_POLICY_VERSION: ${PRIVACY_POLICY_VERSION:-}
+      TOOL_TOKEN_SECRET: ${TOOL_TOKEN_SECRET:?Generate a separate tool secret}
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
+      STORAGE_LOCAL_ROOT: /app/var/storage
+    ports:
+      - '${API_BIND_HOST:-127.0.0.1}:${API_HOST_PORT:-3000}:3000'
+    volumes:
+      - user_files:/app/var/storage
+      - ./infra/certs:/app/certs:ro
+    depends_on: *runtime-deps
+    healthcheck: *health
+    stop_grace_period: 30s
+    mem_limit: ${API_MEMORY_LIMIT:-512m}
+    cpus: ${API_CPU_LIMIT:-1.0}
+
+  admin:
+    <<: *backend
+    command: ['node', 'dist/entrypoints/admin.js']
+    environment:
+      <<: *app-env
+      SERVICE_ROLE: admin
+      HOST: 0.0.0.0
+      PORT: '3000'
+      HEALTHCHECK_URL: http://127.0.0.1:3000/health/ready
+      DATABASE_URL: ${DATABASE_ADMIN_URL:?Set runtime admin database URL}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX_ADMIN:-5}
+      ADMIN_PUBLIC_BASE_URL: ${ADMIN_PUBLIC_BASE_URL:-http://localhost:3001}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:?Generate an independent admin secret}
+    ports:
+      - '${ADMIN_BIND_HOST:-127.0.0.1}:${ADMIN_HOST_PORT:-3001}:3000'
+    volumes:
+      - ./infra/certs:/app/certs:ro
+    depends_on: *runtime-deps
+    healthcheck: *health
+    stop_grace_period: 30s
+    mem_limit: ${ADMIN_MEMORY_LIMIT:-512m}
+    cpus: ${ADMIN_CPU_LIMIT:-1.0}
+
+  worker:
+    <<: *backend
+    command: ['node', 'dist/entrypoints/worker.js']
+    environment:
+      <<: *app-env
+      WORKER_QUEUES: ${WORKER_QUEUES:-content,ai,commercial,maintenance}
+      SERVICE_ROLE: worker
+      HOST: 127.0.0.1
+      PORT: '3100'
+      HEALTHCHECK_URL: http://127.0.0.1:3100/health/ready
+      DATABASE_URL: ${DATABASE_WORKER_URL:?Set runtime worker database URL}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX_WORKER:-10}
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
+      STORAGE_LOCAL_ROOT: /app/var/storage
+      TOOL_TOKEN_SECRET: ${TOOL_TOKEN_SECRET:?Generate a tool secret}
+      INTERNAL_API_BASE_URL: http://api-server:3000
+    volumes:
+      - user_files:/app/var/storage
+      - ./infra/certs:/app/certs:ro
+    depends_on: *runtime-deps
+    healthcheck: *health
+    stop_grace_period: 120s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-1g}
+    cpus: ${WORKER_CPU_LIMIT:-2.0}
+
+  scheduler:
+    <<: *backend
+    command: ['node', 'dist/entrypoints/scheduler.js']
+    environment:
+      <<: *app-env
+      SERVICE_ROLE: scheduler
+      HOST: 127.0.0.1
+      PORT: '3100'
+      HEALTHCHECK_URL: http://127.0.0.1:3100/health/ready
+      DATABASE_URL: ${DATABASE_SCHEDULER_URL:?Set runtime scheduler database URL}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX_SCHEDULER:-3}
+    volumes:
+      - ./infra/certs:/app/certs:ro
+    depends_on: *runtime-deps
+    healthcheck: *health
+    stop_grace_period: 30s
+    mem_limit: ${SCHEDULER_MEMORY_LIMIT:-256m}
+    cpus: ${SCHEDULER_CPU_LIMIT:-0.5}
+
+  migrate:
+    <<: *backend
+    restart: 'no'
+    command: ['node', 'dist/entrypoints/migrate.js']
+    environment:
+      NODE_ENV: production
+      APP_ENV: ${APP_ENV:-development}
+      SERVICE_ROLE: migrate
+      DATABASE_URL: ${DATABASE_MIGRATION_URL:?Set dedicated migration URL}
+      DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-disable}
+      DATABASE_SSL_CA_FILE: ${DATABASE_SSL_CA_FILE:-}
+      DATABASE_CONNECT_DEADLINE_MS: ${DATABASE_CONNECT_DEADLINE_MS:-120000}
+      DATABASE_POOL_MAX: '1'
+    volumes:
+      - ./infra/certs:/app/certs:ro
+    stop_grace_period: 60s
+
+  postgres:
+    profiles: [local-db]
+    image: ${POSTGRES_IMAGE:?Pin supported PostgreSQL image; volume below assumes PG17}
+    environment:
+      POSTGRES_USER: huahuo_bootstrap
+      POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD:?Generate local bootstrap password}
+      POSTGRES_DB: huahuo
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      POSTGRES_MIGRATOR_PASSWORD: ${POSTGRES_MIGRATOR_PASSWORD:?Generate migrator password}
+      POSTGRES_API_PASSWORD: ${POSTGRES_API_PASSWORD:?Generate API DB password}
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Generate admin DB password}
+      POSTGRES_WORKER_PASSWORD: ${POSTGRES_WORKER_PASSWORD:?Generate worker DB password}
+      POSTGRES_SCHEDULER_PASSWORD: ${POSTGRES_SCHEDULER_PASSWORD:?Generate scheduler DB password}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    networks: [backend]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-1g}
+
+  redis:
+    image: ${REDIS_IMAGE:?Pin supported stable Redis image}
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'everysec', '--maxmemory-policy', 'noeviction', '--maxmemory', '${REDIS_MAXMEMORY:-256mb}']
+    volumes:
+      - redis_data:/data
+    networks: [backend]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: ${REDIS_MEMORY_LIMIT:-512m}
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  user_files:

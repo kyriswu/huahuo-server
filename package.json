@@ -1,0 +1,76 @@
+{
+  "name": "huahuo-server",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "pnpm@10.15.1",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src tests scripts/*.mjs",
+    "test": "vitest run tests/unit tests/contract",
+    "test:unit": "vitest run tests/unit",
+    "test:contract": "vitest run tests/contract",
+    "test:integration": "node scripts/integration.mjs",
+    "app:reference": "node scripts/app-reference.mjs",
+    "app:reference:diff": "node scripts/app-reference.mjs --diff",
+    "local:preflight": "node scripts/preflight-local.mjs",
+    "local:docker:ensure": "bash scripts/ensure-docker-local.sh",
+    "compose:validate": "docker compose --env-file .env.compose.local config --quiet",
+    "compose:up": "docker compose --env-file .env.compose.local up -d --build",
+    "compose:down": "docker compose --env-file .env.compose.local down",
+    "db:migrate": "docker compose --env-file .env.compose.local run --rm migrate",
+    "verify": "node scripts/verify.mjs",
+    "start:api-server": "node dist/entrypoints/api-server.js",
+    "start:admin": "node dist/entrypoints/admin.js",
+    "start:worker": "node dist/entrypoints/worker.js",
+    "start:scheduler": "node dist/entrypoints/scheduler.js",
+    "dev:api-server": "tsx src/entrypoints/api-server.ts",
+    "dev:admin": "tsx src/entrypoints/admin.ts",
+    "dev:worker": "tsx src/entrypoints/worker.ts",
+    "dev:scheduler": "tsx src/entrypoints/scheduler.ts",
+    "test:e2e": "node scripts/e2e-p03.mjs",
+    "test:e2e:p02": "node scripts/e2e-p02.mjs",
+    "test:container-isolation": "node scripts/container-isolation.mjs",
+    "infra:up": "docker compose --env-file .env.compose.local up -d postgres redis",
+    "infra:down": "docker compose --env-file .env.compose.local stop postgres redis",
+    "db:seed:dev": "tsx src/db/seed.ts",
+    "db:generate": "node scripts/new-migration.mjs",
+    "test:integration:inner": "vitest run tests/integration",
+    "admin:bootstrap": "node dist/entrypoints/admin-bootstrap.js",
+    "admin:revoke-sessions": "node dist/entrypoints/admin-revoke-sessions.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1149.0",
+    "@fastify/swagger": "9.5.1",
+    "@fastify/type-provider-typebox": "5.2.0",
+    "@sinclair/typebox": "0.34.41",
+    "bullmq": "6.3.12",
+    "drizzle-orm": "0.44.5",
+    "fastify": "5.12.5",
+    "file-type": "22.1.1",
+    "ioredis": "5.6.1",
+    "mammoth": "1.13.0",
+    "music-metadata": "12.1.0",
+    "pdf-parse": "1.1.1",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.3.0",
+    "@types/pg": "8.15.5",
+    "eslint": "10.12.0",
+    "tsx": "4.20.3",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.71.1",
+    "vitest": "3.2.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

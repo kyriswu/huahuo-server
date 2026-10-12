@@ -1,0 +1,8 @@
+{
+  "repoUrl": "https://github.com/kyriswu/huahuo-app",
+  "localPath": "../huahuo-app",
+  "pathBase": "backend-root",
+  "sourceMode": "local-first",
+  "readOnly": true,
+  "checkRemoteAtStageStart": false
+}

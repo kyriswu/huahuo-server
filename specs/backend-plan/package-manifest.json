@@ -1,0 +1,270 @@
+{
+  "package": "huahuo-fastify-codex-plan",
+  "version": "3.0-local-siblings",
+  "date": "2026-10-09",
+  "kind": "implementation-prompts-and-blueprints-not-backend-runtime",
+  "app_source_url": "https://github.com/kyriswu/huahuo-app",
+  "app_local_path": "../huahuo-app",
+  "path_base": "huahuo-server root",
+  "backend_directory": "huahuo-server",
+  "reference_policy": "local-first-readonly-no-automatic-clone-fetch-pull",
+  "compose_services": [
+    "api-server",
+    "worker",
+    "admin",
+    "scheduler",
+    "postgres",
+    "redis",
+    "migrate"
+  ],
+  "stage_count": 16,
+  "file_count_including_manifest": 50,
+  "manifest_self_excluded_from_hashes": true,
+  "files": [
+    {
+      "path": "00_启动指令.md",
+      "bytes": 6948,
+      "sha256": "741f8248332d691a134e66fbad2b08fb4027aa2dc4551372ba9fdf297ccd8fee"
+    },
+    {
+      "path": "01_项目总提示词.md",
+      "bytes": 19481,
+      "sha256": "e0c7c7dedce758955e5e2530aa602c2242a689c83a002bb5c1ad2a10a7a40185"
+    },
+    {
+      "path": "02_架构与配置约定.md",
+      "bytes": 9747,
+      "sha256": "ed7a5d04bdb4c75f3982b7081a8bc9c54f4617116e3ea94901ac1c66705487d6"
+    },
+    {
+      "path": "03_业务模块与阶段映射.md",
+      "bytes": 8634,
+      "sha256": "c1b9725430c4f85867ef118e0c8c3ffa4ab2ebdb48a3dd14582990bbd31a22dc"
+    },
+    {
+      "path": "04_全项目验收与发布门槛.md",
+      "bytes": 8842,
+      "sha256": "481d399827492a62a4592cc10301274f5653236762a8423d4b821e682135ddb7"
+    },
+    {
+      "path": "05_来源与决策边界.md",
+      "bytes": 7094,
+      "sha256": "b0d93124de7da6ec156bf75454673fb0c5d47e2aa997a387736b431701c00c3e"
+    },
+    {
+      "path": "06_容器职责与Compose部署规范.md",
+      "bytes": 11181,
+      "sha256": "7a684c331ef722c544be4973303426734e317e4d692a00ace8cda51055aacf6c"
+    },
+    {
+      "path": "07_App代码持续参照与契约核对.md",
+      "bytes": 5623,
+      "sha256": "cfc08168ef3f71216745ecc4344ba1f01779f8d82cfc48947d920eafc852111b"
+    },
+    {
+      "path": "08_Admin独立管理台规范.md",
+      "bytes": 4873,
+      "sha256": "2e5bd92e486dec26b8322d9f335f236f2da3531c23429734e6e1eb92a16dbf4d"
+    },
+    {
+      "path": "09_v2变更记录.md",
+      "bytes": 3236,
+      "sha256": "5d41e4868682ad9f9e45989cb48f8f99b53ff9e3e244560004f0c408f3d0b823"
+    },
+    {
+      "path": "10_容器拓扑与阶段验收矩阵.md",
+      "bytes": 2947,
+      "sha256": "4b74e37aaa099ed8b76f056d86917f931c86c6c9c524846ded6b5414b17ac466"
+    },
+    {
+      "path": "11_本机双目录与Docker开工规范.md",
+      "bytes": 8529,
+      "sha256": "f8ca2293aa1d0e31a9d8739b2b35d6d02d3dd562ea200e587a32e13e2593f2a5"
+    },
+    {
+      "path": "12_本地App联调地址与验证.md",
+      "bytes": 4827,
+      "sha256": "a862579e1719bdb071ceedb2fdf94346a67beb95f6acf1f36797edd453995661"
+    },
+    {
+      "path": "13_v3变更记录.md",
+      "bytes": 2374,
+      "sha256": "b70eee85d186540d926a6756a54d11745923110a09559b1ff1e1de3445899b30"
+    },
+    {
+      "path": "README.md",
+      "bytes": 5106,
+      "sha256": "cc8b8b783956cd0be2316307a9f2ec818be408e34b4086faca253aea63a4a65d"
+    },
+    {
+      "path": "VALIDATION.md",
+      "bytes": 2948,
+      "sha256": "50963f09b86f3d041777eb522f61b15288a43aa746a853f689263d6940aa46be"
+    },
+    {
+      "path": "examples/.dockerignore",
+      "bytes": 445,
+      "sha256": "f923649d3c1354ceb48355637f55cded195b5b9d772c3389d3c3c04ec2797901"
+    },
+    {
+      "path": "examples/.env.compose.cloud.example",
+      "bytes": 2692,
+      "sha256": "44d3eb8f44dadd850b5e3af59429500c0f21680a62b92d3a54aed16f393d3557"
+    },
+    {
+      "path": "examples/.env.compose.local.example",
+      "bytes": 2554,
+      "sha256": "102998228468f4b22bb69f0b058ea99f9a5a6302f25647e6e37743c2fd0bc61e"
+    },
+    {
+      "path": "examples/Dockerfile",
+      "bytes": 1234,
+      "sha256": "de4df747aa99228dfe545ebe871e8ec5467663c8b69f6f2619033e0981410c36"
+    },
+    {
+      "path": "examples/README.md",
+      "bytes": 3520,
+      "sha256": "183f8ea1fab43d2a1f58c87fa8abcfc1b5d6022b47ee9edc3ba46def52bdced3"
+    },
+    {
+      "path": "examples/compose.yaml",
+      "bytes": 8391,
+      "sha256": "4f0b6b4dc589fd43ebb31153879158f74ec6156f181277b4d715502139072047"
+    },
+    {
+      "path": "examples/infra/certs/README.md",
+      "bytes": 369,
+      "sha256": "98f0c0bd7742307af299bf75f7489ef2457dde6264bc147b8f2bfd4dce020e2c"
+    },
+    {
+      "path": "examples/infra/postgres/init/010-roles.sh",
+      "bytes": 2751,
+      "sha256": "0ed717e959c88b94eba04d9b55f889438c15ac015311387935313d259445714a"
+    },
+    {
+      "path": "examples/scripts/ensure-docker-local.sh",
+      "bytes": 3866,
+      "sha256": "1caa6f691a54ee7f0c54a82da4f571b9b496547f1115f14ec0e43d98a48170ae"
+    },
+    {
+      "path": "examples/scripts/healthcheck.mjs",
+      "bytes": 946,
+      "sha256": "785161cc5006b16e2e33b7a4db2dcca835d7bc918817512ebea69b9cfd5ec9b4"
+    },
+    {
+      "path": "examples/scripts/preflight-local.mjs",
+      "bytes": 8032,
+      "sha256": "2212e7b548f3226db38f082f9d8c9bced057998ccfbd23f808f036ebf31eb6f0"
+    },
+    {
+      "path": "prompts/P01_工程骨架与本地基础设施.md",
+      "bytes": 8032,
+      "sha256": "cf84d7dffea2b251d14e4b52050fcf2e4f61bf67b80348c082a29ba8e41f8cbe"
+    },
+    {
+      "path": "prompts/P02_账号、会话、工作区与内容线.md",
+      "bytes": 5438,
+      "sha256": "a8189ed742a5aa524aafbae0fda43f2bc10cbafc86f95c6bff1b248f937eae52"
+    },
+    {
+      "path": "prompts/P03_持久任务、Outbox、Worker与调度.md",
+      "bytes": 5895,
+      "sha256": "152e031a354fbcef342cc49b86c220871b1db9cc1dd180457bffd945244ef0ee"
+    },
+    {
+      "path": "prompts/P04_会员权益基础、用量账本与任务准入.md",
+      "bytes": 4950,
+      "sha256": "4b4eff63f6bc7df7df8798f05bec8340759b4617f840aab92fe66bd89513320c"
+    },
+    {
+      "path": "prompts/P05_用户文件空间、上传核验与存储适配.md",
+      "bytes": 5069,
+      "sha256": "4bbc6f03690eba27eb87bafffccbae1e1e0a88aa6718c276f84b5016826f3fbe"
+    },
+    {
+      "path": "prompts/P06_个人资产、导入、标签、检索与图谱数据.md",
+      "bytes": 5850,
+      "sha256": "55982fcf86f10802b04984733542125ac82481a8be5d8a0bb6e931880dadb368"
+    },
+    {
+      "path": "prompts/P07_录音卡云端归属、ASR与分阶段文字处理.md",
+      "bytes": 5258,
+      "sha256": "4c434a48385ab115236d39fe480b1b27bb74cbf961d907e661a39a3a58bd4bb6"
+    },
+    {
+      "path": "prompts/P08_Dify运行、Chat历史、附件与流式恢复.md",
+      "bytes": 5808,
+      "sha256": "7d1e8a78ac0c68e272138a1713f9d124a216bd309cf688e4901704f136806b0a"
+    },
+    {
+      "path": "prompts/P09_创作、聚合、改写审核与社媒定位.md",
+      "bytes": 5091,
+      "sha256": "08b0a4f51f0a15f575cc85547cfe90958c099ac9b556cf6bce86052c839d96db"
+    },
+    {
+      "path": "prompts/P10_数字孪生：三维Markdown与轻量确认.md",
+      "bytes": 5651,
+      "sha256": "a8f0388958a7b43b03ea85d075aaa7d3c7045bcbf44f593d05fa41069534539b"
+    },
+    {
+      "path": "prompts/P11_外部世界、栏目订阅与内容采集.md",
+      "bytes": 4772,
+      "sha256": "7606463b2826f9e32b474367a82fdab006c111f234b07c6f6a060b1564960fdf"
+    },
+    {
+      "path": "prompts/P12_支付、会员购买、恢复与对账.md",
+      "bytes": 6259,
+      "sha256": "16a0cce00558edb4423365f763904e5f6e1270c0f5d73cd371f0e660504a92a3"
+    },
+    {
+      "path": "prompts/P13_通知、日历统计、偏好与用户支持.md",
+      "bytes": 5062,
+      "sha256": "041a23eb1afcdf59e6821123ec2ed9fcfd3cf5760be5fd07ac03e987776c42cc"
+    },
+    {
+      "path": "prompts/P14_最小运营管理、诊断与审计.md",
+      "bytes": 6854,
+      "sha256": "0f382abfa6c29df2a3a5f00652546ea702502ceb81874c44b7426c835fcb2164"
+    },
+    {
+      "path": "prompts/P15_App契约联调与真实供应商接通.md",
+      "bytes": 5952,
+      "sha256": "726f8b6d060019f7643ddf780e72766a543d9a7810e843228fb285d9780d4324"
+    },
+    {
+      "path": "prompts/P16_部署、备份恢复、容量测试与发布验收.md",
+      "bytes": 6445,
+      "sha256": "d7d9bcec6764f1d41d9da81078930c5182d9aad71988ea859afc067090aa5cc0"
+    },
+    {
+      "path": "stage-index.json",
+      "bytes": 15037,
+      "sha256": "8970822487518dd2baf36192f8b85d0a46d6a9e93d1625d7cf0715f4bde0083a"
+    },
+    {
+      "path": "templates/AGENTS_项目规则模板.md",
+      "bytes": 3283,
+      "sha256": "9906b2e1ba750ee601a7299cef584fb77670af3fdd4c8b5d5afcd746e5838dbb"
+    },
+    {
+      "path": "templates/App基线与容器状态模板.md",
+      "bytes": 2395,
+      "sha256": "d977add6e3a35ee8d11640a8d80f7c3323a5c48e63c9cb7d95c2d0b8ba144640"
+    },
+    {
+      "path": "templates/app-reference.config.example.json",
+      "bytes": 680,
+      "sha256": "6e9bd8b48f53499ca9520d11de4ed419b4c4aa394a4d0d4676de1c25ead85308"
+    },
+    {
+      "path": "templates/本机预检记录模板.md",
+      "bytes": 1604,
+      "sha256": "47353642f4058598c274f9bc4bc938663f4de0d7ba6a5f2edad6ff918bf827ba"
+    },
+    {
+      "path": "templates/进度与供应商状态模板.md",
+      "bytes": 2618,
+      "sha256": "7969f1f999498d71f7a6ef86c4fe4f7c16539ee7cd3b2c2ad4f60a2a451d0a6e"
+    }
+  ]
+}
