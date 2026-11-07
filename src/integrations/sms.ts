@@ -1,5 +1,5 @@
 import { DomainError } from '../modules/identity/store.js';
-export interface SmsMessage { phone: string; code: string; purpose: 'login'; requestId: string; }
+export interface SmsMessage { phone: string; code: string; purpose: 'sign_in'; requestId: string; }
 export interface SmsProvider { readonly mode: 'mock' | 'live' | 'disabled'; send(message: SmsMessage): Promise<void>; }
 export class MockSmsProvider implements SmsProvider {
   readonly mode = 'mock';

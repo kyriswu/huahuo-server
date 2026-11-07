@@ -1,7 +1,7 @@
 import {beforeAll,afterAll,describe,it,expect} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {buildApiServer} from '../../src/apps/api-server.js';
-import {digest} from '../../src/modules/identity/crypto.js';
+import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
 import type {TagExtractor} from '../../src/modules/assets/tag-extractor.js';
 import {loadConfig} from '../../src/config/config.js';
 import {poolFor} from '../../src/plugins/dependencies.js';
@@ -11,11 +11,41 @@ import {DeterministicTagExtractor} from '../../src/modules/assets/tag-extractor.
 import {TaskEngine} from '../../src/modules/tasks/engine.js';
 type GraphEdge={source:string;target:string;relationType:string;evidence?:{sharedTags?:Array<{tagName:string}>}};const edgeList=(graph:{edges:readonly unknown[]})=>graph.edges as GraphEdge[];
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;if(!migrationUrl)throw new Error('TEST_DB_REQUIRED');
-const root=poolFor(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl}));const cfg=loadConfig('api-server',{...process.env,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'asset-test-'.repeat(8),APP_PUBLIC_BASE_URL:'http://assets.test',DATABASE_URL:process.env.TEST_DATABASE_API_URL});const pool=poolFor(cfg),worker=poolFor({...cfg,role:'worker',databaseUrl:process.env.TEST_DATABASE_WORKER_URL!});const assets=new AssetService(pool,cfg.appTokenSecret!);const engine=new TaskEngine(worker,15000,undefined,undefined,new DeterministicTagExtractor());
-async function fixture(){const userId=randomUUID(),sessionId=randomUUID(),workspaceId=randomUUID(),bearer='app_'+Buffer.from(randomUUID()+randomUUID()).toString('base64url').slice(0,43);await root.query('INSERT INTO app_users(id,phone_hash,phone_masked) VALUES($1,$2,$3)',[userId,randomUUID(),'138****0000']);await root.query("INSERT INTO user_sessions(id,user_id,device_id,access_hash,access_expires_at,expires_at) VALUES($1,$2,'fixture',$3,now()+interval '1 hour',now()+interval '1 day')",[sessionId,userId,digest(bearer)]);await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'fixture',true,$3)",[workspaceId,userId,randomUUID()]);return {userId,workspaceId,bearer,scope:{userId,sessionId,traceId:randomUUID()}};}
+const root=poolFor(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl}));const cfg=loadConfig('api-server',{...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'asset-test-'.repeat(8),APP_PUBLIC_BASE_URL:'http://assets.test',DATABASE_URL:process.env.TEST_DATABASE_API_URL});const pool=poolFor(cfg),worker=poolFor({...cfg,role:'worker',databaseUrl:process.env.TEST_DATABASE_WORKER_URL!});const assets=new AssetService(pool,cfg.appTokenSecret!);const engine=new TaskEngine(worker,15000,undefined,undefined,new DeterministicTagExtractor());
+async function fixture(){
+ const userId=await insertFixtureUser(root),sessionId=randomUUID(),workspaceId=randomUUID();
+ const bearer=await insertFixtureSession(root,userId,sessionId,'fixture-fixture');
+ await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'fixture',true,$3)",[workspaceId,userId,randomUUID()]);
+ return {userId,workspaceId,bearer,scope:{userId,sessionId,traceId:randomUUID()}};
+}
 async function makeNote(u:Awaited<ReturnType<typeof fixture>>){return assets.createNote(u.scope,u.workspaceId,{title:'素材',parts:{raw:'正文 alpha'}},randomUUID());}
 async function jobFor(noteId:string){return String((await root.query('SELECT task_id FROM content_jobs WHERE note_id=$1',[noteId])).rows[0].task_id);}
 describe('P06 personal assets, revisions and search',()=>{beforeAll(()=>migrate(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl})));afterAll(async()=>{await Promise.all([pool.end(),root.end(),worker.end()]);});
+it('validates folder, Note and tag relationship targets within the owning workspace',async()=>{
+ const a=await fixture(),b=await fixture(),noteA=await makeNote(a),noteB=await makeNote(b);
+ const foreignFolder=await assets.createFolder(b.scope,b.workspaceId,{displayName:'foreign'},randomUUID());
+ await expect(assets.createFolder(a.scope,a.workspaceId,{displayName:'missing parent',parentFolderId:randomUUID()},randomUUID())).rejects.toMatchObject({code:'PARENT_FOLDER_NOT_FOUND'});
+ await expect(assets.createNote(a.scope,a.workspaceId,{title:'foreign folder',folderId:foreignFolder.folderId,parts:{raw:'body'}},randomUUID())).rejects.toMatchObject({code:'FOLDER_NOT_FOUND'});
+ await expect(assets.createRelation(a.scope,a.workspaceId,noteA.noteId,{targetNoteId:noteB.noteId,relationType:'references',rationale:'foreign'},randomUUID())).rejects.toMatchObject({code:'NOTE_NOT_FOUND'});
+ await expect(assets.createRelation(a.scope,a.workspaceId,noteA.noteId,{targetNoteId:randomUUID(),relationType:'references',rationale:'absent'},randomUUID())).rejects.toMatchObject({code:'NOTE_NOT_FOUND'});
+ const tagsB=await assets.addNoteTag(b.scope,b.workspaceId,noteB.noteId,'foreign label',`"tags-${noteB.noteId}-0"`,randomUUID());
+ await expect(assets.removeNoteTag(a.scope,a.workspaceId,noteA.noteId,tagsB.tags[0]!.tagId,`"tags-${noteA.noteId}-0"`,randomUUID())).rejects.toMatchObject({code:'TAG_NOT_FOUND'});
+ expect((await root.query('SELECT count(*)::int n FROM note_relations WHERE source_note_id=$1',[noteA.noteId])).rows[0].n).toBe(0);
+ expect((await assets.noteTags(b.scope,b.workspaceId,noteB.noteId)).tags).toHaveLength(1);
+});
+it('soft deletion preserves revisions, labels and explicit relationships for restoration',async()=>{
+ const u=await fixture(),source=await makeNote(u),target=await makeNote(u);
+ const tags=await assets.addNoteTag(u.scope,u.workspaceId,source.noteId,'retained',`"tags-${source.noteId}-0"`,randomUUID());
+ const relation=await assets.createRelation(u.scope,u.workspaceId,source.noteId,{targetNoteId:target.noteId,relationType:'references',rationale:'retain'},randomUUID());
+ await assets.deleteNote(u.scope,u.workspaceId,source.noteId,source.etag,randomUUID());
+ expect((await root.query('SELECT count(*)::int n FROM note_part_revisions WHERE note_id=$1',[source.noteId])).rows[0].n).toBe(3);
+ expect((await root.query('SELECT count(*)::int n FROM note_tags WHERE note_id=$1 AND tag_id=$2',[source.noteId,tags.tags[0]!.tagId])).rows[0].n).toBe(1);
+ expect((await root.query('SELECT count(*)::int n FROM note_relations WHERE relation_id=$1',[relation.relationId])).rows[0].n).toBe(1);
+ const deleted=await assets.getNote(u.scope,u.workspaceId,source.noteId);
+ await assets.deleteNote(u.scope,u.workspaceId,source.noteId,deleted.etag,randomUUID(),true);
+ expect((await assets.getNote(u.scope,u.workspaceId,source.noteId)).parts.raw!.contentMarkdown).toBe('正文 alpha');
+ expect((await assets.noteTags(u.scope,u.workspaceId,source.noteId)).tags).toHaveLength(1);
+});
 it('folders enforce scope, duplicate names, cycles and ETags',async()=>{const u=await fixture();const f=await assets.createFolder(u.scope,u.workspaceId,{displayName:'资料'},randomUUID());await expect(assets.createFolder(u.scope,u.workspaceId,{displayName:'资料'},randomUUID())).rejects.toMatchObject({code:'FOLDER_NAME_CONFLICT'});const child=await assets.createFolder(u.scope,u.workspaceId,{displayName:'子',parentFolderId:f.folderId},randomUUID());await expect(assets.moveFolder(u.scope,u.workspaceId,f.folderId,child.folderId,f.etag,randomUUID())).rejects.toMatchObject({code:'FOLDER_CYCLE'});await expect(assets.updateFolder(u.scope,u.workspaceId,f.folderId,'x','bad-etag',randomUUID())).rejects.toMatchObject({statusCode:412});});
 it('keeps original text on tag task failure/stale revision and returns extracted tags for current revision',async()=>{const u=await fixture();const n=await assets.createNote(u.scope,u.workspaceId,{title:'中文项目 Alpha',parts:{raw:'这是一个中文项目笔记 with mixed English',outline:'',germination:''}},randomUUID());const changed=await assets.updateNote(u.scope,u.workspaceId,n.noteId,{parts:{raw:'最新内容 beta'}},n.etag,randomUUID());const task=(await root.query("SELECT task_id FROM content_jobs WHERE note_id=$1 AND note_revision_id=$2",[n.noteId,n.noteRevisionId])).rows[0];const stale=await engine.claim(task.task_id,randomUUID());expect(stale).not.toBeNull();await engine.execute(stale!);const tags=(await root.query('SELECT count(*)::int n FROM note_tags WHERE note_id=$1',[n.noteId])).rows[0].n;expect(tags).toBe(0);const task2=(await root.query("SELECT task_id FROM content_jobs WHERE note_id=$1 AND note_revision_id=$2",[n.noteId,changed.noteRevisionId])).rows[0];const current=await engine.claim(task2.task_id,randomUUID());await engine.execute(current!);expect((await root.query('SELECT count(*)::int n FROM note_tags WHERE note_id=$1',[n.noteId])).rows[0].n).toBeGreaterThan(0);expect((await assets.getNote(u.scope,u.workspaceId,n.noteId)).parts.raw!.contentMarkdown).toBe('最新内容 beta');});
 it('search is workspace scoped and stale ETag cannot overwrite; tombstone restores',async()=>{const a=await fixture(),b=await fixture();const n=await assets.createNote(a.scope,a.workspaceId,{title:'合同与客户',parts:{raw:'张三 2026 项目',outline:'',germination:''}},randomUUID());await assets.createNote(b.scope,b.workspaceId,{title:'合同与客户',parts:{raw:'张三 2026 项目',outline:'',germination:''}},randomUUID());expect((await assets.search(a.scope,a.workspaceId,{query:'张三'})).results).toHaveLength(1);expect((await assets.search(b.scope,b.workspaceId,{query:'张三'})).results).toHaveLength(1);await expect(assets.updateNote(a.scope,a.workspaceId,n.noteId,{title:'覆盖'},'bad',randomUUID())).rejects.toMatchObject({statusCode:412});const deleted=await assets.deleteNote(a.scope,a.workspaceId,n.noteId,n.etag,randomUUID());expect(deleted.tombstone).toBe(true);const tomb=await assets.getNote(a.scope,a.workspaceId,n.noteId);const restored=await assets.deleteNote(a.scope,a.workspaceId,n.noteId,tomb.etag,randomUUID(),true);expect(restored.tombstone).toBe(false);});
@@ -102,6 +132,37 @@ it('isolates tags, search and counts between users and same-user workspaces and 
  expect((await assets.search(u.scope,u.workspaceId,{query:'alpha',tagIds:[tagIds[2]!]})).results).toHaveLength(0);
  const n=await makeNote(u);await assets.updateNote(u.scope,u.workspaceId,n.noteId,{parts:{raw:'obsoleteword'}},n.etag,randomUUID());const updated=await assets.getNote(u.scope,u.workspaceId,n.noteId);await assets.updateNote(u.scope,u.workspaceId,n.noteId,{parts:{raw:'newword'}},updated.etag,randomUUID());
  expect((await assets.search(u.scope,u.workspaceId,{query:'obsoleteword'})).results).toHaveLength(0);expect((await assets.search(u.scope,u.workspaceId,{query:'newword',sourceKinds:['manual'],from:'2000-01-01',to:'2100-01-01'})).results).toHaveLength(1);expect((await assets.search(u.scope,u.workspaceId,{query:'newword',sourceKinds:['import']})).results).toHaveLength(0);
+});
+it('preserves ordinary title ILIKE matching and literal wildcard escaping independently of RAG',async()=>{
+ const u=await fixture(),other=await fixture();
+ const title=await assets.createNote(u.scope,u.workspaceId,{title:'EcoNOMic 文件报告.pdf',parts:{raw:'unrelated body',outline:''}},randomUUID());
+ await assets.createNote(u.scope,u.workspaceId,{title:'Unrelated title',parts:{raw:'economic 文件报告.pdf',outline:''}},randomUUID());
+ await assets.createNote(other.scope,other.workspaceId,{title:'EcoNOMic 文件报告.pdf',parts:{raw:'unrelated body',outline:''}},randomUUID());
+ // Restricting parts to empty outline disables Note FTS/body matches. The
+ // partial word and mixed case must therefore be matched by title ILIKE.
+ const byTitle=await assets.search(u.scope,u.workspaceId,{query:'onomic 文件',noteParts:['outline']});
+ expect(byTitle.results.map(row=>row.ownerRef.id)).toEqual([title.noteId]);
+ const literal=await assets.createNote(u.scope,u.workspaceId,{title:'Budget 100%_ready',parts:{raw:'unrelated',outline:''}},randomUUID());
+ await assets.createNote(u.scope,u.workspaceId,{title:'Budget 100XXready',parts:{raw:'unrelated',outline:''}},randomUUID());
+ expect((await assets.search(u.scope,u.workspaceId,{query:'100%_',noteParts:['outline']})).results.map(row=>row.ownerRef.id)).toEqual([literal.noteId]);
+ await assets.deleteNote(u.scope,u.workspaceId,title.noteId,title.etag,randomUUID());
+ expect((await assets.search(u.scope,u.workspaceId,{query:'onomic 文件',noteParts:['outline']})).results).toHaveLength(0);
+ await expect(assets.search(other.scope,u.workspaceId,{query:'onomic 文件'})).rejects.toMatchObject({code:'WORKSPACE_NOT_FOUND'});
+});
+it('preserves ordinary note lists, active-state filtering and user/workspace boundaries',async()=>{
+ const u=await fixture(),other=await fixture(),secondId=randomUUID();
+ await root.query("INSERT INTO workspaces(id,user_id,display_name,bootstrap_receipt_id) VALUES($1,$2,'second',$3)",[secondId,u.userId,randomUUID()]);
+ const active=await makeNote(u),deleted=await makeNote(u),foreign=await makeNote(other);
+ const second=await makeNote({...u,workspaceId:secondId});
+ await assets.deleteNote(u.scope,u.workspaceId,deleted.noteId,deleted.etag,randomUUID());
+ const ownList=await assets.listNotes(u.scope,u.workspaceId);
+ expect(ownList.items.map(row=>row.noteId)).toEqual([active.noteId]);
+ expect(ownList.items.every(row=>row.state==='active'&&row.workspaceId===u.workspaceId)).toBe(true);
+ expect((await assets.listNotes(u.scope,secondId)).items.map(row=>row.noteId)).toEqual([second.noteId]);
+ expect((await assets.listNotes(other.scope,other.workspaceId)).items.map(row=>row.noteId)).toEqual([foreign.noteId]);
+ await expect(assets.listNotes(other.scope,u.workspaceId)).rejects.toMatchObject({code:'WORKSPACE_NOT_FOUND'});
+ await root.query("UPDATE workspaces SET state='disabled' WHERE id=$1",[secondId]);
+ await expect(assets.listNotes(u.scope,secondId)).rejects.toMatchObject({code:'WORKSPACE_NOT_FOUND'});
 });
 it('100k-material high-frequency topic returns bounded pages, global counts and invalidates old cursors',async()=>{
  const u=await fixture(),tagId=randomUUID();await root.query("INSERT INTO asset_tags(tag_id,workspace_id,normalized_name,display_name,source) VALUES($1,$2,'common','Common','manual')",[tagId,u.workspaceId]);

@@ -17,7 +17,7 @@ export class AdminService {
   const raw=token('admin_'),csrfToken=this.csrf(raw),id=randomUUID();
   await transaction(this.pool,async tx=>{
    const active=await tx.query('SELECT id FROM admin_users WHERE id=$1 AND NOT disabled FOR SHARE',[user.id]);if(!active.rowCount)throw new DomainError(401,'ADMIN_UNAUTHORIZED');
-   await tx.query(`INSERT INTO admin_sessions(id,admin_id,session_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '8 hours')`,[id,user.id,mac(this.secret,raw),mac(this.secret,csrfToken)]);
+   await tx.query(`INSERT INTO admin_sessions(id,admin_id,session_hash,expires_at) VALUES($1,$2,$3,now()+interval '8 hours')`,[id,user.id,mac(this.secret,raw)]);
    await tx.query('INSERT INTO admin_audit_events(id,admin_id,action,target_id,trace_id) VALUES($1,$2,$3,$4,$5)',[randomUUID(),user.id,'admin.login',id,traceId]);
   });
   return {cookie:raw,csrfToken,admin:{adminId:user.id,username:user.username,role:user.role}};

@@ -23,3 +23,5 @@
 - 本机Docker已安装且用户允许必要时启动。先查context本地性/权限/daemon；只操作本项目，禁止全局清理、down -v或动其他项目。权限受限申请最小必要审批，不绕过沙箱。
 - compose build.context只包含Server，不把Code/App打包；app:reference只宿主运行，APP_LOCAL_PATH不进入业务容器。
 - P01真实搭建并测试，预检不是长篇阶段0；P15按12规范核对本地/真机地址，不猜App环境参数，不擅自改UI或客户端配置。
+
+- PostgreSQL / RDS 禁止物理外键和模拟外键触发器。关联ID为普通字段并配置必要的普通索引；主键、唯一、NOT NULL和业务CHECK保留。关系存在性、用户/工作区归属与删除清理由所属业务Service/Repository在事务边界校验；数据库迁移验收必须确保业务Schema外键数为0。

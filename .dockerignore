@@ -4,7 +4,15 @@
 !tsconfig*.json
 !src/
 !src/**
+!admin-ui/
+!admin-ui/index.html
+!admin-ui/tsconfig.json
+!admin-ui/vite.config.ts
+!admin-ui/src/
+!admin-ui/src/**
 !migrations/
 !migrations/**
 !scripts/
 !scripts/healthcheck.mjs
+
+!scripts/rag-consistency.mjs

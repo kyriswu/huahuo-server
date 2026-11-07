@@ -4,6 +4,8 @@ export const env: Env = {
  DATABASE_URL:'postgresql://huahuo_api:test@localhost:5432/huahuo_test_unit',
  REDIS_CACHE_URL:'redis://localhost:6379/0',REDIS_QUEUE_URL:'redis://localhost:6379/1',
  APP_ENV:'test',APP_TOKEN_SECRET:'a'.repeat(32),ADMIN_SESSION_SECRET:'b'.repeat(32),
+ HUAHUO_AGENT_TO_SERVER_API_KEY:'a'.repeat(43),
+ HUAHUO_SERVER_TO_AGENT_API_KEY:'b'.repeat(43),
  APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',LOG_LEVEL:'silent',
 };
 export const config = (role: Role = 'api-server') => loadConfig(role,env);

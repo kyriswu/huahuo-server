@@ -9,7 +9,7 @@ const resources = execFileSync('docker', ['volume','ls','--format','{{.Name}}'],
 const containers = execFileSync('docker', ['ps','-a','--filter','label=com.docker.compose.project=huahuo-server-dev','--format','{{.ID}}'], { encoding:'utf8' });
 if (resources.split('\n').some(x => x.startsWith('huahuo-server-dev_')) || containers.trim()) throw new Error('PROJECT_RESOURCES_EXIST_NO_PASSWORD_RESET');
 const env = { COMPOSE_PROJECT_NAME:'huahuo-server-dev',COMPOSE_PROFILES:'local-db',APP_ENV:'development',PROVIDER_MODE:'disabled',
- NODE_IMAGE:'node:24.14.0-bookworm-slim',PNPM_VERSION:'10.15.1',POSTGRES_IMAGE:'postgres:17.9-bookworm',REDIS_IMAGE:'redis:7.4.8-bookworm',
+ NODE_IMAGE:'node:26.12.1-bookworm-slim',PNPM_VERSION:'10.15.1',POSTGRES_IMAGE:'postgres:17.9-bookworm',REDIS_IMAGE:'redis:7.4.8-bookworm',
  BACKEND_IMAGE:'huahuo-server:p01',DATABASE_SSL_MODE:'disable',REDIS_CACHE_URL:'redis://redis:6379/0',REDIS_QUEUE_URL:'redis://redis:6379/1',
  API_BIND_HOST:'127.0.0.1',API_HOST_PORT:'3000',ADMIN_BIND_HOST:'127.0.0.1',ADMIN_HOST_PORT:'3001',APP_PUBLIC_BASE_URL:'http://127.0.0.1:3000',ADMIN_PUBLIC_BASE_URL:'http://127.0.0.1:3001' };
 for (const role of ['bootstrap','migrator','api','admin','worker','scheduler']) {

@@ -17,6 +17,10 @@ export function idempotencyKey(req:FastifyRequest,mode:'required'|'optional'|'fo
 }
 export function registerIdentityRoutes(app:FastifyInstance,identity:IdentityService,workspaces:WorkspaceService) {
  app.decorateRequest('authScope');
+ app.get('/.well-known/jwks.json',{schema:{querystring:S.obj({},S.Strict)}},async(_req,reply)=>{
+  reply.header('Cache-Control','public, max-age=300, must-revalidate');
+  return identity.jwks();
+ });
  const scope=(r:FastifyRequest)=>{if(!r.authScope)throw new DomainError(401,'UNAUTHORIZED');return r.authScope;};
  const key=(r:FastifyRequest)=>idempotencyKey(r,'required')!;
  const wid=(r:FastifyRequest)=>(r.params as {workspaceId:string}).workspaceId;

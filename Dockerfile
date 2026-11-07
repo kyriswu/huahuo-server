@@ -1,4 +1,4 @@
-ARG NODE_IMAGE=node:24.14.0-bookworm-slim
+ARG NODE_IMAGE=node:26.12.1-bookworm-slim
 FROM ${NODE_IMAGE} AS tooling
 ARG PNPM_VERSION=10.15.1
 RUN npm install -g pnpm@${PNPM_VERSION}
@@ -8,6 +8,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY tsconfig*.json ./
 COPY src ./src
+COPY admin-ui ./admin-ui
 RUN pnpm build && pnpm prune --prod
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
@@ -18,5 +19,6 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node migrations ./migrations
 COPY --chown=node:node scripts/healthcheck.mjs ./scripts/healthcheck.mjs
+COPY --chown=node:node scripts/rag-consistency.mjs ./scripts/rag-consistency.mjs
 USER node
 CMD ["node", "dist/entrypoints/api-server.js"]

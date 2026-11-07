@@ -12,7 +12,7 @@ OnboardingApi 将“内容线”映射为 creativePositioningId，且返回 crea
 
 App 内容同步 DTO 要求 bootstrapReceiptId 和 decimal cursor：工作区创建时持久化真实 bootstrap receipt，空内容 cursor=0；P06 才实施内容同步，不伪造已有文件。
 
-手机号 P02 明确限定中国大陆 CN：接收 11 位移动号码或 +86 E.164，规范化为 +86；其他区域明确拒绝，供应商/区域以后扩展。持久 phone lookup 为带服务密钥 HMAC，响应仅掩码。验证码/访问令牌/刷新令牌只存摘要；refresh 单次轮转，旧 token 复用撤销整个设备会话。App access 为短期不透明 Bearer（带固定 app_ 前缀），每次验证 PG 会话撤销状态；无需引入自签 JWT。
+手机号 P02 明确限定中国大陆 CN：接收 11 位移动号码或 +86 E.164，规范化为 +86；其他区域明确拒绝，供应商/区域以后扩展。持久 phone lookup 为带服务密钥 HMAC，响应仅掩码。Access JWT 使用 Server Ed25519 私钥签发，并通过 jti 绑定数据库会话；刷新令牌和 OTP 只存摘要；refresh 单次轮转，旧 token 复用撤销整个设备会话。
 
 幂等结果在 PostgreSQL 存储，按身份/操作/key/requestHash 校验。登录/SMS 中可能包含凭证的响应仅 AES-GCM 密文短期保存，令牌表仍只保存摘要。恢复旧登录响应前检查原 session 存活；刷新接口按 App 契约禁止幂等头，旧 refresh 重放不能获得新 token。
 

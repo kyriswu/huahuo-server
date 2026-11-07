@@ -23,12 +23,18 @@ interface Session {accessToken:string;refreshToken:string;user:{userId:string};w
 const remote=()=>`127.1.${Math.floor(next/250)}.${next++%250+1}`;
 const send=(app:FastifyInstance,url:string,payload?:object,headers:Record<string,string>={},method='POST',ip=remote())=>app.inject({method:method as 'POST',url,payload,headers,remoteAddress:ip});
 const auth=(s:Session)=>({authorization:'Bearer '+s.accessToken});
-async function ticket(){const phone='1380000'+String(next++).padStart(4,'0');const r=await send(api,'/api/v1/auth/sms-code',{phone,scene:'login'});expect(r.statusCode).toBe(200);return {phone,...r.json().data};}
-function loginBody(t:{phone:string;smsRequestId:string;testCode:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.testCode,deviceId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
+async function ticket(){const phone='1380000'+String(next++).padStart(4,'0');const r=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);return {phone,...r.json().data};}
+function loginBody(t:{phone:string;smsRequestId:string;testCode:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.testCode,clientType:'app',clientId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
 async function login():Promise<Session>{const t=await ticket(),r=await send(api,'/api/v1/auth/login',loginBody(t));expect(r.statusCode).toBe(200);return r.json().data;}
 beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));api=await buildApiServer({config:apiConfig});admin=await buildAdminServer({config:adminConfig});},20000);
 afterAll(async()=>{await api?.close();await admin?.close();await root.end();await adminPool.end();});
 describe('P02 real PG identity and scope',()=>{
+ it('publishes the Server JWT verification key through JWKS',async()=>{
+  const r=await send(api,'/.well-known/jwks.json',undefined,{},'GET');
+  expect(r.statusCode).toBe(200);
+  expect(r.json().keys).toHaveLength(1);
+  expect(r.json().keys[0]).toMatchObject({alg:'EdDSA',use:'sig',key_ops:['verify'],crv:'Ed25519'});
+ });
  it('App login/status/profile response has real required consumer fields',async()=>{
   const s=await login();expect(s.workspace.workspaceId).toMatch(/^[a-f0-9-]{36}$/);
   const r=await send(api,'/api/v1/me/status',undefined,auth(s),'GET');expect(r.statusCode).toBe(200);
@@ -36,14 +42,14 @@ describe('P02 real PG identity and scope',()=>{
   expect(r.json().data.basicPositioningCompleted).toBe(false);
   const p=await send(api,'/api/v1/me/profile',undefined,auth(s),'GET');expect(p.json().data.profile.displayName).toBe('花火用户');
   const tokens=await root.query('SELECT access_hash FROM user_sessions WHERE user_id=$1',[s.user.userId]);expect(tokens.rows[0].access_hash===s.accessToken).toBe(false);
-  expect((await root.query('SELECT count(*)::int n FROM agreement_acceptances WHERE user_id=$1',[s.user.userId])).rows[0].n).toBe(1);
+  expect((await root.query('SELECT count(*)::int n FROM user_agreement_acceptances WHERE user_id=$1',[s.user.userId])).rows[0].n).toBe(1);
  });
  it('OTP expiry, wrong phone, wrong purpose, attempt limit and repeat consume are rejected',async()=>{
-  const t=await ticket();expect((await send(api,'/api/v1/auth/sms-code',{phone:t.phone,scene:'reset-password'})).statusCode).toBe(400);
+  const t=await ticket();expect((await send(api,'/api/v1/auth/sms-code',{phone:t.phone,purpose:'reset-password'})).statusCode).toBe(400);
   const wrong={...loginBody(t),smsCode:t.testCode==='000000'?'111111':'000000'};
   for(let n=0;n<5;n++)expect((await send(api,'/api/v1/auth/login',wrong)).statusCode).toBe(401);
   expect((await send(api,'/api/v1/auth/login',loginBody(t))).statusCode).toBe(429);
-  const expired=await ticket();await root.query("UPDATE otp_requests SET expires_at=now()-interval '1 second' WHERE id=$1",[expired.smsRequestId]);
+  const expired=await ticket();await root.query("UPDATE otp_requests SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE id=$1",[expired.smsRequestId]);
   expect((await send(api,'/api/v1/auth/login',loginBody(expired))).statusCode).toBe(401);
   const valid=await ticket();expect((await send(api,'/api/v1/auth/login',{...loginBody(valid),phone:'13900009999'})).statusCode).toBe(401);
   expect((await send(api,'/api/v1/auth/login',loginBody(valid))).statusCode).toBe(200);
@@ -59,12 +65,15 @@ describe('P02 real PG identity and scope',()=>{
   const s=first.json().data;expect((await root.query('SELECT count(*)::int n FROM workspaces WHERE user_id=$1',[s.user.userId])).rows[0].n).toBe(1);
   const persisted=await root.query('SELECT response_cipher FROM api_idempotency WHERE key=$1',[key]);expect(persisted.rows[0].response_cipher.includes(s.refreshToken)).toBe(false);
  });
- it('repeated login creates one default workspace and current logout preserves other devices',async()=>{
+ it('App and Web login share one user and default workspace while current logout preserves the other client',async()=>{
   const t=await ticket(),first=await send(api,'/api/v1/auth/login',loginBody(t,'device-a'));
   await root.query("UPDATE otp_requests SET created_at=now()-interval '61 seconds' WHERE id=$1",[t.smsRequestId]);
-  const r=await send(api,'/api/v1/auth/sms-code',{phone:t.phone,scene:'login'});expect(r.statusCode).toBe(200);
-  const second=await send(api,'/api/v1/auth/login',loginBody({phone:t.phone,...r.json().data},'device-b'));
+  const r=await send(api,'/api/v1/auth/sms-code',{phone:t.phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);
+  const second=await send(api,'/api/v1/auth/login',{...loginBody({phone:t.phone,...r.json().data},'browser-b'),clientType:'web'});
   expect(second.statusCode).toBe(200);const a=first.json().data,b=second.json().data;
+  expect(a.user.userId).toBe(b.user.userId);
+  expect((await root.query('SELECT client_type FROM user_sessions WHERE user_id=$1 ORDER BY client_type',[a.user.userId])).rows.map(row=>row.client_type)).toEqual(['app','web']);
+  expect((await root.query('SELECT accepted_via FROM user_agreement_acceptances WHERE user_id=$1 ORDER BY accepted_via',[a.user.userId])).rows.map(row=>row.accepted_via)).toEqual(['app','web']);
   expect(a.workspace.workspaceId).toBe(b.workspace.workspaceId);
   expect((await send(api,'/api/v1/auth/logout',undefined,auth(a))).statusCode).toBe(200);
   expect((await send(api,'/api/v1/me/status',undefined,auth(a),'GET')).statusCode).toBe(401);
@@ -81,13 +90,36 @@ describe('P02 real PG identity and scope',()=>{
   expect((await send(api,'/api/v1/auth/refresh',{refreshToken:pair.refreshToken})).statusCode).toBe(401);
   expect((await send(api,'/api/v1/me/status',undefined,{authorization:'Bearer '+pair.accessToken},'GET')).statusCode).toBe(401);
  });
+ it('atomically consumes a Refresh Token once under concurrent requests and revokes the reused session',async()=>{
+  const s=await login();
+  const responses=await Promise.all([
+   send(api,'/api/v1/auth/refresh',{refreshToken:s.refreshToken}),
+   send(api,'/api/v1/auth/refresh',{refreshToken:s.refreshToken}),
+  ]);
+  expect(responses.map(response=>response.statusCode).sort()).toEqual([200,401]);
+  const pair=responses.find(response=>response.statusCode===200)!.json().data;
+  expect((await root.query('SELECT count(*)::int n FROM refresh_tokens t JOIN user_sessions s ON s.id=t.session_id WHERE s.user_id=$1',[s.user.userId])).rows[0].n).toBe(2);
+  expect((await root.query('SELECT revoked_at IS NOT NULL AS revoked FROM user_sessions WHERE user_id=$1',[s.user.userId])).rows[0].revoked).toBe(true);
+  expect((await root.query("SELECT count(*)::int n FROM user_audit_events WHERE user_id=$1 AND action='auth.refresh_reuse'",[s.user.userId])).rows[0].n).toBe(1);
+  expect((await send(api,'/api/v1/me/status',undefined,{authorization:'Bearer '+pair.accessToken},'GET')).statusCode).toBe(401);
+  expect((await send(api,'/api/v1/auth/refresh',{refreshToken:pair.refreshToken})).statusCode).toBe(401);
+ });
  it('expired access can refresh until absolute refresh expiry; malformed cross-audience tokens rejected',async()=>{
-  const s=await login();await root.query("UPDATE user_sessions SET access_expires_at=now()-interval '1 second' WHERE user_id=$1",[s.user.userId]);
+  const s=await login();await root.query("UPDATE user_sessions SET created_at=now()-interval '2 seconds',access_expires_at=now()-interval '1 second' WHERE user_id=$1",[s.user.userId]);
   expect((await send(api,'/api/v1/me/status',undefined,auth(s),'GET')).statusCode).toBe(401);
   expect((await send(api,'/api/v1/auth/refresh',{refreshToken:s.refreshToken})).statusCode).toBe(200);
-  const e=await login();await root.query("UPDATE user_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",[e.user.userId]);
+  const e=await login();await root.query("UPDATE user_sessions SET created_at=now()-interval '3 seconds',access_expires_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE user_id=$1",[e.user.userId]);
   expect((await send(api,'/api/v1/auth/refresh',{refreshToken:e.refreshToken})).statusCode).toBe(401);
   expect((await send(api,'/api/v1/me/status',undefined,{authorization:'Bearer admin_'+s.accessToken.slice(4)},'GET')).statusCode).toBe(401);
+ });
+ it('rejects valid tokens after their account or session relation disappears',async()=>{
+  const account=await login();
+  await root.query('DELETE FROM users WHERE id=$1',[account.user.userId]);
+  expect((await send(api,'/api/v1/me/status',undefined,auth(account),'GET')).statusCode).toBe(401);
+  expect((await send(api,'/api/v1/auth/refresh',{refreshToken:account.refreshToken})).statusCode).toBe(401);
+  const session=await login();
+  await root.query('DELETE FROM user_sessions WHERE user_id=$1',[session.user.userId]);
+  expect((await send(api,'/api/v1/auth/refresh',{refreshToken:session.refreshToken})).statusCode).toBe(401);
  });
  it('two users cannot read or mutate each other; forged identity header/body is ineffective',async()=>{
   const a=await login(),b=await login(),path='/api/v1/workspaces/'+b.workspace.workspaceId;
@@ -125,18 +157,18 @@ describe('P02 real PG identity and scope',()=>{
  });
  it('SMS sending is rate limited atomically and same-key retries reuse a receipt',async()=>{
   const phone='1390000'+String(next++).padStart(4,'0'),key=randomUUID(),h={'x-idempotency-key':key};
-  const responses=await Promise.all([send(api,'/api/v1/auth/sms-code',{phone,scene:'login'},h),send(api,'/api/v1/auth/sms-code',{phone,scene:'login'},h)]);
+  const responses=await Promise.all([send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'},h),send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'},h)]);
   expect(responses.some(r=>r.statusCode===200)).toBe(true);
-  const again=await send(api,'/api/v1/auth/sms-code',{phone,scene:'login'},h);expect(again.statusCode).toBe(200);
-  expect((await send(api,'/api/v1/auth/sms-code',{phone,scene:'login'})).statusCode).toBe(429);
+  const again=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'},h);expect(again.statusCode).toBe(200);
+  expect((await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'})).statusCode).toBe(429);
  });
  it('provider failures do not create usable OTP and disabled SMS never claims success',async()=>{
   const bad=new IdentityService(poolFor(apiConfig),apiConfig,{sms:{mode:'live',send:async()=>{throw new Error('private-provider-key');}}});
-  try{await expect(bad.sendCode({phone:'13999990001',scene:'login'},remote())).rejects.toMatchObject({code:'SMS_PROVIDER_FAILED'});
-   const row=await root.query('SELECT delivery FROM otp_requests WHERE phone_hash=$1',[mac(secret,'+8613999990001')]);expect(row.rows[0].delivery).toBe('failed');
+  try{await expect(bad.sendCode({phone:'13999990001',purpose:'sign_in'},remote())).rejects.toMatchObject({code:'SMS_PROVIDER_FAILED'});
+   const row=await root.query('SELECT delivery_status FROM otp_requests WHERE subject_hash=$1',[mac(secret,'+8613999990001')]);expect(row.rows[0].delivery_status).toBe('failed');
   }finally{await bad.pool.end();}
   const disabled=new IdentityService(poolFor(apiConfig),{...apiConfig,smsProvider:'disabled'});
-  try{await expect(disabled.sendCode({phone:'13999990002',scene:'login'},remote())).rejects.toMatchObject({code:'SMS_NOT_CONFIGURED'});}finally{await disabled.pool.end();}
+  try{await expect(disabled.sendCode({phone:'13999990002',purpose:'sign_in'},remote())).rejects.toMatchObject({code:'SMS_NOT_CONFIGURED'});}finally{await disabled.pool.end();}
  });
 });
 describe('independent admin identity, CSRF and RBAC',()=>{

@@ -14,7 +14,12 @@ export async function buildBase({ config, dependencies, backgroundHealthy }: Bui
     redact: { paths: ['req.headers.authorization','req.headers.cookie','res.headers.set-cookie','password','token','secret'], censor: '[REDACTED]' },
     serializers: { req: req => ({ method: req.method, route: req.routeOptions?.url }), err: () => ({ type: 'Error', message: 'Internal failure', stack: '' }) },
   }, genReqId: req => requestTrace(req.headers), logController: new LogController({ requestIdLogLabel: 'traceId' }),
-  requestTimeout: 15000, connectionTimeout: 10000, bodyLimit: 1048576,
+  // RAG queries wait on external embedding/rerank providers and Milvus before
+  // the first response byte. Keep the socket alive longer than the request
+  // deadline so a valid, slow query is not reset as `fetch failed`.
+  requestTimeout: config.httpRequestTimeoutMs,
+  connectionTimeout: config.httpConnectionTimeoutMs,
+  bodyLimit: 1048576,
   ajv: { customOptions: { removeAdditional: false } }, forceCloseConnections: 'idle' }).withTypeProvider<TypeBoxTypeProvider>();
   let stopping = false;
   // App buildCommonHeaders sends JSON Content-Type even for body-less POSTs.

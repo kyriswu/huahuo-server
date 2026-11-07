@@ -1,4 +1,4 @@
-import { describe,it,expect } from 'vitest';
+import { describe,it,expect,vi } from 'vitest';
 import { loadConfig } from '../../src/config/config.js';
 import { migrate } from '../../src/db/migrate.js';
 import { poolFor,createDependencies,isReady } from '../../src/plugins/dependencies.js';
@@ -14,7 +14,7 @@ if (!testUrl || !/^huahuo_test_[a-z0-9_]+$/.test(new URL(testUrl).pathname.slice
 const migrator=loadConfig('migrate',{DATABASE_URL:testUrl});
 describe('real PostgreSQL/Redis infrastructure',()=>{
  it('migration is repeatable and concurrent-safe',async()=>{
-  const first=await migrate(migrator);expect(first.current).toBe(8);
+  const first=await migrate(migrator);expect(first.current).toBe(1);
   const repeated=await Promise.all([migrate(migrator),migrate(migrator)]);
   expect(repeated.every(r=>r.applied.length===0)).toBe(true);
  },20000);
@@ -22,15 +22,32 @@ describe('real PostgreSQL/Redis infrastructure',()=>{
   const directory=await mkdtemp(join(tmpdir(),'p01-migration-'));
   const pool=poolFor(migrator);
   try {
-   const original=await readFile('migrations/0001_p01.sql','utf8');
-   await writeFile(join(directory,'0001_p01.sql'),original+'\n-- changed');
+   const original=await readFile('migrations/0001_initial_schema.sql','utf8');
+   await writeFile(join(directory,'0001_initial_schema.sql'),original+'\n-- changed');
    await expect(migrate(migrator,directory)).rejects.toThrow('MIGRATION_CHECKSUM_MISMATCH');
-   await writeFile(join(directory,'0001_p01.sql'),original);
-   await writeFile(join(directory,'0009_failure.sql'),'CREATE TABLE rollback_probe(id int); SELECT missing_column FROM rollback_probe;');
+   await writeFile(join(directory,'0001_initial_schema.sql'),original);
+   await writeFile(join(directory,'0002_failure.sql'),'CREATE TABLE rollback_probe(id int); SELECT missing_column FROM rollback_probe;');
    await expect(migrate(migrator,directory)).rejects.toThrow('MIGRATION_SQL_FAILED');
    expect((await pool.query("SELECT to_regclass('public.rollback_probe') AS name")).rows[0].name).toBeNull();
-   expect((await pool.query('SELECT count(*)::int AS n FROM schema_migrations')).rows[0].n).toBe(8);
+   expect((await pool.query('SELECT count(*)::int AS n FROM schema_migrations')).rows[0].n).toBe(1);
   }finally{await pool.end();await rm(directory,{recursive:true,force:true});}
+ });
+ it('rolls back a new migration that attempts to introduce a physical foreign key',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'no-foreign-key-migration-'));
+  const pool=poolFor(migrator);
+  try{
+   await writeFile(join(directory,'0002_foreign_key_probe.sql'),'CREATE TABLE foreign_key_probe(id uuid PRIMARY KEY,user_id uuid REFERENCES users(id));');
+   await expect(migrate(migrator,directory)).rejects.toThrow('MIGRATION_FOREIGN_KEYS_FORBIDDEN');
+   expect((await pool.query("SELECT to_regclass('public.foreign_key_probe') AS name")).rows[0].name).toBeNull();
+   expect((await pool.query('SELECT count(*)::int AS n FROM schema_migrations WHERE version=2')).rows[0].n).toBe(0);
+  }finally{await pool.end();await rm(directory,{recursive:true,force:true});}
+ });
+ it('rejects foreign-key drift after the schema has already migrated',async()=>{
+  const pool=poolFor(migrator);
+  try{
+   await pool.query('CREATE TABLE foreign_key_drift_probe(id uuid PRIMARY KEY,user_id uuid REFERENCES users(id))');
+   await expect(migrate(migrator)).rejects.toThrow('DATABASE_FOREIGN_KEYS_FORBIDDEN');
+  }finally{await pool.query('DROP TABLE IF EXISTS foreign_key_drift_probe');await pool.end();}
  });
  it('migration lock wait is bounded',async()=>{
   const pool=poolFor(migrator);const client=await pool.connect();
@@ -47,14 +64,14 @@ describe('real PostgreSQL/Redis infrastructure',()=>{
    const r=await pool.query('SELECT rolsuper,rolcreatedb,rolcreaterole FROM pg_roles WHERE rolname=current_user');expect(r.rows[0]).toEqual({rolsuper:false,rolcreatedb:false,rolcreaterole:false});
    await expect(pool.query('CREATE TABLE should_never_exist(id int)')).rejects.toThrow();
    await expect(pool.query('UPDATE schema_migrations SET checksum=checksum')).rejects.toThrow();
-   expect((await pool.query('SELECT count(*)::int AS n FROM schema_migrations')).rows[0].n).toBe(8);
+   expect((await pool.query('SELECT count(*)::int AS n FROM schema_migrations')).rows[0].n).toBe(1);
   }finally{await pool.end();}
  });
  it('Redis cache and queue round trip keys expire',async()=>{
   for(const name of ['REDIS_CACHE_URL','REDIS_QUEUE_URL']) {
    const url=process.env[name];if(!url||Number(new URL(url).pathname.slice(1))<10) throw new Error('TEST_REDIS_DB_REQUIRED');
    const redis=new Redis(url,{maxRetriesPerRequest:1});const key=`huahuo:p01:test:${randomUUID()}`;
-   try{await redis.set(key,'value','PX',250);expect(await redis.get(key)).toBe('value');expect(await redis.pttl(key)).toBeGreaterThan(0);await new Promise(r=>setTimeout(r,350));expect(await redis.get(key)).toBeNull();}
+   try{await redis.set(key,'value','PX',250);expect(await redis.get(key)).toBe('value');expect(await redis.pttl(key)).toBeGreaterThan(0);await vi.waitFor(async()=>expect(await redis.get(key)).toBeNull(),{timeout:3000,interval:50});}
    finally{await redis.del(key);redis.disconnect();}
   }
  });
@@ -65,5 +82,23 @@ describe('real PostgreSQL/Redis infrastructure',()=>{
   finally{await deps.close();}
   const future=createDependencies({...config,schemaMinVersion:99});
   try{expect((await future.check()).schema).toBe(false);}finally{await future.close();}
+ });
+ it('rejects a different baseline even with a higher migration number and recovers after correction',async()=>{
+  const config={...migrator,role:'worker' as const,databaseUrl:process.env.TEST_DATABASE_WORKER_URL!,redisCacheUrl:process.env.REDIS_CACHE_URL!,redisQueueUrl:process.env.REDIS_QUEUE_URL!};
+  const pool=poolFor(migrator),deps=createDependencies(config);
+  const original=(await pool.query<{checksum:string}>('SELECT checksum FROM schema_migrations WHERE version=1')).rows[0]!.checksum;
+  try{
+   await pool.query("UPDATE schema_migrations SET checksum=repeat('0',64) WHERE version=1");
+   await pool.query("INSERT INTO schema_migrations(version,checksum) VALUES(18,repeat('0',64))");
+   const health=await deps.check();
+   expect(health.postgres).toBe(true);expect(health.schema).toBe(false);
+   await pool.query('UPDATE schema_migrations SET checksum=$1 WHERE version=1',[original]);
+   await pool.query('DELETE FROM schema_migrations WHERE version=18');
+   expect((await deps.check()).schema).toBe(true);
+  }finally{
+   await pool.query('UPDATE schema_migrations SET checksum=$1 WHERE version=1',[original]);
+   await pool.query('DELETE FROM schema_migrations WHERE version=18');
+   await deps.close();await pool.end();
+  }
  });
 });

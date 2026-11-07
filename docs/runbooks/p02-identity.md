@@ -1,16 +1,37 @@
 # P02 身份运行与验证
 
-本机 Docker 项目仍为 huahuo-server-dev；运行镜像 huahuo-server:p02；迁移 version=2。`node scripts/verify.mjs` 包括类型/lint/build、unit/contract、真实临时 PG/Redis 集成测试。`node scripts/e2e-p02.mjs` 用同一个 P02 运行镜像启动两个临时 HTTP 容器和随机测试数据库，运行两用户与 Admin 会话流程，finally 仅删除这些测试资源。`node scripts/container-isolation.mjs` 仍验证四角色独立性和依赖恢复。
+本页契约已部署至现有阿里云 `huahuo` 数据库的新 `public`。旧Schema原样封存为 `initialization_backup`，未删除旧行，也未复制产品用户或会话；新 `users/user_sessions` 均为0。四角色healthy，API readiness与`EdDSA/Ed25519/server-current` JWKS真实验证通过；本轮未调用短信或模型。原JWT私钥和数据库凭据未变，旧产品会话不在新 `public` 生效。
+
+当前业务启动以根目录 `.env` 和 [本地开发手册](local-development.md) 为准，数据库以 `migrations/0001_initial_schema.sql` 为唯一初始化基线，不依赖历史迁移链。`node scripts/verify.mjs` 包括类型/lint/build、unit/contract、真实临时 PG/Redis 集成测试。`node scripts/e2e-p02.mjs` 启动两个临时 HTTP 容器和随机测试数据库，运行两用户与 Admin 会话流程，finally 仅删除这些测试资源。`node scripts/container-isolation.mjs` 验证四角色独立性和依赖恢复。上述 E2E 入口仅供独立本地测试栈；当前 API 连接云 PG 时会拒绝执行。
 
 ## 本地短信模拟
 
-API 显式注入 SMS_PROVIDER=mock、ALLOW_MOCK_PROVIDERS=true、SHOW_TEST_OTP=true；不会发送真实短信。`POST /api/v1/auth/sms-code` body `{phone:"13800000001",scene:"login"}` 返回 smsRequestId/cooldownSeconds/providerMode=mock/testCode。手机号仅支持 CN 11 位移动号或 +86 E.164，其他区域明确拒绝。
+API 显式注入 SMS_PROVIDER=mock、ALLOW_MOCK_PROVIDERS=true、SHOW_TEST_OTP=true；不会发送真实短信。`POST /api/v1/auth/sms-code` body `{phone:"13800000001",purpose:"sign_in"}` 返回 smsRequestId/cooldownSeconds/providerMode=mock/testCode。手机号仅支持 CN 11 位移动号或 +86 E.164，其他区域明确拒绝。
 
-登录 body 与 App 一致：phone、smsRequestId、smsCode、deviceId、agreementAccepted=true、agreementVersion、privacyVersion、clientVersion，可选 timeZone。当前开发版本均为 2026-08-20。不要将 testCode 或 token 写入共享日志。生产不允许 mock、测试 OTP 回显或开发绕过。
+登录请求必须包含 phone、smsRequestId、smsCode、clientType（`app` 或 `web`）、clientId、agreementAccepted=true、agreementVersion、privacyVersion、clientVersion，可选 timeZone。clientId 是客户端生成并保留的安装或浏览器实例标识；它不决定用户身份，用户身份由验证后的 JWT `sub` 决定。短信请求和登录请求只接受上述字段契约，不保留旧参数别名。当前开发协议与隐私版本均为 2026-08-20。不要将 testCode 或 token 写入共享日志。生产不允许 mock、测试 OTP 回显或开发绕过。
 
-Access 为 `app_` 不透明 Bearer，15 分钟，服务端每次查询 session；refresh 为 `refresh_` 随机值，30 天绝对期限，单次轮转，复用旧值撤销同设备 session 的全部当前凭证。token/OTP 表只存摘要；为了安全重试，登录幂等响应使用 AES-GCM 加密且仅保留 5 分钟重放有效期。数据库未实现物理 TTL 清理，过期记录不可再用，维护清理留待 P03。
+```json
+{
+  "phone": "13800000001",
+  "smsRequestId": "<smsRequestId>",
+  "smsCode": "<code>",
+  "clientType": "app",
+  "clientId": "<stable-client-instance-id>",
+  "agreementAccepted": true,
+  "agreementVersion": "2026-08-20",
+  "privacyVersion": "2026-08-20",
+  "clientVersion": "<client-version>",
+  "timeZone": "Asia/Shanghai"
+}
+```
 
-`POST /auth/logout` 撤销当前设备 session；`POST /auth/logout-all` 撤销该用户全部 session。不同 audience/prefix 不互通，普通 App token 永远不作为管理员凭证。
+`users` 是用户资料与状态的唯一主表，保存 display_name、time_zone、avatar_resource_id；仅 `status='active'` 的用户可以访问用户业务接口。手机号身份、摘要和掩码保存在 `user_identities`，响应中的 phoneMasked 从身份记录读取。会话保存在 `user_sessions`，记录 client_type 和 client_id；协议接受记录保存在 `user_agreement_acceptances`。这些表使用普通关联 ID 和业务校验，不建立物理外键。
+
+Access 为 Ed25519 签名的 JWT Bearer，默认 15 分钟，包含 `sub`、`iss`、`aud=["huahuo-server","huahuo-agent"]`、`iat`、`exp`、`jti`，并带有 `kid` 以支持公钥轮换；Server 校验自己的 audience `huahuo-server`，Agent 应校验 `huahuo-agent`。Token 绑定数据库会话；refresh 为至少 256 bit 的随机值，默认 30 天绝对期限，哈希存储、单次轮转，复用旧值撤销对应客户端 session。token/OTP 表只存摘要；为了安全重试，登录幂等响应使用 AES-GCM 加密且仅保留 5 分钟重放有效期。
+
+Server 在 `GET /.well-known/jwks.json` 发布 Ed25519 公钥。`APP_JWT_PRIVATE_KEY` 只在 Server 配置，`APP_JWT_PUBLIC_KEY` 可分发给 Agent；轮换时设置新的 `APP_JWT_KEY_ID`，并在过渡期提供 `APP_JWT_PREVIOUS_PUBLIC_KEY` 与 `APP_JWT_PREVIOUS_KEY_ID`。
+
+`POST /api/v1/auth/logout` 撤销当前客户端 session；`POST /api/v1/auth/logout-all` 撤销该用户全部 session。普通用户 Token 可以访问其 audience 声明的 Server 和 Agent，不能作为管理员凭证。
 
 ## 工作区和草稿
 
@@ -26,14 +47,14 @@ creative-positioning 仅存用户输入，返回 onboardingCompleted=false；当
 
 ```bash
 # 私密 JSON 文件放 .local/ 且 chmod 600；字段 username/password，密码至少16字符。
-docker compose --env-file .env.compose.local exec -T admin node dist/entrypoints/admin-bootstrap.js < .local/admin-bootstrap.json
+docker compose --env-file .env exec -T admin node dist/entrypoints/admin-bootstrap.js < .local/admin-bootstrap.json
 # 已有任何管理员时 bootstrap 拒绝再创建。
 # 撤销使用 username/reason JSON，不需要重启服务器。
-docker compose --env-file .env.compose.local exec -T admin node dist/entrypoints/admin-revoke-sessions.js < .local/admin-revoke.json
+docker compose --env-file .env exec -T admin node dist/entrypoints/admin-revoke-sessions.js < .local/admin-revoke.json
 ```
 
 等价 pnpm 命令：admin:bootstrap / admin:revoke-sessions（在配置好的 Admin 环境中执行）。本轮只在临时测试库运行 bootstrap，开发库保持无管理员，不替用户选择真实管理密码。
 
 `POST /admin/api/v1/login` 需要 JSON username/password 及精确 Origin=http://127.0.0.1:3001（生产使用配置 HTTPS origin）。返回 HttpOnly、SameSite=Strict、Path=/admin cookie 和 csrfToken；生产 cookie 追加 Secure，不设置 Domain。GET `/admin/api/v1/me` 取当前身份/CSRF；所有受保护写入要 Origin + X-CSRF-Token。
 
-operator 只能自己的 session；superadmin 可 POST `/admin/api/v1/sessions/{adminId}/revoke`，需要 reason，并追加审计。登录按 IP/用户名持久限流，未知用户同样受限。P14 再建设管理网页，此阶段 /admin 返回认证后的身份 JSON。
+operator 只能撤销自己的当前 session，superadmin 可 POST `/admin/api/v1/sessions/{adminId}/revoke`，需要 reason 并追加审计。登录按 IP/用户名持久限流，未知用户同样受限。浏览器请求 `/admin` 的 HTML 时显示管理页，页面使用 `/admin/api/v1/me` 恢复会话。`/admin` 的 JSON 请求继续返回认证后的身份。

@@ -1,5 +1,5 @@
 import { beforeAll,afterAll,it,expect } from 'vitest';
-import { randomUUID,randomBytes } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../src/config/config.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
@@ -12,17 +12,18 @@ import { buildApiServer } from '../../src/apps/api-server.js';
 import { buildAdminServer } from '../../src/apps/admin.js';
 import { AdminService } from '../../src/modules/admin/service.js';
 import type { Scope } from '../../src/modules/identity/store.js';
+import { fixtureAccessToken, insertFixtureUser, insertFixtureSession, testJwtEnv } from './jwt-fixture.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL!;
 if(!migrationUrl||!/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('TEST_DB_REQUIRED');
-const env={...process.env,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),ADMIN_SESSION_SECRET:'admin-'.repeat(12),APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',SMS_PROVIDER:'disabled',REDIS_KEY_PREFIX:'p03-'+randomUUID(),ENABLE_DEMO_TASKS:'true'};
+const env={...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),ADMIN_SESSION_SECRET:'admin-'.repeat(12),APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',SMS_PROVIDER:'disabled',REDIS_KEY_PREFIX:'p03-'+randomUUID(),ENABLE_DEMO_TASKS:'true'};
 const cfg=(role:'api-server'|'worker'|'scheduler'|'admin')=>loadConfig(role,{...env,DATABASE_URL:process.env[`TEST_DATABASE_${role==='api-server'?'API':role.toUpperCase()}_URL`]});
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:migrationUrl})),apiPool=poolFor(cfg('api-server')),workerPool=poolFor(cfg('worker')),schedulerPool=poolFor(cfg('scheduler'));
-const service=new TaskService(apiPool),engine=new TaskEngine(workerPool,2000);
+const service=new TaskService(apiPool,cfg('api-server').appTokenSecret!),engine=new TaskEngine(workerPool,2000);
 const publisher=new QueuePublisher(cfg('scheduler'));const scheduler=new TaskScheduler(schedulerPool,publisher,randomUUID(),1);
 let a:Scope,b:Scope,wa:string,wb:string;
 async function user(){const userId=randomUUID(),sessionId=randomUUID(),wid=randomUUID();
- await root.query('INSERT INTO app_users(id,phone_hash,phone_masked) VALUES($1,$2,$3)',[userId,randomUUID(),'138****0000']);
- await root.query("INSERT INTO user_sessions(id,user_id,device_id,access_hash,access_expires_at,expires_at) VALUES($1,$2,'fixture',$3,now()+interval '1 hour',now()+interval '1 day')",[sessionId,userId,randomUUID()]);
+ await insertFixtureUser(root,userId);
+ await insertFixtureSession(root,userId,sessionId);
  await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'fixture',true,$3)",[wid,userId,randomUUID()]);return {scope:{userId,sessionId,traceId:randomUUID()},wid};
 }
 const create=async(text='private input')=>(await service.create(a,{workspaceId:wa,text},randomUUID())).task.taskId;
@@ -38,6 +39,41 @@ it('atomic acceptance, concurrent idempotency replay/conflict and scope boundari
  await expect(service.create(a,{workspaceId:wb,text:'hack'},key)).rejects.toMatchObject({statusCode:404});
  for(const read of [()=>service.detail(b,x.task.taskId),()=>service.events(b,x.task.taskId,0,100),()=>service.result(b,x.task.taskId),()=>service.mutate(b,x.task.taskId,'cancel',randomUUID(),{})])await expect(read()).rejects.toMatchObject({statusCode:404});
  const row=await root.query('SELECT count(*)::int n FROM task_outbox WHERE task_id=$1',[x.task.taskId]);expect(row.rows[0].n).toBe(1);
+ const stored=(await root.query('SELECT response_cipher,expires_at>now() valid FROM api_idempotency WHERE scope=$1 AND operation=$2 AND key=$3',[`${a.userId}:${wa}`,'demo.create',key])).rows[0];
+ expect(stored.valid).toBe(true);expect(stored.response_cipher).not.toContain(x.task.taskId);
+});
+it('expired task keys cannot repeat mutations, and revoked sessions cannot replay cached responses',async()=>{
+ const u=await user(),key=randomUUID(),input={workspaceId:u.wid,text:'private task'};
+ const first=await service.create(u.scope,input,key);
+ await root.query("UPDATE api_idempotency SET expires_at=now()-interval '1 second' WHERE scope=$1 AND operation='demo.create' AND key=$2",[`${u.scope.userId}:${u.wid}`,key]);
+ await expect(service.create(u.scope,input,key)).rejects.toMatchObject({statusCode:409,code:'IDEMPOTENCY_KEY_EXPIRED'});
+ expect((await root.query('SELECT count(*)::int n FROM tasks WHERE user_id=$1',[u.scope.userId])).rows[0].n).toBe(1);
+ const cancelKey=randomUUID();await service.mutate(u.scope,first.task.taskId,'cancel',cancelKey,{});
+ await root.query('UPDATE user_sessions SET revoked_at=now() WHERE id=$1',[u.scope.sessionId]);
+ await expect(service.mutate(u.scope,first.task.taskId,'cancel',cancelKey,{})).rejects.toMatchObject({statusCode:401,code:'AUTH_SESSION_EXPIRED'});
+});
+it('Admin retries use the shared encrypted store with separate caller scope and least-privilege credentials',async()=>{
+ const id=await create();await root.query("UPDATE tasks SET state='failed',retryable=true WHERE id=$1",[id]);
+ const adminPool=poolFor(cfg('admin')),adminTasks=new TaskService(adminPool,env.ADMIN_SESSION_SECRET),key=randomUUID(),adminId=randomUUID();
+ await root.query("INSERT INTO admin_users(id,username,password_hash,role) VALUES($1,$2,'fixture','superadmin')",[adminId,`retry-${adminId}`]);
+ const adminScope={adminId,sessionId:randomUUID(),role:'superadmin' as const,username:`retry-${adminId}`};
+ try{
+  const initial=await adminTasks.adminRetry(adminScope,id,key,'operator retry','trace');
+  const replay=await adminTasks.adminRetry(adminScope,id,key,'operator retry','trace');
+  expect(replay).toEqual(initial);expect(initial.task.state).toBe('queued');
+  const rows=(await root.query('SELECT scope,response_cipher FROM api_idempotency WHERE operation=$1 AND key=$2',[`admin.retry:${id}`,key])).rows;
+  expect(rows).toHaveLength(1);expect(rows[0].scope).toBe(adminId);expect(rows[0].response_cipher).not.toContain(id);
+  expect((await root.query("SELECT count(*)::int n FROM admin_audit_events WHERE admin_id=$1 AND action='task.retry' AND target_id=$2",[adminId,id])).rows[0].n).toBe(1);
+  await expect(adminTasks.adminRetry({...adminScope,role:'operator'},id,key,'operator retry','trace')).rejects.toMatchObject({statusCode:403});
+ }finally{await root.query('DELETE FROM admin_audit_events WHERE admin_id=$1',[adminId]);await root.query('DELETE FROM admin_users WHERE id=$1',[adminId]);await adminPool.end();}
+});
+it('excludes a task whose workspace belongs to a different user without relying on a composite FK',async()=>{
+ const id=randomUUID();
+ await root.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state) VALUES($1,$2,$3,'demo.digest','content','queued')",[id,a.userId,wb]);
+ try{
+  expect((await service.running(a)).items.some(task=>task.taskId===id)).toBe(false);
+  await expect(service.detail(a,id)).rejects.toMatchObject({code:'TASK_NOT_FOUND'});
+ }finally{await root.query('DELETE FROM tasks WHERE id=$1',[id]);}
 });
 it('duplicate delivery and concurrent workers create exactly one PG result; event replay ordered',async()=>{
  const id=await create('hello');const attempts=await Promise.all([engine.claim(id,randomUUID()),engine.claim(id,randomUUID())]);expect(attempts.filter(Boolean)).toHaveLength(1);
@@ -47,7 +83,10 @@ it('duplicate delivery and concurrent workers create exactly one PG result; even
  const rest=await service.events(a,id,page.nextSequence,100);expect(rest.items.map(e=>e.sequence)).toEqual([3]);
 });
 it('expired worker lease is recovered; stale attempt cannot overwrite new result',async()=>{
- const id=await create(),old=(await engine.claim(id,randomUUID()))!;await expire(id);await scheduler.recover();const next=(await engine.claim(id,randomUUID()))!;
+ const id=await create(),old=(await engine.claim(id,randomUUID()))!;expect(old).not.toBeNull();await expire(id);await scheduler.recover();
+ const recovered=(await root.query('SELECT state,attempt_no,max_attempts,external_state,available_at<=now() AS available,lease_until FROM tasks WHERE id=$1',[id])).rows[0];
+ expect(recovered).toMatchObject({state:'queued',attempt_no:1,max_attempts:3,external_state:'none',available:true,lease_until:null});
+ const next=await engine.claim(id,randomUUID());expect(next).not.toBeNull();if(!next)throw new Error('RECOVERED_TASK_NOT_CLAIMABLE');
  expect(next.attempt).toBe(2);expect(await engine.finish(old,hash('stale'),5)).toBe(false);expect(await engine.execute(next)).toBe(true);
  expect((await service.detail(a,id)).task.attempt).toBe(2);
 });
@@ -92,7 +131,7 @@ it('enqueue before ack crash and lost Redis job recover from PG; only ID enters 
 },15000);
 it('real API contract: task wrapper, auth, schema, result readiness and Admin CSRF/RBAC',async()=>{
  const api=await buildApiServer({config:cfg('api-server')}),admin=await buildAdminServer({config:cfg('admin')});
- const token='app_'+randomBytes(32).toString('base64url');await root.query('UPDATE user_sessions SET access_hash=$2 WHERE id=$1',[a.sessionId,hash(token)]);
+ const token=await fixtureAccessToken(a.userId,a.sessionId);await root.query('UPDATE user_sessions SET access_hash=$2 WHERE id=$1',[a.sessionId,hash(token)]);
  const headers={authorization:'Bearer '+token,'x-idempotency-key':randomUUID()};
  try{
   const createResponse=await api.inject({method:'POST',url:'/api/v1/tasks/demo',headers,payload:{workspaceId:wa,text:'contract'}});expect(createResponse.statusCode).toBe(200);const id=createResponse.json().data.task.taskId;

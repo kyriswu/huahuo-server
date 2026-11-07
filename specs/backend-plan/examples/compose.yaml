@@ -12,7 +12,7 @@ x-backend: &backend
     context: .
     dockerfile: Dockerfile
     args:
-      NODE_IMAGE: ${NODE_IMAGE:?Set a pinned Node 24 compatible image}
+      NODE_IMAGE: ${NODE_IMAGE:?Set a pinned Node 26 compatible image}
       PNPM_VERSION: ${PNPM_VERSION:?Set an exact stable pnpm version}
   restart: unless-stopped
   init: true
@@ -36,7 +36,7 @@ x-app-env: &app-env
   DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-disable}
   DATABASE_SSL_CA_FILE: ${DATABASE_SSL_CA_FILE:-}
   DATABASE_STATEMENT_TIMEOUT_MS: ${DATABASE_STATEMENT_TIMEOUT_MS:-5000}
-  DB_SCHEMA_MIN_VERSION: ${DB_SCHEMA_MIN_VERSION:-1}
+      DB_SCHEMA_MIN_VERSION: ${DB_SCHEMA_MIN_VERSION:-1}
   REDIS_CACHE_URL: ${REDIS_CACHE_URL:-redis://redis:6379/0}
   REDIS_QUEUE_URL: ${REDIS_QUEUE_URL:-redis://redis:6379/1}
   REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-huahuo-dev}

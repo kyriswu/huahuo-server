@@ -93,3 +93,16 @@ App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本阶段核对 `
 - App 参照确认人工标签规范为每篇最多 20 个、每个 1–24 Unicode 字符；后端按此拒绝超限并返回 tag ETag。新增 tag CRUD/建议/提取路由为后端补充契约，保持 envelope、Bearer、Idempotency-Key 和 If-Match 约定。
 - App `contentNavigation` 请求目前只发送 workspace/map 且解析 `items/map/contentCursor`；后端提供真实相对路径、revision/version、ownerRef，并额外返回有界 nodes/edges。App 当前 `MiroFishGraphMapper.fromContentNavigation` 只按路径建层级边，忽略显式后端 edges；因此共同标签边已在 API/契约测试中验证，但 App 端完整可视化接线待 P15，不修改 Flutter。
 - 搜索保持 `ownerRef.kind=hnote`、`keywordReadiness=current`、`vectorReadiness/vectorStatus=unavailable`，不返回正文/snippet/evidence，保留关键词/标签/来源/时间过滤。
+
+## 文档处理与 RAG 当前契约
+
+完整规范见[模块化文档处理](runbooks/modular-document-processing.md)及[Milvus 检索](runbooks/milvus.md)。文件业务与Note业务分别保存完整正文、Chunk及处理状态，不合并业务表。
+
+- `POST/GET /api/v1/rag/ingestions`：独立OSS文件入库，POST返回`jobId`/`documentVersionId`及当前阶段，现有Worker异步完成解析、章节/TOC、子Chunk及索引；不要求Note/Resource ID。TOC独立补偿和删除动作使用该任务路径。
+- `POST/GET /api/v1/workspaces/{workspaceId}/notes/{noteId}/document-ingestion` 创建和列出入库任务。启用 Profile 后，Note 创建与 raw 编辑同事务排队。列表返回 `jobId` 和 `tocStatus`，`GET .../document-ingestion/{jobId}` 返回任务快照的 TOC。Note 检索逐块开放 `ready` 的当前块。
+- Note 和知识库文件的入库详情都可追加 `/sections/{sectionId}` 读取精确原文。两个 GET 契约均使用用户 JWT，目录和正文固定到同一次入库。Note 正文 Chunk 以 300 字为切分目标，Note 和文件的硬上限分别为 500 和 2,000 个 Unicode 码点，API 位置仍使用 UTF-16。
+- `POST /api/v1/rag/query`和`/api/v1/huahuo_rag/query`：用户JWT；`POST /internal/v1/rag/query`：JWT加方向Service Key。`sourceType=file|note`选择已注册业务目标，查询不要求documentVersionId/indexBuildId，也不接受任意连接或Collection。
+- Chunk的`parent_id`始终指向整篇来源内容记录；临时章节不建立Parent实体。结果返回整篇`parentId`与Child evidence，不回溯章节块，章节`context`为null。
+- Milvus执行Dense、BM25、Hybrid及RRF；PG执行权限、状态与真实正文回查；独立Reranker精排。独立Note业务keyword接口和标签图谱不因此切换检索引擎。
+
+Flutter 的 `knowledge_note_port.dart` 已经把手动 Note 的 raw Markdown 发到现有 Note 创建接口，服务端复用同一自动入库路径。目录和按节读取是新增后端契约，客户端接线及真机验收待后续完成。

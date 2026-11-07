@@ -5,6 +5,10 @@ import { event, enqueueIntent } from '../tasks/model.js';
 import type { Attempt } from '../tasks/engine.js';
 import type { StoragePort } from './port.js';
 export async function storageJob(tx:pg.PoolClient,user:string,workspace:string,operation:'inspect'|'delete'|'expire',target:string){
+ const targetTable=operation==='expire'?'upload_sessions':'resources';
+ const targetKey=operation==='expire'?'upload_id':'resource_id';
+ const source=await tx.query(`SELECT 1 FROM ${targetTable} WHERE ${targetKey}=$1 AND user_id=$2 AND workspace_id=$3 FOR SHARE`,[target,user,workspace]);
+ if(!source.rowCount)throw new Error('STORAGE_TARGET_NOT_FOUND');
  const id=randomUUID();await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state) VALUES($1,$2,$3,$4,$5,'queued')",[id,user,workspace,`storage.${operation}`,operation==='inspect'?'content':'maintenance']);
  await tx.query(`INSERT INTO storage_jobs(task_id,${operation==='expire'?'upload_id':'resource_id'},operation) VALUES($1,$2,$3)`,[id,target,operation]);await enqueueIntent(tx,id);await event(tx,id);return id;
 }
@@ -17,7 +21,7 @@ export class StorageJobs {
  constructor(readonly pool:pg.Pool,readonly storage:StoragePort){}
  async execute(a:Attempt){
  const j=(await this.pool.query('SELECT * FROM storage_jobs WHERE task_id=$1',[a.task.id])).rows[0];if(!j)throw new Error('STORAGE_JOB_NOT_FOUND');
- const s=(await this.pool.query(j.operation==='expire'?'SELECT *,resource_id AS object_key FROM upload_sessions WHERE upload_id=$1':'SELECT * FROM resources WHERE resource_id=$1',[j.operation==='expire'?j.upload_id:j.resource_id])).rows[0];if(!s)throw new Error('STORAGE_TARGET_NOT_FOUND');
+ const s=(await this.pool.query(j.operation==='expire'?'SELECT *,resource_id AS object_key FROM upload_sessions WHERE upload_id=$1':'SELECT * FROM resources WHERE resource_id=$1',[j.operation==='expire'?j.upload_id:j.resource_id])).rows[0];if(!s||s.user_id!==a.task.user_id||s.workspace_id!==a.task.workspace_id)throw new Error('STORAGE_TARGET_NOT_FOUND');
  if(j.operation==='inspect'){
   if(s.status!=='ready')return {digest:s.sha256,bytes:0};
   const meta=await this.storage.stat(s.object_key,s.mime_type);const valid=meta.sha256===s.sha256&&meta.bytes===Number(s.size_bytes);
@@ -34,7 +38,7 @@ export class StorageJobs {
   // Local partial files are removed only by the Worker after upload expiry.
   if('cleanup' in this.storage && typeof this.storage.cleanup==='function')await this.storage.cleanup(s.object_key);
   if(j.operation==='delete'){
-   await tx.query("UPDATE resources SET status='deleted',deleted_at=now() WHERE resource_id=$1",[s.resource_id]);await tx.query('UPDATE resource_delete_requests SET completed_at=now() WHERE resource_id=$1',[s.resource_id]);
+   await tx.query("UPDATE resources SET status='deleted',deleted_at=now() WHERE resource_id=$1",[s.resource_id]);
    await tx.query("UPDATE storage_reservations SET status='released',updated_at=now() WHERE user_id=$1 AND resource_key=$2",[s.user_id,`resource:${s.resource_id}`]);
   }
   return {digest:s.sha256??s.received_sha256??'expired',bytes:0};

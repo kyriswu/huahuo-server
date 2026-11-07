@@ -23,12 +23,11 @@ export class TaskScheduler {
  });}
  async schedules(){return transaction(this.pool,async tx=>{
   const r=await tx.query<{id:string;window:string}>(`SELECT id,floor(extract(epoch from now())/interval_seconds)::bigint::text AS window FROM task_schedules
-   WHERE enabled AND (last_window IS NULL OR last_window<floor(extract(epoch from now())/interval_seconds)) AND (lease_until IS NULL OR lease_until<now()) FOR UPDATE SKIP LOCKED`);
+   WHERE enabled AND (last_window IS NULL OR last_window<floor(extract(epoch from now())/interval_seconds)) FOR UPDATE SKIP LOCKED`);
   for(const s of r.rows){
-   await tx.query("UPDATE task_schedules SET lease_owner=$2,lease_until=now()+interval '10 seconds' WHERE id=$1",[s.id,this.owner]);
    const id=randomUUID();await tx.query("INSERT INTO tasks(id,kind,queue,state) VALUES($1,'maintenance.check','maintenance','queued')",[id]);
    await tx.query('INSERT INTO task_schedule_windows(schedule_id,window_id,task_id) VALUES($1,$2,$3)',[s.id,s.window,id]);
-   await enqueueIntent(tx,id);await event(tx,id);await tx.query('UPDATE task_schedules SET last_window=$2,lease_owner=NULL,lease_until=NULL WHERE id=$1',[s.id,s.window]);
+   await enqueueIntent(tx,id);await event(tx,id);await tx.query('UPDATE task_schedules SET last_window=$2 WHERE id=$1',[s.id,s.window]);
   }return r.rowCount;
  });}
  async claim():Promise<Delivery|null>{return transaction(this.pool,async tx=>{

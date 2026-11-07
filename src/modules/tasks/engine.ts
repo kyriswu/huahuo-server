@@ -1,3 +1,4 @@
+import type { TextIngestionJobs } from '../text-ingestion/jobs.js';
 import type pg from 'pg';
 import type { StorageJobs } from '../storage/jobs.js';
 import { randomUUID } from 'node:crypto';
@@ -5,9 +6,11 @@ import { transaction } from '../identity/store.js';
 import { type TaskRow, hash, event, enqueueIntent, retryDelay } from './model.js';
 import type { BillingService } from '../billing/service.js';
 import { UnavailableTagExtractor, extractBoundedTags, validateTagLabels, type TagExtractor } from '../assets/tag-extractor.js';
+import type { RagIngestionJobs } from '../rag/jobs.js';
+import type { ManualTextIngestionJobs } from '../ingestion/jobs.js';
 export interface Attempt {task:TaskRow;owner:string;version:number;attempt:number;}
 export class TaskEngine {
- constructor(readonly pool:pg.Pool,readonly leaseMs=15000,readonly billing?:BillingService,readonly storage?:StorageJobs,readonly tagExtractor:TagExtractor=new UnavailableTagExtractor('disabled')){}
+ constructor(readonly pool:pg.Pool,readonly leaseMs=15000,readonly billing?:BillingService,readonly storage?:StorageJobs,readonly tagExtractor:TagExtractor=new UnavailableTagExtractor('disabled'),readonly rag?:RagIngestionJobs,readonly manualText?:ManualTextIngestionJobs,readonly textIngestion?:TextIngestionJobs){}
  async claim(id:string,owner:string):Promise<Attempt|null>{return transaction(this.pool,async tx=>{
   const r=await tx.query<TaskRow>("SELECT * FROM tasks WHERE id=$1 AND state IN ('queued','retry_scheduled') AND available_at<=now() AND external_state='none' FOR UPDATE",[id]);const t=r.rows[0];if(!t)return null;
   if(t.attempt_no>=t.max_attempts){await tx.query("UPDATE tasks SET state='failed',error_code='ATTEMPTS_EXHAUSTED',retryable=true WHERE id=$1",[id]);if(this.billing&&t.reservation_id)await this.billing.releaseReservationTx(tx,t.reservation_id);await event(tx,id);return null;}
@@ -41,7 +44,11 @@ export class TaskEngine {
   if(r.rowCount){await tx.query("UPDATE task_attempts SET state='waiting_external',finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[a.task.id,a.attempt]);await event(tx,a.task.id);}return r.rowCount===1;
  });}
  async execute(a:Attempt){
+  if(a.task.kind==='text.ingest'&&this.textIngestion){const result=await this.textIngestion.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind.startsWith('storage.')&&this.storage){const result=await this.storage.execute(a);return this.finish(a,result.digest,result.bytes);}
+  if(a.task.kind==='document.text-cleanup'&&this.manualText){const result=await this.manualText.executeCleanup(a);return this.finish(a,result.digest,result.bytes);}
+  if(['rag.document-ingest','rag.toc-refresh','rag.document-cleanup'].includes(a.task.kind)&&this.rag){const result=await this.rag.execute(a);return this.finish(a,result.digest,result.bytes);}
+  if(a.task.kind==='document.text-index'&&this.manualText){const result=await this.manualText.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind==='asset.tag-extract'){
    if(!await this.heartbeat(a))return false;
    const input=(await this.pool.query('SELECT body FROM task_inputs WHERE id=$1 AND user_id=$2 AND workspace_id=$3',[a.task.input_id,a.task.user_id,a.task.workspace_id])).rows[0];

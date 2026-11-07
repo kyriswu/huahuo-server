@@ -1,7 +1,8 @@
+import { idempotent } from '../../lib/idempotency.js';
 import type pg from 'pg';
 import { attachResource } from '../storage/references.js';
 import { randomUUID } from 'node:crypto';
-import { transaction, assertScope, audit, idempotent, DomainError, type Scope } from '../identity/store.js';
+import { transaction, assertScope, audit, DomainError, type Scope } from '../identity/store.js';
 import { status, validateTimeZone } from '../identity/service.js';
 export interface WorkspaceRow { id:string;user_id:string;display_name:string;state:string;is_default:boolean;revision:number;bootstrap_receipt_id:string; }
 interface ProfileRow { id:string;name:string;industry:string;account_goal:string;target_audience:string|null;common_expressions:string[];version:number; }
@@ -21,13 +22,15 @@ export class WorkspaceService {
   return transaction(this.pool,async tx=>{
    await assertScope(tx,scope);
    // Serializes default switches and profile updates for this personal account.
-   await tx.query('SELECT id FROM app_users WHERE id=$1 FOR UPDATE',[scope.userId]);
+   const user=await tx.query("SELECT id FROM users WHERE id=$1 AND status='active' FOR UPDATE",[scope.userId]);
+   if(!user.rowCount)throw new DomainError(401,'UNAUTHORIZED');
    return idempotent(tx,this.secret,scope.userId,operation,key,input,async()=>{const out=await fn(tx);await audit(tx,scope,operation);return out;});
   });
  }
  getStatus(scope:Scope){return this.read(scope,tx=>status(tx,scope));}
  getProfile(scope:Scope){return this.read(scope,async tx=>{
-  const r=await tx.query<{displayName:string;updatedAt:Date;avatarResourceId:string|null}>('SELECT display_name AS "displayName",updated_at AS "updatedAt",avatar_resource_id AS "avatarResourceId" FROM app_users WHERE id=$1',[scope.userId]);
+  const r=await tx.query<{displayName:string;updatedAt:Date;avatarResourceId:string|null}>("SELECT display_name AS \"displayName\",updated_at AS \"updatedAt\",avatar_resource_id AS \"avatarResourceId\" FROM users WHERE id=$1 AND status='active'",[scope.userId]);
+  if(!r.rows[0])throw new DomainError(401,'UNAUTHORIZED');
   return {profile:{...r.rows[0]!,updatedAt:r.rows[0]!.updatedAt.toISOString()}};
  });}
  updateProfile(scope:Scope,input:{displayName:string;avatarResourceId?:string|null},key:string){
@@ -36,14 +39,14 @@ export class WorkspaceService {
    if(input.avatarResourceId!==undefined){
     if(input.avatarResourceId){try{await attachResource(tx,scope.userId,input.avatarResourceId,'avatar',scope.userId);}catch(e){if(e instanceof DomainError&&e.statusCode===404)throw new DomainError(409,'AVATAR_RESOURCE_NOT_VERIFIED');throw e;}}
     await tx.query("DELETE FROM resource_refs WHERE user_id=$1 AND ref_kind='avatar' AND ref_id_external=$1 AND resource_id IS DISTINCT FROM $2::uuid",[scope.userId,input.avatarResourceId]);
-    await tx.query('UPDATE app_users SET avatar_resource_id=$2 WHERE id=$1',[scope.userId,input.avatarResourceId]);
+    await tx.query('UPDATE users SET avatar_resource_id=$2 WHERE id=$1',[scope.userId,input.avatarResourceId]);
    }
-   const r=await tx.query<{displayName:string;updatedAt:Date;avatarResourceId:string|null}>('UPDATE app_users SET display_name=$1,updated_at=now() WHERE id=$2 RETURNING display_name AS "displayName",updated_at AS "updatedAt",avatar_resource_id AS "avatarResourceId"',[input.displayName.trim(),scope.userId]);
+   const r=await tx.query<{displayName:string;updatedAt:Date;avatarResourceId:string|null}>('UPDATE users SET display_name=$1,updated_at=now() WHERE id=$2 RETURNING display_name AS "displayName",updated_at AS "updatedAt",avatar_resource_id AS "avatarResourceId"',[input.displayName.trim(),scope.userId]);
    return {profile:{...r.rows[0]!,updatedAt:r.rows[0]!.updatedAt.toISOString()}};
   });
  }
  timezone(scope:Scope,zone:string,key:string){validateTimeZone(zone);return this.write(scope,'profile.timezone',key,{zone},async tx=>{
-  await tx.query('UPDATE app_users SET time_zone=$1,updated_at=now() WHERE id=$2',[zone,scope.userId]);return {timeZone:zone};
+  await tx.query('UPDATE users SET time_zone=$1,updated_at=now() WHERE id=$2',[zone,scope.userId]);return {timeZone:zone};
  });}
  list(scope:Scope){return this.read(scope,async tx=>({items:(await tx.query<WorkspaceRow>('SELECT * FROM workspaces WHERE user_id=$1 ORDER BY created_at,id',[scope.userId])).rows.map(workspaceDto)}));}
  detail(scope:Scope,id:string){return this.read(scope,async tx=>{

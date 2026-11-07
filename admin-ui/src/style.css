@@ -1,0 +1,29 @@
+@import "tailwindcss" source("./");
+
+@theme {
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --color-console-canvas: #f7f7fa;
+  --color-console-line: #e7e6ee;
+  --color-console-ink: #202038;
+  --color-console-muted: #606378;
+  --color-console-accent: #5344ad;
+  --color-console-accent-soft: #efecfc;
+  --shadow-console-panel: 0 1px 2px rgb(31 28 61 / 0.04), 0 8px 24px rgb(31 28 61 / 0.035);
+}
+
+@layer base {
+  body {
+    color-scheme: light;
+    @apply bg-console-canvas text-console-ink antialiased;
+  }
+}
+
+@layer components {
+  .workbench-hero {
+    background: linear-gradient(112deg, #fff 4%, #faf9ff 60%, #eeebfc 100%);
+  }
+
+  .console-panel > summary::-webkit-details-marker {
+    display: none;
+  }
+}

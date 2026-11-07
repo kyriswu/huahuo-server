@@ -1,7 +1,7 @@
 import { TaskService } from '../tasks/service.js';
 import { TaskSchema,MutationSchema,taskErrors } from '../tasks/routes.js';
 import { idempotencyKey } from '../identity/routes.js';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { ErrorSchema, success } from '../../contracts/envelope.js';
 import type { AppConfig } from '../../config/config.js';
@@ -13,7 +13,13 @@ function sessionCookie(req:FastifyRequest){
  const values=(req.headers.cookie??'').split(';').map(x=>x.trim()).filter(x=>x.startsWith('hh_admin_session='));
  if(values.length!==1)return undefined;return values[0]!.slice('hh_admin_session='.length);
 }
-export function registerAdminRoutes(app:FastifyInstance,service:AdminService,config:AppConfig,tasks:TaskService){
+export function registerAdminRoutes(
+ app: FastifyInstance,
+ service: AdminService,
+ config: AppConfig,
+ tasks: TaskService,
+ renderPage: (reply: FastifyReply) => FastifyReply,
+){
  app.decorateRequest('adminScope');
  const cookie=(value:string,maxAge:number)=>`hh_admin_session=${value}; HttpOnly; SameSite=Strict; Path=/admin; Max-Age=${maxAge}${config.appEnv==='production'?'; Secure':''}`;
  const origin=(req:FastifyRequest)=>{if(req.headers.origin!==config.adminOrigin)throw new DomainError(403,'CSRF_ORIGIN_INVALID');};
@@ -28,8 +34,22 @@ export function registerAdminRoutes(app:FastifyInstance,service:AdminService,con
   const input=req.body as {username:string;password:string};const result=await service.login(input.username,input.password,req.ip,req.id);
   reply.header('Set-Cookie',cookie(result.cookie,28800));return success({admin:result.admin,csrfToken:result.csrfToken},req.id);
  });
- for(const path of ['/admin','/admin/api/v1/me'])app.get(path,{preHandler:auth,schema:{response:{200:Envelope(Type.Object({admin:adminSchema,csrfToken:Type.String()})),...errors}}},async req=>{
-  const s=scope(req);return success({admin:{adminId:s.adminId,username:s.username,role:s.role},csrfToken:service.csrf(sessionCookie(req)!)},req.id);
+ const sessionResponse = { 200: Envelope(Type.Object({ admin: adminSchema, csrfToken: Type.String() })), ...errors };
+ const currentSession = async (req: FastifyRequest) => {
+  const s = scope(req);
+  return success({ admin: { adminId: s.adminId, username: s.username, role: s.role }, csrfToken: service.csrf(sessionCookie(req)!) }, req.id);
+ };
+ app.get('/admin/api/v1/me', { preHandler: auth, schema: { response: sessionResponse } }, currentSession);
+ app.get('/admin', { schema: { response: sessionResponse } }, async (req, reply) => {
+  reply.header('Vary', 'Accept');
+  const acceptsHtml = req.headers.accept?.split(',').some(value => {
+   const [mediaType, ...parameters] = value.split(';');
+   return mediaType?.trim().toLowerCase() === 'text/html'
+    && !parameters.some(parameter => /^q\s*=\s*0(?:\.0*)?$/i.test(parameter.trim()));
+  });
+  if (acceptsHtml) return renderPage(reply);
+  await auth(req);
+  return currentSession(req);
  });
  app.post('/admin/api/v1/logout',{preHandler:[auth,csrf],schema:{response:{200:Envelope(Type.Object({revoked:Type.Boolean()})),...errors}}},async(req,reply)=>{
   const out=await service.logout(scope(req),req.id);reply.header('Set-Cookie',cookie('',0));return success(out,req.id);

@@ -10,8 +10,8 @@ for(const base of [api,admin]){
  assert(ready,'HTTP role readiness');
 }
 async function login(phone){
- const otp=await req(api,'/api/v1/auth/sms-code','POST',{phone,scene:'login'});assert.equal(otp.status,200);assert.equal(otp.data.providerMode,'mock');
- const result=await req(api,'/api/v1/auth/login','POST',{phone,smsRequestId:otp.data.smsRequestId,smsCode:otp.data.testCode,deviceId:'http-fixture',agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-http'});
+ const otp=await req(api,'/api/v1/auth/sms-code','POST',{phone,purpose:'sign_in'});assert.equal(otp.status,200);assert.equal(otp.data.providerMode,'mock');
+ const result=await req(api,'/api/v1/auth/login','POST',{phone,smsRequestId:otp.data.smsRequestId,smsCode:otp.data.testCode,clientType:'app',clientId:'p02-http-app',agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-http'});
  assert.equal(result.status,200);return result.data;
 }
 const a=await login('13800008001'),b=await login('13800008002');

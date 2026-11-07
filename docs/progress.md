@@ -1,40 +1,75 @@
-# 阶段进度
+# 当前开发进度
 
-| 阶段 | 状态 | 代码与迁移 | 验证 | 下一步 |
-|---|---|---|---|---|
-| P01 | 本地验证通过 | 工程/四角色/0001_p01.sql | 健康、角色隔离、真实 PG/Redis | 已完成 |
-| P02 | 本地验证通过 | identity、workspaces、admin；0002_p02_identity.sql | 类型/lint/build；12 unit、8 contract、25 integration；真实 HTTP 与容器隔离通过 | 已完成 |
-| P03 | 本地验证通过 | tasks/outbox/attempts/results/events/schedules；0003_p03_tasks.sql；BullMQ content/ai/commercial/maintenance | 14 unit、8 contract、34 real PG/Redis integration；真实 HTTP Worker/Scheduler、容器故障恢复通过 | 已完成 |
-| P04 | 本地验证通过 | billing policy、membership、credit lots/reservations/ledger、provider measurements、run usage、storage reservations；0004/0005 P04 migrations；任务准入/结算 | 23 unit/contract、40 real PG/Redis integration；真实 HTTP 会员/credits/home、demo task 预留与 Worker 结算；四角色 p04 healthy | 已完成 |
+## Note 块级增量索引（2026-11-07）
 
-P02 交付：手机号 CN 规范化/HMAC、SmsProvider 显式模拟与真实 transport 入口、OTP 用途/过期/次数/频率/原子消费；15 分钟访问令牌、30 天设备会话、refresh 轮转/复用撤销；协议版本确认；默认个人工作区事务创建，昵称/时区、工作区 CRUD/切换/ETag、定位资料、可延期问卷草稿；按 scope 隔离及持久幂等。Admin 独立账号/scrypt、Cookie Session、CSRF/Origin、角色限制、退出/撤销、只追加审计及一次性 CLI bootstrap。
+- 云开发库 `huahuo` 已按新基线初始化。旧 `public` 归档到 `initialization_backup_20261107_note_delta`，核对 58 张表、406 行及表 OID 一致。新 `public` 有 59 张表，物理外键为 0，迁移重放为 `applied=[]/current=1`。四个后端角色使用 `huahuo-server:note-delta-init` 且均 healthy，API/Admin 就绪接口均为 HTTP 200。
+- 保存 Note 正文后沿用现有任务入口。Worker 对照当前索引正文和旧 UTF-16 切点，先撤下失效点，再逐批写入变化块。从保存事务提交起，检索暂停召回这条 Note，直到最新入库任务完成且当前块全部为 `ready`。召回与重排返回后按现有任务 ID 复核，防止在途查询混入旧结果。
+- PostgreSQL 基线维护当前块和重试需要的任务数据，Note 不再整篇发布索引版本。Flutter 的手动 Note 保存仍走既有 Note 接口。
+- 验证通过 329 项单元和契约测试及 135 项隔离 PostgreSQL/Redis 集成测试。块内删半、跨块修改、大改回退均检查了模拟 Milvus 写入和删除清单，未变化块没有写入。
+- 开发环境已启用 `MANUAL_TEXT_ENABLED=true`。使用真实 Embedding 和 Milvus `default.huahuo_manual_text` 实测临时 Note。首次写入 3 块，编辑其中 2 块后只新增 2 个点并删除 2 个失效点，未改块保留原 ID 且写入次数为 0。该轮测试发生在整条 Note 暂停召回规则实施之前。完工后强一致读取核对了 3 个点，测试 Note 已删除，Milvus 复查无测试点残留。
+- Note 的纯英文关键词查询现在并行使用英文与 Jieba 分词，Jieba 查询限定为中文和中英混合块。两路沿用授权范围及 `ready` 块限制，按块 ID 去重并保留最高 BM25 分数。存量索引可直接使用。
+- 在开发 Milvus `default.huahuo_manual_text` 用自动入库的临时 Note 复测。仅用英文分词时 `granitefable` 漏召回，修复后的 `keyword` 模式用同一输入命中 `# 第二节 / Search token: granitefable.`。实测关闭重排并断言检索未使用 Embedding。删除测试 Note 后强一致复查无向量残留。类型检查、Lint、330 项单元与契约测试通过。四个本机后端角色已切换到 `huahuo-server:note-bm25`，健康检查通过。
 
-P02 边界：真实短信厂商未选/未配置，只完成明确模拟和 transport 适配入口；无真实发送。云草稿/服务端 logout 是新增契约，App 未接线；头像资源归属等待 P05；AI 定位报告等待 P09，不生成假报告或 completion。管理员运营网页在 P14，当前只有身份 API；开发库未创建默认管理员。
 
-本次继续 P02 未重建基础设施、未改已有密码、未删除数据卷。所有测试业务数据在随机独立测试库；临时 HTTP 容器仅用于 P02 验收并在 finally 清理。App 源码未修改，未运行 Flutter。
+- Note 编辑矩阵覆盖局部编辑、Markdown、差分回退和保存时序。断言 UTF-16 切片、核心区间、逻辑块与物理点、Embedding 调用和实际写删 ID。Worker 保留 Note 锁直到超时写请求结束。Note 行锁内保证入库任务时间顺序，防止时钟回拨选中旧任务。沿用既有字段和表。
+- 类型检查、Lint、Build、341 项单元与契约测试及 215 项隔离集成测试通过。五组真实 Milvus 用例覆盖半删、跨块替换、大改回退、清空恢复和 S09。S09 在第一批点已可从 Milvus 读取时确认 Dense、BM25、Hybrid 都返回空，完成后再验证三种检索。真实 Milvus 使用确定性测试向量，并强一致读取物理点核对 PostgreSQL 当前块。重试和迟到写入由故障注入控制。
 
-P02 完成后进入 P03；其原有 Worker/Scheduler 骨架已由 P03 持久任务消费者、Outbox 投递与调度循环替换。
+## 独立 TextIngestionJob 实施（2026-11-07）
 
-P01/P02/P03 的历史验收记录保留在本文件及对应 runbook；P04 最终验收命令包含 `docker compose ... build`、migrate、`node scripts/integration.mjs`、容器隔离、23 unit/contract、`node scripts/app-reference.mjs --diff`。P04 历史记录中的 schema version=5 已由 P05 迁移升级；当前六个常驻容器 healthy，migrate Exited(0)，schema version=6。测试/容器机器记录保存在忽略提交的 docs/*.local.json。未运行 Dart 解析或真机联调；源码核对与后端 fixture 通过不等于完整 App 验收。
+- 新增 `text_ingestion_jobs` 与 `text_ingestion_chunks`，核心 DTO 使用六种字符串来源与九个已确认字段；没有业务版本号，只有手动输入可以修改原文。独立导入记录不伪造 Note，Chunk `parent_id` 直接指向整篇记录。
+- 任务执行复用原 Task/Outbox/Worker，所有新来源在文本产出后共用 LangChain、tokenizer、Embedding、Milvus 核心。文件下载和图文预处理已抽成单份能力，原文件 Worker 同用；未接通的爬虫、独立 OCR、ASR 明确不可用。
+- 增加 JWT 用户级创建、详情、列表、编辑和失败重试接口。更新通过任务指针和租约 fencing 防止晚到覆盖；新索引完全成功后才发布并清理旧目标。既有 RAG 查询通过 `sourceType=text` 检索独立记录。
+- Typecheck、Lint、Build、317 项单元/契约测试和132项隔离真实 PG/Redis 集成测试通过。真实 RDS 原地添加新表、权限，完整目录比对和原记录摘要通过，当前58张表、0外键；四角色与API/Admin readiness健康。未调用真实付费模型，未修改App、凭据、OSS或Milvus数据。
+- 接口示例、来源实际能力、恢复策略、真实/Mock证据和环境边界见 `docs/runbooks/text-ingestion.md`。
 
-P03 交付：API 以同一 PostgreSQL 事务写入 task input 引用、task、event 和 outbox，返回稳定 taskId；持久 request 幂等按 scope/body 冲突检测。Scheduler 使用短租约领取 outbox，BullMQ payload 仅 taskId，PG 定期修复 pending/delivering、失联 lease 和 Redis 丢队列；Worker 以 attempt/version/lease CAS 写入 demo.digest 的真实 PG result，旧 Worker 不能覆盖。状态包含 queued/running/retry_scheduled/waiting_external/reconciling/cancel_requested 及终态，事件按 sequence 读取，取消、有限退避、人工重试和双 Scheduler 时间窗去重均有测试。`node scripts/e2e-p03.mjs` 通过，实际 HTTP 从 mock SMS 登录后由独立 Worker 完成 PG 结果；`node scripts/container-isolation.mjs` 通过。P03 不调用真实 AI、ASR、支付或通知 provider，demo.digest 只用于基础设施演示。
+当前实现以唯一 `migrations/0001_initial_schema.sql` 为初始化基线；旧迁移链、旧用户表别名及数据回填兼容路径已移除。
 
-P04 交付：使用显式 `BILLING_MODE=development` 和 `credit-policy-v1` 开发政策；会员、月度/永久额度批次、usage period、reservation、ledger、provider measurement、run usage 全部持久化。预留使用 PG 事务、行锁、条件余额更新和唯一 reservation key；同 key 重放幂等、参数冲突 409，commit/release 单次生效，未知供应商进入 uncovered 并阻断后续付费任务。`GET /api/v1/membership`、`/account/credits`、`/home`、`/runs/:runId/usage` 返回 App 严格解析所需字段。demo task 只在显式开发 fixture 开启时扣 1 credit，Worker 成功结算、失败释放；生产默认关闭 billing development policy，未接真实支付、ASR、AI 或通知。
+## 统一用户与认证
 
-| P05 | 本地验证通过 | 资源/上传会话/分段清单/引用/删除请求/存储任务；0006_p05_resources.sql；LocalStorageAdapter 与真实 S3-compatible SDK 适配；上传授权、服务端核验、Range 播放、引用感知异步清理 | 23 unit/contract、48 real PG/Redis integration；真实文件 roundtrip、Range、MIME spoof/超限/哈希、稳定 complete 重试、隔离/过期/配额/ENOSPC、引用删除、Fastify App 传输契约；schema 6；p05 四角色 healthy | 等待用户确认 P06 |
+- `public.users` 为App、Web、API共用账号主表，`user_identities`保存身份HMAC及脱敏值。
+- 手机号登录采用 `purpose: sign_in`，登录必须提供 `clientType/clientId`；不接受旧参数别名。
+- 会话使用精确JWT jti/hash绑定，停用或删除账号拒绝登录、访问和刷新；Refresh原子轮换且不超过会话绝对期限。
+- Ed25519/EdDSA、JWKS和方向Service Key契约保持；email/OAuth、其它OTP用途和user_api_keys目前仅数据库基础。
+- 关系使用普通ID和索引，物理外键为0；用户和工作区归属由业务层校验。
+- Readiness精确匹配当前基线checksum，旧库不能因迁移号更大而误报ready。
 
-| P06 | 本地验证通过 | 统一资产/Note/Folder/不可变 part revision/资源引用/标签/关系/内容事件；0007_p06_assets.sql；关键词检索与局部图谱聚合；Worker 标签提取任务 | 23 unit/contract、53 real PG/Redis integration；目录重名/循环/ETag、旧 revision 任务不覆盖新文本、中文/英文/日期检索隔离、tombstone 恢复、关系与图谱节点；schema 7；p06 四角色 healthy；文本/Markdown 导入可用，PDF/DOCX 解析失败时 fail-closed 为 needs-processing | 等待用户确认 P07 |
+## 原huahuo数据库实际启用（2026-11-05）
 
-## P06 标签化补充修订（2026-10-10）
+数据库名称及连接保持`huahuo`，没有新建其他数据库。不可逆清库操作曾被自动审批拒绝且未执行；随后获准执行完整保留数据的同库归档方案。
 
-已完成，不进入 P07。知识图谱收敛为 PostgreSQL `note_tags` 的标签驱动投影：按需主题/素材节点、共同标签证据 `co_tagged`、成员边 `tagged_with`，不读取 `note_relations` 作为标签边，不复制正文、不建图谱表或缓存，不引入 Embedding/pgvector/Rerank/GraphRAG/Dify Dataset。迁移 `0008_p06_tag_graph_revision.sql` 保留旧 mapping/revision/history，加入 tag-set 版本与人工覆盖、建议表、Worker workspace 最小读取权限、未读正文状态、生命周期 fence、最新正文检索索引。
+旧public整体归档至`initialization_backup`，58张表4149行的OID、存储标识及内容摘要保持不变；旧视图内容在封存前核验一致。归档列/表/序列/函数权限先撤、Schema权限最后撤，4个运行角色无归档USAGE/CREATE；管理员保留显式恢复权限的能力，归档不进入任何业务读取或兼容路径。
 
-人工标签支持查看、篇内增删改/替换、建议显式应用、20 个上限；24 Unicode 字符校验、NFKC/大小写去重限定工作区。异步 TagExtractor 复用既有任务/Outbox/Worker，默认 disabled；确定性 provider 仅显式 fixture。分段协调最多 32×16k 临时文本，合并校验最多 5 个标签；无正文不调用 provider，失败不影响原文。正文 revision、tag-set version、manual override、note state、attempt/lease 在同一事务中检查，迟到任务不会恢复删除标签。不可读导入保留 P05 资源引用并标 `needs-processing`，允许人工分类。
+新public按原样0001建立，用户/会话/业务Chunk为空，物理外键全库0；迁移重放`applied=[]`、current1。控制台账号凭据保留策略未创建默认账号，原表本身为空。DB账号、密码、JWT私钥和服务Key未更改。
 
-真实验证：`pnpm verify`（Docker Node24）通过：typecheck、lint、build、18 unit、9 contract、67 real PG/Redis integration；高频 100,000 篇标签 fixture 的两页查询、两次聚焦查询及 EXPLAIN 合计 427ms（本机测试库，非生产延迟承诺），`EXPLAIN ANALYZE` 使用 `notes_graph_page`/`note_tags` 索引，返回 `maxNodes=12/maxEdges=8` 的局部页、全量计数和游标失效。App reference diff 无变化；当前 App `MiroFishGraphMapper.fromContentNavigation` 仅从 `items.path` 推导层级边，尚未消费后端显式标签边，已保留兼容 items 并登记为客户端接线待 P15，不修改 App。
+实际RDS不存在单独huahuo_migrator，初始化和重放沿用已配置的huahuo_admin。第一次数据保留事务因脚本预设migrator存在而自动回滚，确认原Schema/数据未变并恢复服务后，按实际角色配置完成切换；没有创建角色或篡改授权绕过。
 
-Provider 限制：真实 LLM/Dify 标签提取尚未接通，P08 复用接口接入；未配置 provider 不付费、不返回假标签。下一阶段仍为 P07。
+## 验收及运行
 
-最终部署：`huahuo-server:p06-tags` 构建成功；既有开发库迁移 applied `[8]`、schema 8；四业务角色及 PostgreSQL/Redis 均 healthy，migrate Exited(0)。新增原资源保留下载验收已包含在 67 项集成测试中。
+Typecheck、Lint、Build、27文件229项unit/contract、10文件115项隔离PG/Redis integration通过。另有6项真实PG归档安全实验，覆盖非superuser DB owner、namespace与行保留、ACL封存、函数搜索路径、正常重放及失败整体回滚。
 
-容器独立启停、Redis 故障/恢复、共享卷跨重启与 API/Admin 路由隔离均通过。最终 App baseline diff 为 `headChanged:false,statusChanged:false,changedFiles:[]`。
+四个独立运行角色均使用最新huahuo-server:dev并healthy；API容器实际连接huahuo、基线checksum匹配、PostgreSQL/Redis均true，API/Admin readiness200，JWKS为EdDSA/Ed25519 server-current。API/Admin只绑定回环3000/3001。
+
+本轮没有调用真实短信、Embedding或Rerank模型，没有清理共享OSS或Milvus；现有向量样本不等于新业务入库验收。App保持只读，客户端需适配新的认证Payload并重新登录。真实记录位于忽略提交的`.local/huahuo-unified-cutover/`。
+
+## Note 与知识库文档的目录读取（2026-11-05）
+
+- Note 与知识库文档复用 Markdown 结构解析，TOC 按入库版本保存。带用户 JWT 的详情返回嵌套目录，`/sections/{sectionId}` 返回精确原文。文件从对应的 canonical 对象读取字节范围，Note 从 PostgreSQL 正文快照读取。Flutter 现有 Note raw Markdown 写入路径继续驱动自动入库。
+- 新索引正文以 300 字为 Note 切分目标，找不到合适断点时允许延长，硬上限为 Note 500、知识库文档 2,000 个 Unicode 码点，包含重叠。共享 splitter 与唯一初始化 SQL 均执行上限，章节坐标保持 UTF-16。既有环境切换到本版前使用更新后的初始化基线。
+- Typecheck、Lint、Build、235 项单元/契约测试和 117 项隔离 PostgreSQL/Redis 集成测试通过。集成测试使用 Mock 解析与向量服务，并从本地对象存储验证精确节选。业务库与共享 Milvus、OSS 未参与本次验证。
+- Note 调整为 300 字目标、500 字硬上限后，Typecheck、Lint、244 项单元/契约测试及 11 项 Note 入库集成测试通过。全量集成另有 2 项文件图片诊断用例触发已有的图片唯一约束。
+
+## 数据库审计修复与真实 RDS 同步（2026-11-05）
+
+- 清理 `upload_parts`、`resource_delete_requests`、`task_requests` 及运行调用，幂等统一到通用加密实现。删除两个重复普通索引、无消费的 CSRF hash 和调度短事务租约字段。保留普通 Note 搜索、业务游标、文档/笔记分离及有真实职责的关系表。
+- 图片诊断改为文档级单份 manifest，完整保留未绑定 OCR；资产事务成功后才发布正文检查点。修正此前导致两项集成失败的图片唯一约束：稳定来源路径独立，允许共用相同图片对象，不修改解析器或切分算法。
+- 同步此前工作区 TOC 与长度约束到原阿里云 RDS `huahuo`。隔离 PostgreSQL 演练及真实目录比较均证明修复结构等于唯一新基线；非空表保护、保留记录摘要和封存归档不变核验通过。没有清库、数据回填兼容分支、凭据更新或新迁移历史。
+- 当前 `public` 56 张表、1 个 View、179 个索引，外键为 0。迁移重放 applied=[]/current=1；源码、镜像、RDS checksum 一致。四个独立角色 healthy，API/Admin readiness200。
+- 最终 Typecheck、Lint、Build、29 文件244项单元/契约测试和11文件125项隔离真实 PG/Redis 集成测试通过；真实模型/解析/向量服务未调用。App上传及资源删除客户端只读核对，未修改。证据与保留边界见 `docs/runbooks/database-cleanup.md`。
+
+## Admin 示例工作台（2026-11-06）
+
+- `admin-ui/` 使用 Tailwind CSS 和 Ant Design，工作台展示四条明确标注的示例记录。`pnpm dev:admin-ui` 仅在本机回环地址运行独立预览。常规构建的页面由 Admin 服务在 `/admin` 提供，同源复用现有会话、登录和退出 API。
+- Typecheck、Lint、Build 和 244 项单元/契约测试通过。浏览器核对桌面与窄屏布局，并用模拟存储验证错误密码提示、登录、刷新恢复会话和退出。此次验证使用本地预览与隔离测试服务。
+- App 只读参照 `20f61b7` 的 `Flutter/packages/huahuo_api/lib/src/api/endpoint_catalog.dart`，其中 `/api/v1/auth/login` 是 App 登录契约。本次页面只使用 `/admin/api/v1`，P14 业务页面与真实业务数据接入待定。
+- 本机 `3001` 原容器没有前端产物。Docker 镜像构建并通过离线页面校验后，仅重建 `admin` 容器。就绪检查通过，浏览器打开 `/admin` 显示登录页，HTML、CSS 和 JS 返回 `200`，无会话调用 `/admin/api/v1/me` 返回 `401`。
+- 工作台改用浅色主题。侧栏收起为图标栏并记住浏览器偏好，概况和示例记录各自可折叠。Typecheck、Lint、Build 和 244 项单元与契约测试通过。浏览器验证折叠、刷新恢复与 390 像素宽布局，本机 `3001` 已更新并加载新页面。

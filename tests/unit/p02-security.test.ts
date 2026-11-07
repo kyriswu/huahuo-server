@@ -1,7 +1,8 @@
+import { seal,unseal,canonical } from '../../src/lib/crypto.js';
 import { describe,it,expect } from 'vitest';
 import { loadConfig } from '../../src/config/config.js';
 import { env } from '../helpers.js';
-import { normalizePhone,seal,unseal,canonical,hashPassword,verifyPassword } from '../../src/modules/identity/crypto.js';
+import { normalizePhone,hashPassword,verifyPassword } from '../../src/modules/identity/crypto.js';
 import { LiveSmsProvider } from '../../src/integrations/sms.js';
 describe('P02 security configuration and adapter boundary',()=>{
  it('normalizes only explicitly supported CN phone representations',()=>{
@@ -22,7 +23,7 @@ describe('P02 security configuration and adapter boundary',()=>{
   const hash=await hashPassword('long-test-password');expect(await verifyPassword('long-test-password',hash)).toBe(true);expect(await verifyPassword('wrong',hash)).toBe(false);
  });
  it('live adapter requires an accepted provider response, without real calls',async()=>{
-  const message={phone:'+8613800000001',code:'123456',purpose:'login' as const,requestId:'fixture'};
+  const message={phone:'+8613800000001',code:'123456',purpose:'sign_in' as const,requestId:'fixture'};
   await expect(new LiveSmsProvider(async()=>({accepted:false})).send(message)).rejects.toThrow('SMS_PROVIDER_FAILED');
   await expect(new LiveSmsProvider(async()=>({accepted:true})).send(message)).resolves.toBeUndefined();
  });

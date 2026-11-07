@@ -1,9 +1,17 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
+import type pg from 'pg';
 import type { AppConfig } from '../config/config.js';
 import { poolFor } from '../plugins/dependencies.js';
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+async function assertNoPhysicalForeignKeys(client: pg.PoolClient, code: string): Promise<void> {
+  const result = await client.query<{ present: boolean }>(`SELECT EXISTS (
+    SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace
+    WHERE c.contype='f' AND n.nspname NOT LIKE 'pg_%'
+      AND n.nspname<>'information_schema') AS present`);
+  if (result.rows[0]?.present) throw new Error(code);
+}
 export async function migrate(config: AppConfig, directory = resolve('migrations')) {
   const pool = poolFor(config); pool.on('error', () => undefined);
   const deadline = Date.now() + config.connectDeadlineMs;
@@ -37,10 +45,16 @@ export async function migrate(config: AppConfig, directory = resolve('migrations
         await client.query('BEGIN');
         try {
           await client.query(content);
+          await assertNoPhysicalForeignKeys(client, 'MIGRATION_FOREIGN_KEYS_FORBIDDEN');
           await client.query('INSERT INTO schema_migrations(version,checksum) VALUES ($1,$2)', [version, checksum]);
           await client.query('COMMIT'); applied.push(version);
-        } catch { await client.query('ROLLBACK'); throw new Error('MIGRATION_SQL_FAILED'); }
+        } catch (error) {
+          await client.query('ROLLBACK');
+          if (error instanceof Error && error.message === 'MIGRATION_FOREIGN_KEYS_FORBIDDEN') throw error;
+          throw new Error('MIGRATION_SQL_FAILED', { cause: error });
+        }
       }
+      await assertNoPhysicalForeignKeys(client, 'DATABASE_FOREIGN_KEYS_FORBIDDEN');
       return { applied, current: files.length ? Number(files.at(-1)?.slice(0, 4)) : 0 };
     } finally {
       if (locked) await client.query('SELECT pg_advisory_unlock(72701, 1)');

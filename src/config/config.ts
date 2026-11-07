@@ -6,19 +6,75 @@ export type Env = Record<string, string | undefined>;
 export interface AppConfig {
   queuePrefix:string; workerQueues:QueueName[]; taskLeaseMs:number; taskRedeliveryMs:number; schedulerIntervalMs:number; demoTasks:boolean; testTaskDelayMs:number;
   role: Role; host: string; port: number; databaseUrl: string; poolMax: number;
+  httpRequestTimeoutMs: number; httpConnectionTimeoutMs: number;
   ssl: false | { rejectUnauthorized: true; ca?: string };
   statementTimeout: number; redisCacheUrl: string; redisQueueUrl: string;
   schemaMinVersion: number; instanceId: string; logLevel: string;
   connectDeadlineMs: number; migrationLockTimeoutMs: number;
   appTokenSecret?: string; adminSessionSecret?: string;
+  jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string; previousPublicKeyPem?:string; previousKeyId?:string };
+  agentToServerServiceKey?: string; serverToAgentServiceKey?: string;
   smsProvider: 'mock' | 'disabled' | 'live'; showTestOtp: boolean;
   appEnv: string; agreementVersion: string; privacyVersion: string; adminOrigin: string;
   billingMode: 'disabled' | 'development' | 'live'; billingPolicyVersion: string;
-  storageDriver: 'local' | 's3'; storageLocalRoot: string; maxUploadBytes: number;
+  storageDriver: 'local' | 's3' | 'aliyun-oss'; storageLocalRoot: string; maxUploadBytes: number;
   appPublicBaseUrl: string;
   storageQuotaBytes:number;
   tagExtractorProvider: 'deterministic' | 'disabled' | 'llm' | 'dify';
   storageS3?: { endpoint:string; region:string; bucket:string; accessKeyId:string; secretAccessKey:string; maxBytes:number };
+  storageAliyunOss?: { endpoint:string; region:string; bucket:string; accessKeyId:string; accessKeySecret:string; secure:boolean; timeoutMs:number; keyPrefix?:string; maxBytes:number };
+  milvus: MilvusConfig;
+  rag: RagConfig;
+  manualText: { enabled: boolean; collection?: string; database?: string; targetTokens: number; maxEmbeddingTokens: number; overlapTokens: number };
+}
+export interface MilvusConfig {
+  address?: string;
+  username?: string;
+  password?: string;
+  database: string;
+  collection: string;
+  tls: boolean;
+  createIfMissing: boolean;
+  searchConcurrency: number;
+  denseCandidates: number;
+  bm25Candidates: number;
+  hybridCandidates: number;
+  rrfK: number;
+}
+export interface RagConfig {
+  tokenizerPath: string;
+  tokenizerConfigPath: string;
+  tokenizerMaxInputTokens: number;
+  enabled: boolean;
+  sourceAllowedHosts: string[];
+  maxSourceBytes: number;
+  plainTextMaxChars: number;
+  downloadTimeoutMs: number;
+  mineruBaseUrl: string;
+  mineruToken?: string;
+  mineruModel: 'pipeline' | 'vlm' | 'MinerU-HTML';
+  mineruPollIntervalMs: number;
+  mineruTimeoutMs: number;
+  embeddingBaseUrl?: string;
+  embeddingApiKey?: string;
+  embeddingModel: string;
+  embeddingDimensions: number;
+  embeddingProfile: string;
+  indexBuildId: string;
+  embeddingBatchSize: number;
+  indexingConcurrency:number;
+  embeddingTimeoutMs: number;
+  embeddingMaxRetries: number;
+  embeddingSendDimensions: boolean;
+  childTargetTokens: number;
+  childMaxTokens: number;
+  childOverlapTokens: number;
+  providerMode: 'live' | 'mock' | 'disabled';
+  rerankProvider: 'disabled' | 'mock' | 'http';
+  rerankBaseUrl?: string;
+  rerankApiKey?: string;
+  rerankModel: string;
+  rerankTimeoutMs: number;
 }
 export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   const fail = (key: string): never => { throw new Error(`INVALID_CONFIG:${key}`); };
@@ -59,6 +115,25 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     const value = url(base, appEnv === 'production' ? ['https:'] : ['http:', 'https:']);
     if (new URL(value).username || new URL(value).password) fail(base);
   }
+  const jwtPrivateKey = env.APP_JWT_PRIVATE_KEY?.trim() ? Buffer.from(env.APP_JWT_PRIVATE_KEY.trim(), 'base64').toString('utf8') : undefined;
+  const jwtPublicKey = env.APP_JWT_PUBLIC_KEY?.trim() ? Buffer.from(env.APP_JWT_PUBLIC_KEY.trim(), 'base64').toString('utf8') : undefined;
+  const jwtPreviousPublicKey = env.APP_JWT_PREVIOUS_PUBLIC_KEY?.trim() ? Buffer.from(env.APP_JWT_PREVIOUS_PUBLIC_KEY.trim(), 'base64').toString('utf8') : undefined;
+  const jwtAudience = (env.APP_JWT_AUDIENCE?.trim() || 'huahuo-server,huahuo-agent').split(',').map(value => value.trim()).filter(Boolean);
+  const jwtServerAudience = env.APP_JWT_SERVER_AUDIENCE?.trim() || 'huahuo-server';
+  const jwtKeyId = env.APP_JWT_KEY_ID?.trim() || 'server-current';
+  const jwtPreviousKeyId = env.APP_JWT_PREVIOUS_KEY_ID?.trim() || undefined;
+  if (!jwtAudience.length || new Set(jwtAudience).size !== jwtAudience.length || jwtAudience.some(value => !/^[A-Za-z0-9._:-]{1,128}$/.test(value)) || !jwtAudience.includes(jwtServerAudience)) fail('APP_JWT_AUDIENCE');
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(jwtServerAudience)) fail('APP_JWT_SERVER_AUDIENCE');
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(jwtKeyId)) fail('APP_JWT_KEY_ID');
+  if ((jwtPreviousPublicKey && !jwtPreviousKeyId) || (!jwtPreviousPublicKey && jwtPreviousKeyId)) fail('APP_JWT_PREVIOUS_KEY');
+  if (jwtPreviousKeyId && (!/^[A-Za-z0-9._:-]{1,128}$/.test(jwtPreviousKeyId) || jwtPreviousKeyId === jwtKeyId)) fail('APP_JWT_PREVIOUS_KEY_ID');
+  if (role === 'api-server' && appEnv === 'production' && (!jwtPrivateKey || !jwtPublicKey)) fail('APP_JWT_KEYS');
+  if ((jwtPrivateKey && !jwtPublicKey) || (!jwtPrivateKey && jwtPublicKey)) fail('APP_JWT_KEYS');
+  const agentToServerServiceKey = env.HUAHUO_AGENT_TO_SERVER_API_KEY?.trim() || undefined;
+  const serverToAgentServiceKey = env.HUAHUO_SERVER_TO_AGENT_API_KEY?.trim() || undefined;
+  if (role === 'api-server' && appEnv === 'production' && (!agentToServerServiceKey || !serverToAgentServiceKey)) fail('HUAHUO_SERVICE_API_KEY');
+  if ((agentToServerServiceKey && agentToServerServiceKey.length < 43) || (serverToAgentServiceKey && serverToAgentServiceKey.length < 43)) fail('HUAHUO_SERVICE_API_KEY');
+  if (appEnv === 'production' && agentToServerServiceKey && serverToAgentServiceKey && agentToServerServiceKey === serverToAgentServiceKey) fail('HUAHUO_SERVICE_API_KEY_DIRECTIONAL_COLLISION');
   const smsProvider = (env.SMS_PROVIDER ?? 'disabled') as AppConfig['smsProvider'];
   if (!['mock', 'disabled', 'live'].includes(smsProvider)) fail('SMS_PROVIDER');
   if (smsProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('SMS_PROVIDER');
@@ -69,13 +144,78 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   const billingPolicyVersion = env.BILLING_POLICY_VERSION ?? 'credit-policy-v1';
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(billingPolicyVersion)) fail('BILLING_POLICY_VERSION');
   const storageDriver=(env.STORAGE_DRIVER??'local') as AppConfig['storageDriver'];
-  if(!['local','s3'].includes(storageDriver))fail('STORAGE_DRIVER');
+  if(!['local','s3','aliyun-oss'].includes(storageDriver))fail('STORAGE_DRIVER');
   const tagExtractorProvider=(env.TAG_EXTRACTOR_PROVIDER ?? 'disabled') as AppConfig['tagExtractorProvider'];
   if(!['deterministic','disabled','llm','dify'].includes(tagExtractorProvider))fail('TAG_EXTRACTOR_PROVIDER');
   if(tagExtractorProvider==='deterministic' && (appEnv==='production'||env.ALLOW_MOCK_PROVIDERS!=='true'))fail('TAG_EXTRACTOR_PROVIDER');
+  const bool = (key:string, fallback:boolean): boolean => {
+    const value=env[key]; if(value===undefined||value==='')return fallback;
+    if(value==='true')return true; if(value==='false')return false; return fail(key);
+  };
+  const csv = (key:string) => (env[key]??'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean);
+  const ragProvider=(env.RAG_PROVIDER_MODE??'disabled') as RagConfig['providerMode'];
+  if(!['live','mock','disabled'].includes(ragProvider))fail('RAG_PROVIDER_MODE');
+  if(ragProvider==='mock' && (appEnv==='production'||env.ALLOW_MOCK_PROVIDERS!=='true'))fail('RAG_PROVIDER_MODE');
+  const mineruModel=(env.RAG_MINERU_MODEL??'vlm') as RagConfig['mineruModel'];
+  if(!['pipeline','vlm','MinerU-HTML'].includes(mineruModel))fail('RAG_MINERU_MODEL');
+  const rag: RagConfig = {
+    tokenizerPath: env.RAG_TOKENIZER_PATH?.trim() || '.local/tokenizers/qwen3-embedding-8b/tokenizer.json',
+    tokenizerConfigPath: env.RAG_TOKENIZER_CONFIG_PATH?.trim() || '.local/tokenizers/qwen3-embedding-8b/tokenizer_config.json',
+    tokenizerMaxInputTokens: integer('RAG_TOKENIZER_MAX_INPUT_TOKENS', 32768, 32, 131072),
+    enabled: bool('RAG_INGESTION_ENABLED', true),
+    sourceAllowedHosts: csv('RAG_SOURCE_ALLOWED_HOSTS'),
+    maxSourceBytes: integer('RAG_MAX_SOURCE_BYTES', 200*1024*1024, 1, 2*1024*1024*1024),
+    plainTextMaxChars: integer('RAG_PLAIN_TEXT_MAX_CHARS', 50_000, 1, 5_000_000),
+    downloadTimeoutMs: integer('RAG_DOWNLOAD_TIMEOUT_MS', 120_000, 1_000, 600_000),
+    mineruBaseUrl: env.RAG_MINERU_BASE_URL?.trim() || 'https://mineru.net',
+    ...(env.RAG_MINERU_TOKEN?.trim() ? { mineruToken: env.RAG_MINERU_TOKEN.trim() } : {}),
+    mineruModel,
+    mineruPollIntervalMs: integer('RAG_MINERU_POLL_INTERVAL_MS', 2_000, 250, 60_000),
+    mineruTimeoutMs: integer('RAG_MINERU_TIMEOUT_MS', 900_000, 5_000, 3_600_000),
+    ...(env.RAG_EMBEDDING_BASE_URL?.trim() ? { embeddingBaseUrl: env.RAG_EMBEDDING_BASE_URL.trim() } : {}),
+    ...(env.RAG_EMBEDDING_API_KEY?.trim() ? { embeddingApiKey: env.RAG_EMBEDDING_API_KEY.trim() } : {}),
+    embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || 'Qwen/Qwen3-Embedding-8B',
+    embeddingDimensions: integer('RAG_EMBEDDING_DIMENSIONS', 4096, 1, 16_384),
+    embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || 'qwen3-embedding-8b-4096',
+    indexBuildId: env.RAG_INDEX_BUILD_ID?.trim() || env.RAG_EMBEDDING_PROFILE?.trim() || 'qwen3-embedding-8b-4096',
+    embeddingBatchSize: integer('RAG_INGEST_BATCH_SIZE', 32, 1, 256),
+    indexingConcurrency:integer('RAG_INDEX_CONCURRENCY',2,1,16),
+    embeddingTimeoutMs: integer('RAG_EMBEDDING_TIMEOUT_MS', 30_000, 1_000, 600_000),
+    embeddingMaxRetries: integer('RAG_EMBEDDING_MAX_RETRIES', 2, 0, 9),
+    embeddingSendDimensions: bool('RAG_EMBEDDING_SEND_DIMENSIONS', false),
+    childTargetTokens: integer('RAG_CHILD_TARGET_TOKENS', 500, 32, 4096),
+    childMaxTokens: integer('RAG_CHILD_MAX_TOKENS', 800, 32, 8192),
+    childOverlapTokens: integer('RAG_CHILD_OVERLAP_TOKENS', 64, 0, 4095),
+    providerMode: ragProvider,
+    rerankProvider: ((env.RAG_RERANK_PROVIDER?.trim() || 'disabled') as RagConfig['rerankProvider']),
+    ...(env.RAG_RERANK_BASE_URL?.trim() ? { rerankBaseUrl: env.RAG_RERANK_BASE_URL.trim() } : {}),
+    ...(env.RAG_RERANK_API_KEY?.trim() ? { rerankApiKey: env.RAG_RERANK_API_KEY.trim() } : {}),
+    rerankModel: env.RAG_RERANK_MODEL?.trim() || 'qwen3-rerank',
+    rerankTimeoutMs: integer('RAG_RERANK_TIMEOUT_MS', 30_000, 1_000, 600_000),
+  };
+  if (!['disabled', 'mock', 'http'].includes(rag.rerankProvider)) fail('RAG_RERANK_PROVIDER');
+  if (rag.rerankProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('RAG_RERANK_PROVIDER');
+  if (rag.rerankProvider === 'http' && (!rag.rerankBaseUrl || !rag.rerankApiKey)) fail('RAG_RERANK_CONFIG');
+  if(rag.childTargetTokens>rag.childMaxTokens||rag.childOverlapTokens>=rag.childTargetTokens||rag.childMaxTokens>rag.tokenizerMaxInputTokens)fail('RAG_CHILD_TOKENS');
+  const manualText: AppConfig['manualText'] = {
+    enabled: bool('MANUAL_TEXT_ENABLED', false),
+    ...(env.MANUAL_TEXT_MILVUS_COLLECTION?.trim() ? {collection:env.MANUAL_TEXT_MILVUS_COLLECTION.trim()} : {}),
+    ...(env.MANUAL_TEXT_MILVUS_DATABASE?.trim() ? {database:env.MANUAL_TEXT_MILVUS_DATABASE.trim()} : {}),
+    targetTokens: integer('MANUAL_TEXT_TARGET_TOKENS',500,1,8192),
+    maxEmbeddingTokens: integer('MANUAL_TEXT_MAX_EMBEDDING_TOKENS',800,1,8192),
+    overlapTokens: integer('MANUAL_TEXT_OVERLAP_TOKENS',64,0,8191),
+  };
+  if(manualText.enabled&&(!manualText.collection||!manualText.database))fail('MANUAL_TEXT_VECTOR_TARGET');
+  if(rag.enabled&&ragProvider==='live'&&(!env.MILVUS_DATABASE?.trim()||!env.MILVUS_COLLECTION?.trim()))fail('RAG_VECTOR_TARGET');
+  if(manualText.overlapTokens>=manualText.targetTokens||manualText.targetTokens>manualText.maxEmbeddingTokens||manualText.maxEmbeddingTokens>rag.tokenizerMaxInputTokens)fail('MANUAL_TEXT_TOKENS');
   const maxUploadBytes=integer('MAX_UPLOAD_BYTES',100*1024*1024,1,2*1024*1024*1024);
+  const httpRequestTimeoutMs=integer('HTTP_REQUEST_TIMEOUT_MS',60_000,1_000,600_000);
+  const httpConnectionTimeoutMs=integer('HTTP_CONNECTION_TIMEOUT_MS',65_000,1_000,600_000);
+  if(httpConnectionTimeoutMs<httpRequestTimeoutMs)fail('HTTP_CONNECTION_TIMEOUT_MS');
   let storageS3:AppConfig['storageS3'];
   if(storageDriver==='s3'&&['api-server','worker'].includes(role))storageS3={endpoint:url('STORAGE_S3_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_S3_REGION??'us-east-1',bucket:required('STORAGE_S3_BUCKET'),accessKeyId:required('STORAGE_S3_ACCESS_KEY_ID'),secretAccessKey:required('STORAGE_S3_SECRET_ACCESS_KEY'),maxBytes:maxUploadBytes};
+  let storageAliyunOss:AppConfig['storageAliyunOss'];
+  if(storageDriver==='aliyun-oss'&&['api-server','worker'].includes(role))storageAliyunOss={endpoint:url('STORAGE_ALIYUN_OSS_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_ALIYUN_OSS_REGION??'cn-beijing',bucket:required('STORAGE_ALIYUN_OSS_BUCKET'),accessKeyId:required('STORAGE_ALIYUN_OSS_ACCESS_KEY_ID'),accessKeySecret:required('STORAGE_ALIYUN_OSS_ACCESS_KEY_SECRET'),secure:env.STORAGE_ALIYUN_OSS_SECURE!=='false',timeoutMs:integer('STORAGE_ALIYUN_OSS_TIMEOUT_MS',120000,1000,600000),...(env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim()?{keyPrefix:env.STORAGE_ALIYUN_OSS_KEY_PREFIX.trim()}:{}),maxBytes:maxUploadBytes};
   const logLevel = env.LOG_LEVEL ?? 'info';
   if (!['fatal','error','warn','info','debug','trace','silent'].includes(logLevel)) fail('LOG_LEVEL');
   const queuePrefix=env.REDIS_KEY_PREFIX??'huahuo-dev';
@@ -90,20 +230,50 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     role, host: env.HOST ?? (['worker','scheduler'].includes(role) ? '127.0.0.1' : '0.0.0.0'),
     port: integer('PORT', ['worker','scheduler'].includes(role) ? 3100 : 3000, 1, 65535),
     databaseUrl, poolMax: integer('DATABASE_POOL_MAX', role === 'migrate' ? 1 : 5, 1, 30),
+    httpRequestTimeoutMs, httpConnectionTimeoutMs,
     ssl: sslMode === 'verify-full' ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false,
     statementTimeout: integer('DATABASE_STATEMENT_TIMEOUT_MS', 5000, 100, 60000),
     redisCacheUrl: role === 'migrate' ? '' : url('REDIS_CACHE_URL', ['redis:', 'rediss:']),
     redisQueueUrl: role === 'migrate' ? '' : url('REDIS_QUEUE_URL', ['redis:', 'rediss:']),
-    schemaMinVersion: integer('DB_SCHEMA_MIN_VERSION', 8, 1, 99999), instanceId: randomUUID(), logLevel,
+    schemaMinVersion: integer('DB_SCHEMA_MIN_VERSION', 1, 1, 99999), instanceId: randomUUID(), logLevel,
     connectDeadlineMs: integer('DATABASE_CONNECT_DEADLINE_MS', 60000, 1000, 120000),
     migrationLockTimeoutMs: integer('MIGRATION_LOCK_TIMEOUT_MS', 10000, 100, 60000),
     appTokenSecret: env.APP_TOKEN_SECRET,
     adminSessionSecret: env.ADMIN_SESSION_SECRET,
+    jwt: {
+      issuer: env.APP_JWT_ISSUER?.trim() || 'huahuo-server',
+      audience: jwtAudience,
+      serverAudience: jwtServerAudience,
+      keyId: jwtKeyId,
+      accessTtlSeconds: integer('APP_ACCESS_TOKEN_TTL_SECONDS', 900, 60, 86_400),
+      refreshTtlSeconds: integer('REFRESH_TOKEN_TTL_SECONDS', 30 * 86_400, 3600, 365 * 86_400),
+      ...(jwtPrivateKey ? { privateKeyPem: jwtPrivateKey } : {}),
+      ...(jwtPublicKey ? { publicKeyPem: jwtPublicKey } : {}),
+      ...(jwtPreviousPublicKey ? { previousPublicKeyPem: jwtPreviousPublicKey } : {}),
+      ...(jwtPreviousKeyId ? { previousKeyId: jwtPreviousKeyId } : {}),
+    },
+    agentToServerServiceKey, serverToAgentServiceKey,
     smsProvider, showTestOtp: env.SHOW_TEST_OTP === 'true' && appEnv !== 'production', appEnv,
     agreementVersion: env.USER_AGREEMENT_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     privacyVersion: env.PRIVACY_POLICY_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     adminOrigin: env.ADMIN_PUBLIC_BASE_URL ? new URL(env.ADMIN_PUBLIC_BASE_URL).origin : '',
     billingMode, billingPolicyVersion,
-    storageDriver, storageLocalRoot: env.STORAGE_LOCAL_ROOT ?? './var/storage', maxUploadBytes, storageS3, storageQuotaBytes:integer('STORAGE_QUOTA_BYTES',1024*1024*1024,1,Number.MAX_SAFE_INTEGER), appPublicBaseUrl: env.APP_PUBLIC_BASE_URL ?? 'http://127.0.0.1:3000', tagExtractorProvider,
+    storageDriver, storageLocalRoot: env.STORAGE_LOCAL_ROOT ?? './var/storage', maxUploadBytes, storageS3, storageAliyunOss, storageQuotaBytes:integer('STORAGE_QUOTA_BYTES',1024*1024*1024,1,Number.MAX_SAFE_INTEGER), appPublicBaseUrl: env.APP_PUBLIC_BASE_URL ?? 'http://127.0.0.1:3000', tagExtractorProvider,
+    milvus: {
+      ...(env.MILVUS_ADDRESS?.trim() ? { address: env.MILVUS_ADDRESS.trim() } : {}),
+      ...(env.MILVUS_USERNAME?.trim() ? { username: env.MILVUS_USERNAME.trim() } : {}),
+      ...(env.MILVUS_PASSWORD?.trim() ? { password: env.MILVUS_PASSWORD.trim() } : {}),
+      database: env.MILVUS_DATABASE?.trim() || 'default',
+      collection: env.MILVUS_COLLECTION?.trim() || 'huahuo_chunks',
+      tls: bool('MILVUS_TLS', true),
+      createIfMissing: bool('MILVUS_CREATE_IF_MISSING', false),
+      searchConcurrency: integer('MILVUS_SEARCH_CONCURRENCY', 2, 1, 16),
+      denseCandidates: integer('RAG_DENSE_CANDIDATES', 20, 1, 200),
+      bm25Candidates: integer('RAG_BM25_CANDIDATES', 20, 1, 200),
+      hybridCandidates: integer('RAG_HYBRID_CANDIDATES', 30, 1, 200),
+      rrfK: integer('RAG_RRF_K', 60, 1, 10000),
+    },
+    rag,
+    manualText,
   };
 }
