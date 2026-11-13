@@ -1,5 +1,11 @@
 # 当前开发进度
 
+## 测试服务器运维（2026-11-07 至 2026-11-14）
+
+- 宿主 Nginx + Certbot 已配置 `test-api.chuda.cc` → 回环 3000、`test-admin.chuda.cc` → 回环 3001，公开地址同步至对应环境变量。真实 HTTPS 和续期演练通过，配置与续期脚本保留于 `infra/nginx/`，维护步骤见 [测试域名 HTTPS](runbooks/test-https.md)。
+- Milvus 已确认连接内网 `172.18.102.95:19530`；按授权清除失效的 `grpc_proxy` 并补齐现有路径缺失的 tokenizer 文件，测试数据及临时探针已清理。
+- 项目容器于 2026-11-10 按用户要求整体停止；2026-11-14 确认仍停止，宿主 Nginx 和自动续期定时器继续运行。本次仅整理文档、删除首次签发模板和性能报告，未改动运行配置或恢复服务。
+
 ## Note 块级增量索引（2026-11-07）
 
 - 云开发库 `huahuo` 已按新基线初始化。旧 `public` 归档到 `initialization_backup_20261107_note_delta`，核对 58 张表、406 行及表 OID 一致。新 `public` 有 59 张表，物理外键为 0，迁移重放为 `applied=[]/current=1`。四个后端角色使用 `huahuo-server:note-delta-init` 且均 healthy，API/Admin 就绪接口均为 HTTP 200。
