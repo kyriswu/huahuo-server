@@ -1,5 +1,6 @@
 # PostgreSQL 云端切换验收 · 2026-11-03
 
+> 历史审计记录，不是当前部署/重置指令。当前知识库表与集合见 [知识库手册](milvus.md)，本阶段实际结果见 [验收记录](../acceptance/knowledge-base.md)。
 当前业务 PostgreSQL 已切换到根目录 `.env` 的阿里云配置，不再使用本地 PostgreSQL。
 
 | 项目 | 实际结果 |

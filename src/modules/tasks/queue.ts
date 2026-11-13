@@ -11,7 +11,7 @@ import { storageFor } from '../storage/port.js';
 import { BillingService } from '../billing/service.js';
 import { tagExtractorFor } from '../assets/tag-extractor.js';
 import { RagIngestionJobs, type RagJobError } from '../rag/jobs.js';
-import { ManualTextIngestionJobs } from '../ingestion/jobs.js';
+import { NoteIndexJobs } from '../ingestion/jobs.js';
 export const concurrency:Record<QueueName,number>={content:2,ai:1,commercial:1,maintenance:1};
 export class QueuePublisher implements TaskPublisher {
  readonly connection:Redis;readonly queues:Map<QueueName,Queue>;
@@ -24,16 +24,16 @@ export class QueuePublisher implements TaskPublisher {
  async close(){await Promise.all([...this.queues.values()].map(q=>q.close()));this.connection.disconnect();}
 }
 export class TaskWorkers {
- readonly connection:Redis;readonly workers:Worker[];private stopping=false;private readonly rag: RagIngestionJobs;private readonly manualText:ManualTextIngestionJobs;private readonly textIngestion:TextIngestionJobs;
+ readonly connection:Redis;readonly workers:Worker[];private stopping=false;private readonly rag: RagIngestionJobs;private readonly noteIndex:NoteIndexJobs;private readonly textIngestion:TextIngestionJobs;
  constructor(pool:pg.Pool,config:AppConfig){
   this.connection=new Redis(config.redisQueueUrl,{maxRetriesPerRequest:null,connectTimeout:1500,retryStrategy:n=>Math.min(n*200,2000)});
-  this.connection.on('error',()=>undefined);this.rag=new RagIngestionJobs(pool,config,storageFor(config));this.manualText=new ManualTextIngestionJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config)),tagExtractorFor(config.tagExtractorProvider),this.rag,this.manualText,this.textIngestion);
+  this.connection.on('error',()=>undefined);this.rag=new RagIngestionJobs(pool,config,storageFor(config));this.noteIndex=new NoteIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config)),tagExtractorFor(config.tagExtractorProvider),this.rag,this.noteIndex,this.textIngestion);
   this.workers=config.workerQueues.map(name=>{
    const w=new Worker(name,async job=>{
     if(typeof job.data.taskId!=='string'||!/^[a-f0-9-]{36}$/.test(job.data.taskId))return;
     const a=await engine.claim(job.data.taskId,config.instanceId);if(!a)return;
-    let lost=false;let heartbeatRunning=false;
-    const timer=setInterval(()=>{if(heartbeatRunning)return;heartbeatRunning=true;void engine.heartbeat(a).then(ok=>{if(!ok)lost=true;}).catch(()=>{lost=true;}).finally(()=>{heartbeatRunning=false;});},Math.max(250,config.taskLeaseMs/3));
+    let lost=false;let heartbeatRunning=false;const controller=new AbortController();a.signal=controller.signal;
+    const timer=setInterval(()=>{if(heartbeatRunning)return;heartbeatRunning=true;void engine.heartbeat(a).then(ok=>{if(!ok){lost=true;controller.abort();}}).catch(()=>{lost=true;controller.abort();}).finally(()=>{heartbeatRunning=false;});},Math.max(250,config.taskLeaseMs/3));
     try{
      // Explicit test-only processing barrier for kill/SIGTERM acceptance; never enabled in production.
      if(config.testTaskDelayMs&&a.task.kind==='demo.digest')await new Promise(r=>setTimeout(r,config.testTaskDelayMs));

@@ -1,5 +1,93 @@
 # Provider 与业务存储状态
 
+## Xberg 文档 HTTP 适配器已接入（2026-11-14）
+
+按用户给定协议接入 `/extract`、`/extract-async`、`/jobs/{job_id}`、取消及 parse-run 资源清单读取；基址配置为测试示例 `http://172.18.102.101:8000`，完整 config 原样发送。现有文件 Worker/FILE_UPLOAD 使用同一运行库，解析后进入原有关键词索引；支持长期同协议 API 模式。完整 KB 产物、规范 Markdown 和已确认上传的图片元数据保存，未重新引入 MinerU 或图片二次 OCR。
+
+19 项 mock HTTP 单元测试、12 项真实隔离依赖/loopback 解析替身集成通过，含真实 Milvus BM25 检索。全量394/160通过。实际内网提取、模型/镜像版本、OSS 对象和质量按用户要求不探测，本轮没有云写操作；真实环境仍默认 disabled，待测试环境部署。见[本轮验收](acceptance/document-extraction.md)。
+
+## 单 ECS 解析机与长期 API 模式（2026-11-14）
+
+默认 disabled；新增 ECS RPC 适配器和 Redis 运行库，当前目标由环境指定为 `i-2zegwjwejyvpxoluhyx8` / cn-beijing / `172.18.102.101`。真实 DescribeInstances 只读确认 ecs.gn7i-c16g1.4xlarge（A10）、PostPaid/VPC、无报告本地盘/操作锁、`Stopped + StopCharging`。Start/Stop SDK 自动重试关闭，实际云写操作未执行；真实解析端口/健康/协议仍待核对。
+
+`always-on` 模式允许固定 HTTPS API 路径，不需 ECS 凭据，继续使用同一 Redis 去重/并发控制。新增 38 项 mock/虚拟时钟测试、26 项真实 Redis/Lua/PubSub 测试；全量 unit/contract 375、隔离依赖 146 通过。未改业务 PG/Schema/数据卷、现行 Provider 或 App。详见[使用手册](runbooks/document-parser-machine.md)。
+
+## A10 OSS/KBXML同镜像实测（2026-11-13）
+
+48核A10按量真实成功、17.943984元/小时计算参考；镜像r4摘要与T4对照相同。完整HTTP351.727秒、OSS2.368秒，751去重对象178630201字节全部SHA/解码/ledger核验并清理；GPU均值4.43%，质量仍有漏字。未接入业务Provider，长期GPU disabled。详见[记录](acceptance/xberg-a10-kbxml-retest.md)。
+
+## Xberg OSS/KBXML真实T4续测（2026-11-13）
+
+内网ACR锁定c8ad143d…783e25/r4；真实RAM统一变量用于测试OSS。T4/A10抢占实际缺货，按量T4第二档成功。OSS16并发/队列128，751对象178630201字节、4.292秒、重试0；UUID/字节/ledger和本地解码通过，已清理测试对象。既有业务Provider未接入本次KB协议，长期GPU disabled。详见[记录](acceptance/xberg-oss-kbxml-trial.md)。
+
+## Xberg OSS/KBXML核对与申请未完成（2026-11-13）
+
+新镜像digest c8ad143d…783e25/build xberg-kbxml-v1-20261113-r4已静态核对；新增北京I交换机已加入本机GPU配置。T4单区/四区及A10两档实际申请均NoStock，关闭缓存和570驱动也未成功，无325页解析或性能结果。所有自有调度实例和临时输入已清理，新镜像缓存Ready并保留。长期GPU仍disabled，未改业务/App/数据库。详见[本轮记录](acceptance/xberg-oss-kbxml-trial.md)。
+
+## Xberg A10独立镜像验收（2026-11-13）
+
+PP-OCRv5 server/ONNX CUDA/batch6/150DPI/原生优先，无force_ocr_pages，真实A10全文请求342.025秒、零逐页失败，但第19页证书标准漏字。响应登记139页OCR输入，768图落盘与引用全部验证；47条混合OCR拒绝及6条缺字形日志另存，不以响应单条告警代表全部日志。未接业务Provider/Task/Worker，长期GPU disabled。详见[本轮验收](acceptance/xberg-a10-native-first-trial.md)。
+
+## 阿里云短信（2026-11-12）
+
+官方 `@alicloud/dysmsapi20170525@4.6.0` 已接入现有 `SmsProvider`，支持单条模板发送、BizId 回执查询及本机工具。通过共享 RAM AK 查询确认现有签名“触达科技”和花火身份验证码模板 `SMS_508520316` 审核通过；用户授权的一条真实短信已获 delivered 回执并由用户确认收到。该真实证据独立于模拟 SDK 和真实 PG 的 OTP 测试。
+
+337 项 unit/contract 与 120 项隔离真实 PG/Redis/Milvus integration 通过。另用 `127.0.0.1:13000` 的独立开发实例和 Android API 36 完成 Flutter 真实发送、重发与验证登录。该实例启用 `SMS_PROVIDER=live`、`SHOW_TEST_OTP=false`，原 `3000` 仍使用其现有迁移基线。详见[短信手册](runbooks/sms.md#flutter-真实短信联调)。
+
+## Xberg CUDA 新图片策略验收未通过（2026-11-12）
+
+新digest21753d34…cfe080d已在真实单T4完成325页请求806.159秒；22页Conv.2/cuDNN错误仅保留原文，图片0，第21页关键证书正文缺失。GPU8.19%、CPU平均2.47核；全程stdout/stderr已保存，不作为生产可用/等质量提速结论。测试实例与3临时OSS对象已清理，长期GPU仍disabled，无业务Provider/Task/Worker接入。详见[本轮验收](acceptance/xberg-cuda-image-policy-trial.md)。
+
+## MinerU 已移除（2026-11-12）
+
+该适配器已从源码、配置、环境文件、Compose和构建产物中删除，不保留disabled占位或兼容调用。PDF/Office解析停止；UTF-8文本/Markdown/CSV、既有资料授权读取和关键词索引保留。309项unit/contract及118项真实隔离PG/Redis/Milvus集成通过，未调用真实解析/付费模型。业务运行容器未重建，详见[移除验收](acceptance/mineru-removal.md)。以下旧阶段提及仅作为历史证据。
+
+## FunASR 独立 ECI（2026-11-12）
+
+用户提供的 `funasr-eci:gpu-20261112` 在北京H单T4/4核/15GiB真实运行，模型/CUDA/鉴权通过并保留。随后完整7438.608秒音频一次POST：HTTP200/101.157秒，1523字符/218分段/4聚类标签；去标点后97.85%为“嗯”，质量未通过，聚类数不代表真实人数。实例MAX_AUDIO_SECONDS从7200调为10800，未改模型；结果与原OSS导出403/直接ECI恢复分别留证，无重复推理，源文件保留。NoSpot、1小时期限、私网8000、未挂NAS。未接业务ASR Provider或持久任务，未做声纹注册/身份匹配。见[实例与音频记录](acceptance/funasr-eci.md)。
+
+## Xberg CUDA全文接口与降级（2026-11-12）
+
+完整325页请求924.558秒返回325页/197,537字符/97表格，但批次1仍有18页整页GPU OCR/cuDNN错误，17页经内嵌图片恢复、1页保留原生文本，41警告；兼容/等质量验收未通过。平均GPU7.43%，末尾176.6秒为GPU0/CPU密集观测，缺函数trace不直接归因。仅本地临时试验，未接业务Provider或改核心/库；资源清理确认，见[全文CUDA验收](acceptance/xberg-cuda-full-trial.md)。
+
+## Xberg CUDA镜像配置复核（2026-11-12）
+
+cuda-t4默认识别批次6在真实T4上三次Conv.2/cuDNN错误，HTTP200但无正文；官方批次1配置绕行后同源20页完成，热请求均值18.633秒，GPU均值8.33%，慢于历史CPU8核10.477秒。证书邮编漏字保留，默认/等质量验收未通过。仅调用侧配置，无核心/权重/库补丁或业务Provider接线；实例与临时OSS已清理。见[验收](acceptance/xberg-cuda-trial.md)。
+
+## Xberg 325页4核全文实测（2026-11-12）
+
+同一325页PDF完整输入，4vCPU/16GiB/0GPU，北京H、NoSpot、固定Xberg1.3.9镜像。成功请求890.026秒（14分50秒），325页均非空、197,589字符、97个表格对象，顶层OCR页失败记录0。257页请求OCR、68页文本层，结果缓存关闭。 首轮默认600秒内部超时后，用官方3000秒参数在同实例完成；7条质量警告保留，未接业务Provider或修改核心。实例及临时OSS已清理。见[全文验收](acceptance/xberg-full-trial.md)。
+
+## Xberg按页OCR参数实测（2026-11-11）
+
+官方按页OCR与线程预算真实对照通过：同源20页，4核全页热38.804秒→4核选择性18.430秒→8核选择性10.477秒。每组选择性重复2次，正文跨核逐字一致，关键证书/目录与表格内容核对；规则为本地测试启发式，仍有错字/警告，未接入生产Provider或修改核心。实例与临时OSS已清理，见[验收](acceptance/xberg-optimization-trial.md)。
+
+## Xberg CPU中文OCR实测（2026-11-11）
+
+实际版本1.3.9，前20页在4核/16GiB完成Paddle ONNX CPU OCR；缓存路径修正后两次HTTP41.763/41.104秒、正文/表格一致。默认native虽0.148秒但漏图片文字，强制OCR也有目录编号丢失和水印噪声；没有接入业务Provider或宣称替代VLM。临时实例及OSS对象已清理，详细边界和原始失败见[验收记录](acceptance/xberg-trial.md)。
+
+## 新OCR标签镜像HTTP验收（2026-11-11）
+
+新标签前10页HTTP200/complete、0issues，真实单T4/FP16/Transformers与请求后常驻健康通过；批次合计147.383秒，旧149.078秒，单次差-1.137%不作为显著提速。新增light_ocr未接HTTP，未验证其独立性能。临时实例/两个OSS对象精确清理，原文件保留。详见[对照验收](acceptance/gpu-parse-ocr-trial.md)。
+
+## huahuo-parse 单 T4 真实部分解析（2026-11-11）
+
+按用户要求提前停止，已导出《电子标书.pdf》第1—78页/325页，HTTP200/partial；190,663字符Markdown、27图片、原始响应与坐标全部取回并核验。247个未处理页错误为人工终止产生，另有第33页1条跨页表格待复核，不作为完整全文验收。北京H/第三档/单T4实际CUDA、Transformers FP16、batch2通过；当前与此前试验实例均已释放，独立ID/标签复核0，临时OSS对象删除，源文件保留。
+
+性能报告及CSV/JSON已导出：ID1.236秒、拉镜像305.387秒、模型健康观测23.017秒；正常38批/76页P50=19.071秒、P95=226.853秒，密集采样窗口GPU均值约66%、显存峰值3.85GiB。人工暂停及在途收尾不混入基准；原控制脚本恢复后EPIPE失败保留，独立导出成功与清理分别有证据。SDK大参数POST修复后105项GPU单测、全量306项unit/contract及Typecheck/Lint/Build通过；无业务角色/数据库/卷/App变更，长期GPU仍disabled、持久Task/Worker未接入。完整边界见[验收记录](acceptance/gpu-parse-trial.md)。
+
+## 阿里云 AK 配置统一（2026-11-11）
+
+OSS 与 ECI 统一读取 `ALIYUN_RAM_ACCESS_KEY_ID`、`ALIYUN_RAM_ACCESS_KEY_SECRET`，删除旧 OSS 专用 AK 变量且不回退；本地实际值保留，各环境文件只定义一组。六份示例及 Compose 一致，API/Worker 注入共享 AK，其他角色不注入。305 项 unit/contract、Typecheck/Lint/Build 与离线 Compose 校验通过；本轮无真实供应商调用，也未改变 GPU disabled 状态。当前运行容器未重建，新命名将在后续构建重建时生效。
+
+## ECI GPU 增量（2026-11-11）
+
+第二次授权的真实阶段计时已完成：本轮单次创建北京 H / 第 4 档一台，流程到实例 ID 1.797 秒、到首次 Ready 31.785 秒；初始化缺字段自动等待，同一实例核验后释放，独立 ID/标签复查均为 0。镜像与容器启动约 1 秒合计，具体 Pulled 事件未采集完整，不能细拆。长期配置仍 disabled，未接入持久 Worker 或验证模型计算；本轮 104 项 GPU 单测及后端编译通过。见 [第二次计时验收](acceptance/gpu-spot-timing.md)。下段为首轮试验记录。
+
+北京 T4/单卡、四档优先级和同 VPC 三交换机已配置，凭据按授权直接读取根 `.env` 的 `ALIYUN_RAM_ACCESS_KEY_ID/SECRET`。只读预检通过后，用户又明确授权一次真实试申请：北京 H 实际分配第 4 档，单 GPU、Running/Ready；以同一 ID 恢复处理启动期校验问题后已释放，独立 ID/标签复查均为 0。真实创建、查询、删除及 Nginx 启动已验证，GPU 计算与持久 Task/Worker 未验证/未接入。模块配置仍 disabled，未启用长期抢卡。初始化缺字段按 transient 等待，实际错配仍拒绝；GPU 单测 104 项、全量 unit/contract 300 项。详见 [真实试验验收](acceptance/gpu-spot-trial.md)。以下为首版历史边界记录，当前状态以本段为准。
+
+`gpu-spot` 已实现官方 SDK 适配、市场价申请、同步/异步缺货重试、未知提交恢复、状态观察和归属标签核验后的释放，默认 disabled。83 项新增测试使用 Mock Provider/SDK 与传输替身，全量 unit/contract 279 项通过；没有真实 GPU、RAM 权限、库存或计费验证。尚未连接持久 Task/Worker、长期调度和运行角色配置，地域/规格/镜像/VPC/RAM 待确定，不借用 OSS 凭据。详见 [GPU 运行手册](runbooks/gpu-spot.md)。以下记录保持各自原验收时间与范围。
+
 唯一初始化基线`migrations/0001_initial_schema.sql`已应用至原阿里云 `huahuo` 库的新 `public` 并部署统一用户模型。旧 `public` 整体改名封存为 `initialization_backup`，58表4149行及OID/relfilenode/视图内容摘要一致，旧行零删除；四运行角色无归档Schema的USAGE/CREATE，不做兼容查询。没有新建数据库，数据库凭据、环境配置和JWT私钥未变。
 
 ## 基础设施与统一认证
@@ -14,7 +102,7 @@
 | 协议接受 | `user_agreement_acceptances`记录版本、时间和接受入口 | 生产需配置协议与隐私版本；记录接受不等于法律文案已审核 |
 | Service Key | 两个方向独立Key，通过`X-Huahuo-Service-Key`发送 | 内部用户接口要求JWT+Service Key；Service Key不能替代用户身份 |
 | Redis / BullMQ | 本地Redis、Outbox、任务、租约和补偿；PG为状态事实来源 | 独立临时PG/Redis测试与业务部署分开记录；认证不因缓存故障降级放行 |
-| SMS | 显式mock与`LiveSmsProvider`接口 | mock需`ALLOW_MOCK_PROVIDERS=true`，回显另需`SHOW_TEST_OTP=true`，生产禁止；真实短信transport未配置时拒绝调用 |
+| SMS | 阿里云官方 SDK 的 `AliyunSmsProvider`、模板发送与回执工具 | 单条真实送达已验证；mock 仍需显式配置且生产禁止，live 缺配置拒绝启动，详见上方本轮证据 |
 | Billing | 基线包含既有账务结构与开发政策，预留、账本和未知用量状态由业务事务管理 | active用户与任务/Run归属校验；默认disabled，开发政策不代表正式价格或真实支付接通 |
 | Dify / ASR / Push / Payment | 未接入相应真实供应商流程 | 不把接口占位、已有上传或文件解析描述成这些能力已完成 |
 
@@ -30,21 +118,19 @@
 | TagExtractor | 默认disabled；显式deterministic fixture仅用于开发测试；llm/dify transport未接通 | 失败、过期修订及人工标签fence不覆盖原文；没有正文时不调用Provider |
 | 标签图谱 | 有效`note_tags`的有界实时投影、计数和共同标签证据 | 不建图谱正文副本、Neo4j或语义相似边；App显式edges消费需单独联调 |
 
-## 文档处理与RAG
+## 知识库处理与检索
 
-当前架构见[模块化文档处理](runbooks/modular-document-processing.md)和[Milvus手册](runbooks/milvus.md)。文件目标为`huahuo_chunks`，Note正文目标为`huahuo_manual_text`；它们是两类业务的Collection，不是迭代副本。现有代码配置名`manual-text`实际表示Note正文，人工输入或上游生成不再细分为不同Chunk类型。
+当前模式和完整验收见 [知识库手册](runbooks/milvus.md) 与 [本阶段验收](acceptance/knowledge-base.md)。
 
-| 能力 | 当前实现 | 验证与边界 |
+| 能力 | 当前实现 | 验证边界 |
 | --- | --- | --- |
-| 文档解析和资产 | 复用现有文件解析入口、图片/OCR绑定、原始Markdown与enriched Markdown | 生产不读layout；本地Fixture不冒充真实供应商调用；本次不改解析器 |
-| 章节分析 | 同次生成TOC、临时章节和不重叠正文范围 | PDF保存完整Markdown及TOC；Note不生成TOC；最终Schema没有持久化章节Parent表 |
-| 子Chunk | LangChain 1.0.2、模型本地tokenizer；默认500/800/64 tokens | 保留UTF-16 offset、Unicode、overlap及最终Embedding输入上限；数量由正文和配置决定 |
-| 正文和Chunk | 文件`rag_ingestion_versions/rag_child_chunks`；Note`note_index_jobs/document_ingestion_chunks` | PG是正文/状态事实来源；parent_id分别指向整篇来源，普通关联键由业务校验 |
-| 通用RAG入库 | `indexChunks()`与明确绑定的向量适配器；有界批次/并发/超时/重试 | 核心、薄Tool和业务编排分离，不查询数据库猜测元数据或目标 |
-| Embedding | Qwen/Qwen3-Embedding-8B，4096维，OpenAI-compatible `/embeddings` | 历史公开样本真实验证不等于本次新文档已完成；本次SQL初始化不隐含模型调用 |
-| Milvus | SDK2.6.17；Dense HNSW/COSINE、原生BM25、多语言Analyzer、Hybrid/RRF | 保持两个业务Collection及既有Schema，不因SQL模型切换重建或付费补向量 |
-| RAG查询 | Milvus召回后执行PG归属/有效状态复核，读取真实正文，再走独立HTTP Rerank | 无PG RAG关键词召回或Node本地RRF；无章节Parent回溯；新模型发布后仍须PG归属复核，不能仅靠旧Milvus记录返回结果 |
-| 修订、恢复与清理 | 来源/修订、模型/tokenizer/目标快照、稳定ID及任务lease fence | 缺快照明确失败；新索引成功前保留其有效前版，发布后定向清理；SQL与Milvus无跨库事务 |
+| 解析/图文/OCR | 复用已有自研解析和 OSS 绑定 | 本次未改解析器；集成使用明确的 Mock 解析产物 |
+| 资料关键词 | 2000 码点 / 零 overlap / Milvus 原生 BM25 | 真实临时 Milvus；模型和模型 tokenizer 调用为零 |
+| 笔记混合 | 500 码点 / 约 50 字 overlap / 原生 Hybrid+RRF | 真实临时 Milvus，确定性 1024 维 Embedding 替身 |
+| Tokenizer | 官方 BAAI/bge-m3 固定文件与 SHA-256 | 真实文件编码验证；输入上限8192 tokens |
+| Embedding | BAAI/bge-m3，原生1024维、bge-m3-1024 profile | 凭据沿用，未调用付费上游，不把替身测试当真实模型成功 |
+| Rerank | 独立HTTP适配器与Note时间预算 | 关键词不调用；替身验证失败回退及在途修订复核 |
+| 业务正文 | Note原文、资料 canonical 对象、独立导入原文 | 四张索引表不保存切片正文或向量 |
 
 ## 验收状态
 

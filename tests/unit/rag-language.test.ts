@@ -28,14 +28,13 @@ describe('RAG language routing', () => {
   });
 });
 
-describe('Milvus v2 schema contract', () => {
+describe('Milvus schema contract', () => {
   it('uses one text field and a native BM25 function with configurable dense dimensions', () => {
-    const fields = buildMilvusSchema(4096);
+    const fields = buildMilvusSchema('note-hybrid');
     const field = (name: string) => fields.find(value => value.name === name);
     expect(field('id')).toMatchObject({ is_primary_key: true, autoID: false, max_length: 256 });
-    expect(field('parent_id')).toMatchObject({ default_value: '' });
-    expect(field('dense_vector')).toMatchObject({ data_type: DataType.FloatVector, dim: 4096 });
-    expect(buildMilvusSchema(1024).find(value => value.name === 'dense_vector')?.dim).toBe(1024);
+    expect(field('dense_vector')).toMatchObject({ data_type: DataType.FloatVector, dim: 1024 });
+    expect(buildMilvusSchema('note-hybrid').find(value => value.name === 'dense_vector')?.dim).toBe(1024);
     expect(field('text')).toMatchObject({ max_length: 65535, enable_analyzer: true, multi_analyzer_params: MULTI_ANALYZER_PARAMS });
     expect(field('sparse_vector')).toMatchObject({ data_type: DataType.SparseFloatVector, is_function_output: true });
     expect(BM25_FUNCTION).toMatchObject({ type: FunctionType.BM25, input_field_names: ['text'], output_field_names: ['sparse_vector'] });
@@ -44,15 +43,13 @@ describe('Milvus v2 schema contract', () => {
   });
 
   it('keeps analyzer settings independent across collection creation attempts', () => {
-    const first = buildMilvusSchema(4096).find(field => field.name === 'text');
-    const second = buildMilvusSchema(4096).find(field => field.name === 'text');
+    const first = buildMilvusSchema('note-hybrid').find(field => field.name === 'text');
+    const second = buildMilvusSchema('note-hybrid').find(field => field.name === 'text');
     expect(first?.multi_analyzer_params).toEqual(second?.multi_analyzer_params);
     expect(first?.multi_analyzer_params).not.toBe(second?.multi_analyzer_params);
     expect(MULTI_ANALYZER_PARAMS.analyzers.zh).toEqual(MULTI_ANALYZER_PARAMS.analyzers.mixed);
     expect(MULTI_ANALYZER_PARAMS.alias.unknown).toBe('default');
   });
 
-  it.each([0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid dense dimension %s', dimensions => {
-    expect(() => buildMilvusSchema(dimensions)).toThrow('MILVUS_INVALID_DIMENSIONS');
-  });
+
 });

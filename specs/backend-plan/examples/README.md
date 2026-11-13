@@ -1,6 +1,6 @@
 # 配置蓝图：交给Codex落实，不是已可启动的后端
 
-App只读参照：https://github.com/kyriswu/huahuo-app 。本目录不含App源码或实现后的Node源码。
+App只读参照：`../huahuo-ai`（本机源码；尚无远端） 。本目录不含App源码或实现后的Node源码。
 
 P01把本目录中的Compose/Dockerfile/脚本范例落实到**独立后端根目录**，生成实际src、package.json、lockfile、migration、build和启动入口后再运行。不要直接在此目录执行compose up宣称后端已经完成。
 
@@ -26,7 +26,7 @@ migrate不能重复依赖自身，应用也不depends_on postgres。postgres首�
 
 ## v3 本机蓝图
 
-默认目录Code/huahuo-server，App在../huahuo-app。新增 `scripts/preflight-local.mjs`（无第三方依赖，只读预检）和 `scripts/ensure-docker-local.sh`（默认检查，--start才启动已装本机Docker）。两者可以在规范目录阅读/执行，**不是业务已经完成**。工具脚本不得作为业务容器必须运行的启动步骤。
+默认目录Code/huahuo-server，App在../huahuo-ai。新增 `scripts/preflight-local.mjs`（无第三方依赖，只读预检）和 `scripts/ensure-docker-local.sh`（默认检查，--start才启动已装本机Docker）。两者可以在规范目录阅读/执行，**不是业务已经完成**。工具脚本不得作为业务容器必须运行的启动步骤。
 
 Dockerfile新增可选tooling target；主机缺Node/pnpm时可用固定镜像的临时工具容器生成Server依赖/锁文件并验证。只挂后端，合理设置文件所属用户，不能为了“看App”把整个Code目录挂载到构建或运行容器。
 

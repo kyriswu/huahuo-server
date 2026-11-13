@@ -1,9 +1,14 @@
 import type { QueueName } from '../modules/tasks/model.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
+import { loadDocumentParserMachineConfig, type DocumentParserMachineConfig } from './document-parser-machine.js';
+import { loadDocumentExtractionConfig, type DocumentExtractionConfig } from './document-extraction.js';
 export type Role = 'api-server' | 'admin' | 'worker' | 'scheduler' | 'migrate';
 export type Env = Record<string, string | undefined>;
 export interface AppConfig {
+  documentExtraction: DocumentExtractionConfig;
+  documentParserMachine: DocumentParserMachineConfig;
   queuePrefix:string; workerQueues:QueueName[]; taskLeaseMs:number; taskRedeliveryMs:number; schedulerIntervalMs:number; demoTasks:boolean; testTaskDelayMs:number;
   role: Role; host: string; port: number; databaseUrl: string; poolMax: number;
   httpRequestTimeoutMs: number; httpConnectionTimeoutMs: number;
@@ -15,6 +20,7 @@ export interface AppConfig {
   jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string; previousPublicKeyPem?:string; previousKeyId?:string };
   agentToServerServiceKey?: string; serverToAgentServiceKey?: string;
   smsProvider: 'mock' | 'disabled' | 'live'; showTestOtp: boolean;
+  smsAliyun?: AliyunOtpConfig;
   appEnv: string; agreementVersion: string; privacyVersion: string; adminOrigin: string;
   billingMode: 'disabled' | 'development' | 'live'; billingPolicyVersion: string;
   storageDriver: 'local' | 's3' | 'aliyun-oss'; storageLocalRoot: string; maxUploadBytes: number;
@@ -25,14 +31,13 @@ export interface AppConfig {
   storageAliyunOss?: { endpoint:string; region:string; bucket:string; accessKeyId:string; accessKeySecret:string; secure:boolean; timeoutMs:number; keyPrefix?:string; maxBytes:number };
   milvus: MilvusConfig;
   rag: RagConfig;
-  manualText: { enabled: boolean; collection?: string; database?: string; targetTokens: number; maxEmbeddingTokens: number; overlapTokens: number };
+  kb: { noteEnabled: boolean; noteCollection: string; documentCollection: string };
 }
 export interface MilvusConfig {
   address?: string;
   username?: string;
   password?: string;
   database: string;
-  collection: string;
   tls: boolean;
   createIfMissing: boolean;
   searchConcurrency: number;
@@ -50,31 +55,22 @@ export interface RagConfig {
   maxSourceBytes: number;
   plainTextMaxChars: number;
   downloadTimeoutMs: number;
-  mineruBaseUrl: string;
-  mineruToken?: string;
-  mineruModel: 'pipeline' | 'vlm' | 'MinerU-HTML';
-  mineruPollIntervalMs: number;
-  mineruTimeoutMs: number;
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
   embeddingModel: string;
   embeddingDimensions: number;
   embeddingProfile: string;
-  indexBuildId: string;
   embeddingBatchSize: number;
   indexingConcurrency:number;
   embeddingTimeoutMs: number;
   embeddingMaxRetries: number;
-  embeddingSendDimensions: boolean;
-  childTargetTokens: number;
-  childMaxTokens: number;
-  childOverlapTokens: number;
   providerMode: 'live' | 'mock' | 'disabled';
   rerankProvider: 'disabled' | 'mock' | 'http';
   rerankBaseUrl?: string;
   rerankApiKey?: string;
   rerankModel: string;
   rerankTimeoutMs: number;
+  noteRerankBudgetMs: number;
 }
 export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   const fail = (key: string): never => { throw new Error(`INVALID_CONFIG:${key}`); };
@@ -138,6 +134,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (!['mock', 'disabled', 'live'].includes(smsProvider)) fail('SMS_PROVIDER');
   if (smsProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('SMS_PROVIDER');
   if (env.SHOW_TEST_OTP === 'true' && (appEnv === 'production' || smsProvider !== 'mock')) fail('SHOW_TEST_OTP');
+  const smsAliyun = role === 'api-server' && smsProvider === 'live' ? loadAliyunOtpConfig(env) : undefined;
   const billingMode = (env.BILLING_MODE ?? (appEnv === 'development' ? 'development' : 'disabled')) as AppConfig['billingMode'];
   if (!['disabled', 'development', 'live'].includes(billingMode)) fail('BILLING_MODE');
   if (appEnv === 'production' && billingMode === 'development') fail('BILLING_MODE');
@@ -156,58 +153,45 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   const ragProvider=(env.RAG_PROVIDER_MODE??'disabled') as RagConfig['providerMode'];
   if(!['live','mock','disabled'].includes(ragProvider))fail('RAG_PROVIDER_MODE');
   if(ragProvider==='mock' && (appEnv==='production'||env.ALLOW_MOCK_PROVIDERS!=='true'))fail('RAG_PROVIDER_MODE');
-  const mineruModel=(env.RAG_MINERU_MODEL??'vlm') as RagConfig['mineruModel'];
-  if(!['pipeline','vlm','MinerU-HTML'].includes(mineruModel))fail('RAG_MINERU_MODEL');
   const rag: RagConfig = {
-    tokenizerPath: env.RAG_TOKENIZER_PATH?.trim() || '.local/tokenizers/qwen3-embedding-8b/tokenizer.json',
-    tokenizerConfigPath: env.RAG_TOKENIZER_CONFIG_PATH?.trim() || '.local/tokenizers/qwen3-embedding-8b/tokenizer_config.json',
-    tokenizerMaxInputTokens: integer('RAG_TOKENIZER_MAX_INPUT_TOKENS', 32768, 32, 131072),
+    tokenizerPath: env.RAG_TOKENIZER_PATH?.trim() || 'resources/tokenizers/bge-m3/tokenizer.json',
+    tokenizerConfigPath: env.RAG_TOKENIZER_CONFIG_PATH?.trim() || 'resources/tokenizers/bge-m3/tokenizer_config.json',
+    tokenizerMaxInputTokens: integer('RAG_TOKENIZER_MAX_INPUT_TOKENS', 8192, 8192, 8192),
     enabled: bool('RAG_INGESTION_ENABLED', true),
     sourceAllowedHosts: csv('RAG_SOURCE_ALLOWED_HOSTS'),
     maxSourceBytes: integer('RAG_MAX_SOURCE_BYTES', 200*1024*1024, 1, 2*1024*1024*1024),
     plainTextMaxChars: integer('RAG_PLAIN_TEXT_MAX_CHARS', 50_000, 1, 5_000_000),
     downloadTimeoutMs: integer('RAG_DOWNLOAD_TIMEOUT_MS', 120_000, 1_000, 600_000),
-    mineruBaseUrl: env.RAG_MINERU_BASE_URL?.trim() || 'https://mineru.net',
-    ...(env.RAG_MINERU_TOKEN?.trim() ? { mineruToken: env.RAG_MINERU_TOKEN.trim() } : {}),
-    mineruModel,
-    mineruPollIntervalMs: integer('RAG_MINERU_POLL_INTERVAL_MS', 2_000, 250, 60_000),
-    mineruTimeoutMs: integer('RAG_MINERU_TIMEOUT_MS', 900_000, 5_000, 3_600_000),
     ...(env.RAG_EMBEDDING_BASE_URL?.trim() ? { embeddingBaseUrl: env.RAG_EMBEDDING_BASE_URL.trim() } : {}),
     ...(env.RAG_EMBEDDING_API_KEY?.trim() ? { embeddingApiKey: env.RAG_EMBEDDING_API_KEY.trim() } : {}),
-    embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || 'Qwen/Qwen3-Embedding-8B',
-    embeddingDimensions: integer('RAG_EMBEDDING_DIMENSIONS', 4096, 1, 16_384),
-    embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || 'qwen3-embedding-8b-4096',
-    indexBuildId: env.RAG_INDEX_BUILD_ID?.trim() || env.RAG_EMBEDDING_PROFILE?.trim() || 'qwen3-embedding-8b-4096',
+    embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || 'BAAI/bge-m3',
+    embeddingDimensions: integer('RAG_EMBEDDING_DIMENSIONS', 1024, 1024, 1024),
+    embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || 'bge-m3-1024',
     embeddingBatchSize: integer('RAG_INGEST_BATCH_SIZE', 32, 1, 256),
     indexingConcurrency:integer('RAG_INDEX_CONCURRENCY',2,1,16),
     embeddingTimeoutMs: integer('RAG_EMBEDDING_TIMEOUT_MS', 30_000, 1_000, 600_000),
-    embeddingMaxRetries: integer('RAG_EMBEDDING_MAX_RETRIES', 2, 0, 9),
-    embeddingSendDimensions: bool('RAG_EMBEDDING_SEND_DIMENSIONS', false),
-    childTargetTokens: integer('RAG_CHILD_TARGET_TOKENS', 500, 32, 4096),
-    childMaxTokens: integer('RAG_CHILD_MAX_TOKENS', 800, 32, 8192),
-    childOverlapTokens: integer('RAG_CHILD_OVERLAP_TOKENS', 64, 0, 4095),
+    embeddingMaxRetries: integer('RAG_EMBEDDING_MAX_RETRIES', 2, 0, 5),
     providerMode: ragProvider,
     rerankProvider: ((env.RAG_RERANK_PROVIDER?.trim() || 'disabled') as RagConfig['rerankProvider']),
     ...(env.RAG_RERANK_BASE_URL?.trim() ? { rerankBaseUrl: env.RAG_RERANK_BASE_URL.trim() } : {}),
     ...(env.RAG_RERANK_API_KEY?.trim() ? { rerankApiKey: env.RAG_RERANK_API_KEY.trim() } : {}),
     rerankModel: env.RAG_RERANK_MODEL?.trim() || 'qwen3-rerank',
     rerankTimeoutMs: integer('RAG_RERANK_TIMEOUT_MS', 30_000, 1_000, 600_000),
+    noteRerankBudgetMs: integer('RAG_NOTE_RERANK_BUDGET_MS', 200, 1, 30_000),
   };
+  for(const [key,value] of [['RAG_EMBEDDING_BASE_URL',rag.embeddingBaseUrl],['RAG_RERANK_BASE_URL',rag.rerankBaseUrl]] as const){
+    if(!value)continue;try{const endpoint=new URL(value);if(!['http:','https:'].includes(endpoint.protocol)||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||(appEnv==='production'&&endpoint.protocol!=='https:'))fail(key);}catch{fail(key);}
+  }
   if (!['disabled', 'mock', 'http'].includes(rag.rerankProvider)) fail('RAG_RERANK_PROVIDER');
   if (rag.rerankProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('RAG_RERANK_PROVIDER');
   if (rag.rerankProvider === 'http' && (!rag.rerankBaseUrl || !rag.rerankApiKey)) fail('RAG_RERANK_CONFIG');
-  if(rag.childTargetTokens>rag.childMaxTokens||rag.childOverlapTokens>=rag.childTargetTokens||rag.childMaxTokens>rag.tokenizerMaxInputTokens)fail('RAG_CHILD_TOKENS');
-  const manualText: AppConfig['manualText'] = {
-    enabled: bool('MANUAL_TEXT_ENABLED', false),
-    ...(env.MANUAL_TEXT_MILVUS_COLLECTION?.trim() ? {collection:env.MANUAL_TEXT_MILVUS_COLLECTION.trim()} : {}),
-    ...(env.MANUAL_TEXT_MILVUS_DATABASE?.trim() ? {database:env.MANUAL_TEXT_MILVUS_DATABASE.trim()} : {}),
-    targetTokens: integer('MANUAL_TEXT_TARGET_TOKENS',500,1,8192),
-    maxEmbeddingTokens: integer('MANUAL_TEXT_MAX_EMBEDDING_TOKENS',800,1,8192),
-    overlapTokens: integer('MANUAL_TEXT_OVERLAP_TOKENS',64,0,8191),
+  if(rag.embeddingModel!=='BAAI/bge-m3'||rag.embeddingProfile!=='bge-m3-1024')fail('RAG_EMBEDDING_PROFILE');
+  const kb = {
+    noteEnabled: bool('KB_NOTE_INDEXING_ENABLED', false),
+    noteCollection: env.KB_NOTE_HYBRID_COLLECTION?.trim() || 'huahuo_kb_note_hybrid_chunks',
+    documentCollection: env.KB_DOCUMENT_KEYWORD_COLLECTION?.trim() || 'huahuo_kb_keyword_chunks',
   };
-  if(manualText.enabled&&(!manualText.collection||!manualText.database))fail('MANUAL_TEXT_VECTOR_TARGET');
-  if(rag.enabled&&ragProvider==='live'&&(!env.MILVUS_DATABASE?.trim()||!env.MILVUS_COLLECTION?.trim()))fail('RAG_VECTOR_TARGET');
-  if(manualText.overlapTokens>=manualText.targetTokens||manualText.targetTokens>manualText.maxEmbeddingTokens||manualText.maxEmbeddingTokens>rag.tokenizerMaxInputTokens)fail('MANUAL_TEXT_TOKENS');
+  if(kb.noteCollection===kb.documentCollection||![kb.noteCollection,kb.documentCollection].every(v=>/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(v)))fail('KB_COLLECTIONS');
   const maxUploadBytes=integer('MAX_UPLOAD_BYTES',100*1024*1024,1,2*1024*1024*1024);
   const httpRequestTimeoutMs=integer('HTTP_REQUEST_TIMEOUT_MS',60_000,1_000,600_000);
   const httpConnectionTimeoutMs=integer('HTTP_CONNECTION_TIMEOUT_MS',65_000,1_000,600_000);
@@ -215,7 +199,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   let storageS3:AppConfig['storageS3'];
   if(storageDriver==='s3'&&['api-server','worker'].includes(role))storageS3={endpoint:url('STORAGE_S3_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_S3_REGION??'us-east-1',bucket:required('STORAGE_S3_BUCKET'),accessKeyId:required('STORAGE_S3_ACCESS_KEY_ID'),secretAccessKey:required('STORAGE_S3_SECRET_ACCESS_KEY'),maxBytes:maxUploadBytes};
   let storageAliyunOss:AppConfig['storageAliyunOss'];
-  if(storageDriver==='aliyun-oss'&&['api-server','worker'].includes(role))storageAliyunOss={endpoint:url('STORAGE_ALIYUN_OSS_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_ALIYUN_OSS_REGION??'cn-beijing',bucket:required('STORAGE_ALIYUN_OSS_BUCKET'),accessKeyId:required('STORAGE_ALIYUN_OSS_ACCESS_KEY_ID'),accessKeySecret:required('STORAGE_ALIYUN_OSS_ACCESS_KEY_SECRET'),secure:env.STORAGE_ALIYUN_OSS_SECURE!=='false',timeoutMs:integer('STORAGE_ALIYUN_OSS_TIMEOUT_MS',120000,1000,600000),...(env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim()?{keyPrefix:env.STORAGE_ALIYUN_OSS_KEY_PREFIX.trim()}:{}),maxBytes:maxUploadBytes};
+  if(storageDriver==='aliyun-oss'&&['api-server','worker'].includes(role))storageAliyunOss={endpoint:url('STORAGE_ALIYUN_OSS_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_ALIYUN_OSS_REGION??'cn-beijing',bucket:required('STORAGE_ALIYUN_OSS_BUCKET'),accessKeyId:required('ALIYUN_RAM_ACCESS_KEY_ID'),accessKeySecret:required('ALIYUN_RAM_ACCESS_KEY_SECRET'),secure:env.STORAGE_ALIYUN_OSS_SECURE!=='false',timeoutMs:integer('STORAGE_ALIYUN_OSS_TIMEOUT_MS',120000,1000,600000),...(env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim()?{keyPrefix:env.STORAGE_ALIYUN_OSS_KEY_PREFIX.trim()}:{}),maxBytes:maxUploadBytes};
   const logLevel = env.LOG_LEVEL ?? 'info';
   if (!['fatal','error','warn','info','debug','trace','silent'].includes(logLevel)) fail('LOG_LEVEL');
   const queuePrefix=env.REDIS_KEY_PREFIX??'huahuo-dev';
@@ -224,7 +208,11 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if(!workerQueues.length||new Set(workerQueues).size!==workerQueues.length||workerQueues.some(q=>!['content','ai','commercial','maintenance'].includes(q)))fail('WORKER_QUEUES');
   if(env.ENABLE_DEMO_TASKS==='true'&&appEnv==='production')fail('ENABLE_DEMO_TASKS');
   if(env.TEST_TASK_DELAY_MS&&appEnv!=='test')fail('TEST_TASK_DELAY_MS');
+  const documentExtraction:DocumentExtractionConfig=role==='migrate'?{enabled:false}:loadDocumentExtractionConfig(env);
+  const documentParserMachine:DocumentParserMachineConfig=role==='worker'||role==='scheduler'?loadDocumentParserMachineConfig(env):{enabled:false};
+  if(role==='worker'&&documentExtraction.enabled&&!documentParserMachine.enabled)fail('DOCUMENT_PARSER_MODE');
   return {
+    documentExtraction,documentParserMachine,
     queuePrefix,workerQueues,taskLeaseMs:integer('TASK_LEASE_MS',15000,1000,60000),taskRedeliveryMs:integer('TASK_REDELIVERY_MS',30000,1000,300000),schedulerIntervalMs:integer('SCHEDULER_INTERVAL_MS',1000,100,10000),
     demoTasks:env.ENABLE_DEMO_TASKS==='true',testTaskDelayMs:integer('TEST_TASK_DELAY_MS',0,0,5000),
     role, host: env.HOST ?? (['worker','scheduler'].includes(role) ? '127.0.0.1' : '0.0.0.0'),
@@ -253,7 +241,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
       ...(jwtPreviousKeyId ? { previousKeyId: jwtPreviousKeyId } : {}),
     },
     agentToServerServiceKey, serverToAgentServiceKey,
-    smsProvider, showTestOtp: env.SHOW_TEST_OTP === 'true' && appEnv !== 'production', appEnv,
+    smsProvider, smsAliyun, showTestOtp: env.SHOW_TEST_OTP === 'true' && appEnv !== 'production', appEnv,
     agreementVersion: env.USER_AGREEMENT_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     privacyVersion: env.PRIVACY_POLICY_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     adminOrigin: env.ADMIN_PUBLIC_BASE_URL ? new URL(env.ADMIN_PUBLIC_BASE_URL).origin : '',
@@ -264,16 +252,15 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
       ...(env.MILVUS_USERNAME?.trim() ? { username: env.MILVUS_USERNAME.trim() } : {}),
       ...(env.MILVUS_PASSWORD?.trim() ? { password: env.MILVUS_PASSWORD.trim() } : {}),
       database: env.MILVUS_DATABASE?.trim() || 'default',
-      collection: env.MILVUS_COLLECTION?.trim() || 'huahuo_chunks',
       tls: bool('MILVUS_TLS', true),
       createIfMissing: bool('MILVUS_CREATE_IF_MISSING', false),
-      searchConcurrency: integer('MILVUS_SEARCH_CONCURRENCY', 2, 1, 16),
+      searchConcurrency: integer('MILVUS_SEARCH_CONCURRENCY', 50, 1, 50),
       denseCandidates: integer('RAG_DENSE_CANDIDATES', 20, 1, 200),
       bm25Candidates: integer('RAG_BM25_CANDIDATES', 20, 1, 200),
       hybridCandidates: integer('RAG_HYBRID_CANDIDATES', 30, 1, 200),
       rrfK: integer('RAG_RRF_K', 60, 1, 10000),
     },
     rag,
-    manualText,
+    kb,
   };
 }

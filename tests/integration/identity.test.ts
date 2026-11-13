@@ -1,4 +1,4 @@
-import { beforeAll,afterAll,describe,it,expect } from 'vitest';
+import { beforeAll,afterAll,describe,it,expect,vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { loadConfig } from '../../src/config/config.js';
@@ -9,6 +9,9 @@ import { buildAdminServer } from '../../src/apps/admin.js';
 import { AdminService } from '../../src/modules/admin/service.js';
 import { hashPassword, mac } from '../../src/modules/identity/crypto.js';
 import { IdentityService } from '../../src/modules/identity/service.js';
+import { SendSmsResponse, SendSmsResponseBody } from '@alicloud/dysmsapi20170525';
+import { AliyunSmsService, type AliyunSmsSdk } from '../../src/integrations/aliyun-sms.js';
+import { AliyunSmsProvider } from '../../src/integrations/sms.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!migrationUrl||!/^huahuo_test_[a-z0-9_]+$/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('ISOLATED_TEST_DATABASE_REQUIRED');
 const secret='test-app-secret-'.repeat(4),adminSecret='test-admin-secret-'.repeat(4);
@@ -24,7 +27,7 @@ const remote=()=>`127.1.${Math.floor(next/250)}.${next++%250+1}`;
 const send=(app:FastifyInstance,url:string,payload?:object,headers:Record<string,string>={},method='POST',ip=remote())=>app.inject({method:method as 'POST',url,payload,headers,remoteAddress:ip});
 const auth=(s:Session)=>({authorization:'Bearer '+s.accessToken});
 async function ticket(){const phone='1380000'+String(next++).padStart(4,'0');const r=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);return {phone,...r.json().data};}
-function loginBody(t:{phone:string;smsRequestId:string;testCode:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.testCode,clientType:'app',clientId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
+function loginBody(t:{phone:string;smsRequestId:string;testCode:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.testCode,clientType:'app' as const,clientId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
 async function login():Promise<Session>{const t=await ticket(),r=await send(api,'/api/v1/auth/login',loginBody(t));expect(r.statusCode).toBe(200);return r.json().data;}
 beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));api=await buildApiServer({config:apiConfig});admin=await buildAdminServer({config:adminConfig});},20000);
 afterAll(async()=>{await api?.close();await admin?.close();await root.end();await adminPool.end();});
@@ -169,6 +172,50 @@ describe('P02 real PG identity and scope',()=>{
   }finally{await bad.pool.end();}
   const disabled=new IdentityService(poolFor(apiConfig),{...apiConfig,smsProvider:'disabled'});
   try{await expect(disabled.sendCode({phone:'13999990002',purpose:'sign_in'},remote())).rejects.toMatchObject({code:'SMS_NOT_CONFIGURED'});}finally{await disabled.pool.end();}
+ });
+ it('live OTP acceptance is durable and same-key replay never resends (mock SDK, real PG)',async()=>{
+  const config=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,SMS_PROVIDER:'live',SHOW_TEST_OTP:'false',
+   ALIYUN_RAM_ACCESS_KEY_ID:'fixture-id',ALIYUN_RAM_ACCESS_KEY_SECRET:'fixture-secret',SMS_ALIYUN_SIGN_NAME:'花火测试',SMS_ALIYUN_TEMPLATE_CODE:'SMS_123456'});
+  const sdkSend=vi.fn<AliyunSmsSdk['sendSmsWithOptions']>().mockResolvedValue(new SendSmsResponse({
+   statusCode:200,body:new SendSmsResponseBody({code:'OK',bizId:'123^456',requestId:randomUUID()})}));
+  const sms=new AliyunSmsProvider(config.smsAliyun!,new AliyunSmsService(config.smsAliyun!,{
+   sendSmsWithOptions:sdkSend,querySendDetailsWithOptions:vi.fn<AliyunSmsSdk['querySendDetailsWithOptions']>()}));
+  const service=new IdentityService(poolFor(config),config,{sms});
+  const phone='13999990003',key=randomUUID(),ip=remote();
+  try{
+   const ticket=await service.sendCode({phone,purpose:'sign_in'},ip,key);
+   expect(ticket).toMatchObject({providerMode:'live',cooldownSeconds:60});
+   expect(ticket).not.toHaveProperty('testCode');
+   expect(await service.sendCode({phone,purpose:'sign_in'},ip,key)).toEqual(ticket);
+   expect(sdkSend).toHaveBeenCalledTimes(1);
+   const code=(JSON.parse(sdkSend.mock.calls[0]![0].templateParam!) as {code:string}).code;
+   expect(code).toMatch(/^\d{6}$/);
+   const row=await root.query('SELECT delivery_status,code_hash,response_cipher FROM otp_requests WHERE id=$1',[ticket.smsRequestId]);
+   expect(row.rows[0].delivery_status).toBe('sent');
+   expect(row.rows[0].code_hash).toBe(mac(secret,ticket.smsRequestId+':'+code));
+   expect(row.rows[0].response_cipher).not.toContain(code);
+   const session=await service.login(loginBody({phone,smsRequestId:ticket.smsRequestId,testCode:code}),ip,randomUUID());
+   expect(session.user.userId).toMatch(/^[a-f0-9-]{36}$/);
+  }finally{await service.pool.end();}
+ });
+ it('an ambiguous SDK timeout stays pending and cannot be replayed or used to log in (real PG)',async()=>{
+  const config=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,SMS_PROVIDER:'live',SHOW_TEST_OTP:'false',
+   ALIYUN_RAM_ACCESS_KEY_ID:'fixture-id',ALIYUN_RAM_ACCESS_KEY_SECRET:'fixture-secret',SMS_ALIYUN_SIGN_NAME:'花火测试',SMS_ALIYUN_TEMPLATE_CODE:'SMS_123456'});
+  const sdkSend=vi.fn<AliyunSmsSdk['sendSmsWithOptions']>().mockRejectedValue(Object.assign(new Error('private signed request'),{code:'ETIMEDOUT'}));
+  const sms=new AliyunSmsProvider(config.smsAliyun!,new AliyunSmsService(config.smsAliyun!,{
+   sendSmsWithOptions:sdkSend,querySendDetailsWithOptions:vi.fn<AliyunSmsSdk['querySendDetailsWithOptions']>()}));
+  const service=new IdentityService(poolFor(config),config,{sms});
+  const phone='13999990004',key=randomUUID(),ip=remote();
+  try{
+   await expect(service.sendCode({phone,purpose:'sign_in'},ip,key)).rejects.toMatchObject({code:'SMS_PROVIDER_FAILED'});
+   const row=await root.query('SELECT id,delivery_status FROM otp_requests WHERE subject_hash=$1',[mac(secret,'+86'+phone)]);
+   expect(row.rows[0].delivery_status).toBe('pending');
+   await expect(service.sendCode({phone,purpose:'sign_in'},ip,key)).rejects.toMatchObject({code:'SMS_DELIVERY_NOT_CONFIRMED'});
+   await expect(service.sendCode({phone,purpose:'sign_in'},ip)).rejects.toMatchObject({code:'SMS_RATE_LIMITED'});
+   const code=(JSON.parse(sdkSend.mock.calls[0]![0].templateParam!) as {code:string}).code;
+   await expect(service.login(loginBody({phone,smsRequestId:row.rows[0].id,testCode:code}),ip,randomUUID())).rejects.toMatchObject({code:'SMS_CODE_EXPIRED'});
+   expect(sdkSend).toHaveBeenCalledTimes(1);
+  }finally{await service.pool.end();}
  });
 });
 describe('independent admin identity, CSRF and RBAC',()=>{

@@ -2,11 +2,11 @@
 
 ## 1. 固定来源与本机角色
 
-源仓库：**https://github.com/kyriswu/huahuo-app**
+源仓库：**`../huahuo-ai`（本机源码；尚无远端）**
 
 ```text
 Code/
-├─ huahuo-app/                  # 已有、本轮只读，含本地未提交内容
+├─ huahuo-ai/                  # 已有、本轮只读，含本地未提交内容
 └─ huahuo-server/               # 独立后端，唯一业务写入根
    ├─ specs/backend-plan/
    ├─ config/app-reference.local.json
@@ -15,13 +15,13 @@ Code/
    └─ docs/
 ```
 
-**先读 `../huahuo-app`，不再默认clone，也不新建参考目录。** 来源URL用于识别仓库和以后经授权的远端核对。当前App真实绝对路径由Codex解析；同机目录不意味着两个仓库合并。
+**先读 `../huahuo-ai`，不再默认clone，也不新建参考目录。** 来源URL用于识别仓库和以后经授权的远端核对。当前App真实绝对路径由Codex解析；同机目录不意味着两个仓库合并。
 
 本包不包含App源代码，也没有访问用户Mac。不得把历史回复的commit写成本轮本机事实。
 
 ## 2. P01定位，每阶段只读核对
 
-P01生成不提交的 `config/app-reference.local.json`，参照可提交example：repoUrl、localPath=`../huahuo-app`、pathBase=`backend-root`、sourceMode=`local-first`、readOnly=true、checkRemoteAtStageStart=false。**相对路径基准是Server根，不是config目录，也不是Docker的/app。** 宿主编码工具使用，运行时不能依赖该配置。
+P01生成不提交的 `config/app-reference.local.json`，参照可提交example：repoUrl、localPath=`../huahuo-ai`、pathBase=`backend-root`、sourceMode=`local-first`、readOnly=true、checkRemoteAtStageStart=false。**相对路径基准是Server根，不是config目录，也不是Docker的/app。** 宿主编码工具使用，运行时不能依赖该配置。
 
 已有Git时先确认 `git rev-parse --show-toplevel` 等于App真实路径，再记录HEAD、分支、dirty；可使用 `git --no-optional-locks -C ...` 防止不必要的Git元数据写入。不输出带凭据的完整remote URL。纯源码副本没有Git仍可参照，记SOURCE_COPY_NO_GIT及实际读取文件哈希，不强制clone来补.git。
 
@@ -65,7 +65,7 @@ CODE（读过源码）、USER（需求）、PROPOSED（设计默认）、UNVERIF
 
 ## 6. 需要在P01实现的工具
 
-`pnpm app:reference`：默认只读检查 `../huahuo-app`，报告路径/HEAD或NO_GIT/dirty及所读文件哈希，在Server内保存基线。路径解析与权限失败要有测试；不自动clone、不联网、不改App。
+`pnpm app:reference`：默认只读检查 `../huahuo-ai`，报告路径/HEAD或NO_GIT/dirty及所读文件哈希，在Server内保存基线。路径解析与权限失败要有测试；不自动clone、不联网、不改App。
 
 `pnpm app:reference:diff`：对比上次本机基线与当前文件；不是自动检查GitHub main。不输出完整秘密diff，不覆盖用户编辑。
 

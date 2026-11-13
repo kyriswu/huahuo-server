@@ -1,6 +1,6 @@
 import { analyzeDocumentStructure } from '../lib/document-processing/structure.js';
-import { splitTextIntoChunks } from '../lib/document-processing/splitter.js';
-import type { DocumentStructure, SplitTextInput, TokenCounter } from '../lib/document-processing/types.js';
+import { splitKnowledgeContent } from '../modules/kb/split.js';
+import type { DocumentStructure, TokenCounter } from '../lib/document-processing/types.js';
 import { indexChunks, type IndexDependencies, type IndexRecord, type IndexResult, type VectorTarget } from '../lib/rag-indexing/index.js';
 
 export interface TypedTool<Input, Output> {
@@ -21,14 +21,14 @@ export interface StructureToolInput {
 export interface SplitToolInput {
   content: string;
   format: 'markdown' | 'text';
-  options: Omit<SplitTextInput['options'], 'tokenizer'>;
+  mode: 'note-hybrid'|'document-keyword';
   structureHints?: DocumentStructure;
 }
 
 export interface IndexToolInput { targetId: string; records: readonly IndexRecord[]; }
 
 export interface DocumentToolDependencies {
-  tokenizer: TokenCounter;
+  tokenizer?: TokenCounter;
   /** Bindings are registered by application code, never by a Tool caller. */
   indexTargets: ReadonlyMap<string, IndexDependencies>;
 }
@@ -49,7 +49,7 @@ function sameTarget(left: VectorTarget, right: VectorTarget): boolean {
  * operations delegate to the same standalone libraries used by business code. */
 export function createDocumentProcessingTools(dependencies: DocumentToolDependencies): {
   analyzeStructure: TypedTool<StructureToolInput, Awaited<ReturnType<typeof analyzeDocumentStructure>>>;
-  splitChunks: TypedTool<SplitToolInput, Awaited<ReturnType<typeof splitTextIntoChunks>>>;
+  splitChunks: TypedTool<SplitToolInput, Awaited<ReturnType<typeof splitKnowledgeContent>>>;
   indexChunks: TypedTool<IndexToolInput, IndexResult>;
 } {
   const targets = new Map([...dependencies.indexTargets].map(([id, binding]) => [id, { binding, target: Object.freeze({ ...binding.vectorStoreAdapter.target }) }]));
@@ -66,10 +66,10 @@ export function createDocumentProcessingTools(dependencies: DocumentToolDependen
     splitChunks: {
       name: 'huahuo_split_text_chunks',
       async execute(input) {
-        object(input, ['content', 'format', 'options', 'structureHints']); content(input.content);
+        object(input, ['content', 'format', 'mode', 'structureHints']); content(input.content);
         if (!['markdown', 'text'].includes(input.format)) throw new DocumentToolError('TOOL_INPUT_INVALID');
-        object(input.options, ['targetTokens', 'maxEmbeddingTokens', 'overlapTokens', 'targetSourceChars', 'maxSourceChars', 'respectSections']);
-        return splitTextIntoChunks({ ...input, options: { ...input.options, tokenizer: dependencies.tokenizer } });
+        if(!['note-hybrid','document-keyword'].includes(input.mode))throw new DocumentToolError('TOOL_INPUT_INVALID');
+        return splitKnowledgeContent(input.content,input.mode,{format:input.format,structure:input.structureHints,tokenizer:dependencies.tokenizer});
       },
     },
     indexChunks: {

@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 try {
   resolveRoots(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
-  console.log('Server/App paths: separate, readable; App reference ../huahuo-app');
+  console.log('Server/App paths: separate, readable; App reference ../huahuo-ai');
   console.log(`Host Node: ${process.version}; Volta pins Node 26.11.0 for this project`);
   if (!process.argv.includes('--skip-docker')) {
     execFileSync('bash', ['scripts/ensure-docker-local.sh'], { stdio: 'inherit', timeout: 20000 });

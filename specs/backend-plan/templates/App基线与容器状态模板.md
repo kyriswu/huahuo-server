@@ -1,8 +1,8 @@
 # docs/app-reference.md 模板
 
-仓库：https://github.com/kyriswu/huahuo-app
+仓库：`../huahuo-ai`（本机源码；尚无远端）
 后端仓库：本机huahuo-server（不要写成App子目录）
-本地只读路径：默认../huahuo-app，相对Server根；从不提交的config/app-reference.local.json读取
+本地只读路径：默认../huahuo-ai，相对Server根；从不提交的config/app-reference.local.json读取
 当前基线commit：待Codex实际填写；不是历史聊天里的commit
 远端分支检查：默认不执行；本机是第一依据，只有另行授权才登记远端检查
 工作树是否dirty：待核对；用户改动仅只读

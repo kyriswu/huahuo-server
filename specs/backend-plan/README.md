@@ -1,14 +1,14 @@
 # 花火 Fastify 后端 · Codex 完整实施包 v3
 
-**2026-10-09｜本机 huahuo-app / huahuo-server 同级目录版。** 完整替代v2，保留P01—P16全部业务，不是差量补丁。
+**2026-10-09｜本机 huahuo-ai / huahuo-server 同级目录版。** 完整替代v2，保留P01—P16全部业务，不是差量补丁。
 
-App来源：https://github.com/kyriswu/huahuo-app
+App来源：`../huahuo-ai`（本机源码；尚无远端）
 
 ## 最短使用方式
 
 ```text
 Code/
-├─ huahuo-app/                    # 用户现有代码，只读
+├─ huahuo-ai/                    # 用户现有代码，只读
 └─ huahuo-server/                 # 后端建设根，不改名
    └─ specs/
       └─ backend-plan/           # 将压缩包根目录backend-plan放这里
@@ -47,7 +47,7 @@ huahuo-server/compose.yaml
 | [04_全项目验收与发布门槛.md](04_全项目验收与发布门槛.md) | E2E、计费、隔离、故障与发布 |
 | [05_来源与决策边界.md](05_来源与决策边界.md) | 用户事实、原计划、建议与官方来源分开 |
 | [06_容器职责与Compose部署规范.md](06_容器职责与Compose部署规范.md) | 独立角色、网络、卷、迁移与重启 |
-| [07_App代码持续参照与契约核对.md](07_App代码持续参照与契约核对.md) | 本机../huahuo-app优先，每阶段有依据 |
+| [07_App代码持续参照与契约核对.md](07_App代码持续参照与契约核对.md) | 本机../huahuo-ai优先，每阶段有依据 |
 | [08_Admin独立管理台规范.md](08_Admin独立管理台规范.md) | 独立鉴权、网页、受控管理与审计 |
 | [09_v2变更记录.md](09_v2变更记录.md) | 历史v1→v2说明，不覆盖v3当前路径 |
 | [10_容器拓扑与阶段验收矩阵.md](10_容器拓扑与阶段验收矩阵.md) | 阶段/容器职责 |

@@ -3,7 +3,8 @@ import { idempotent } from '../../lib/idempotency.js';
 import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../config/config.js';
-import { MockSmsProvider, DisabledSmsProvider, type SmsProvider } from '../../integrations/sms.js';
+import { createSmsProvider, type SmsProvider } from '../../integrations/sms.js';
+import { SmsProviderError } from '../../integrations/aliyun-sms.js';
 import { constantEqual, mac, maskedPhone, normalizePhone, otpCode, token } from './crypto.js';
 import { loadEd25519Keys, publicJwks, signAccessToken, verifyAccessToken, type JwtSettings } from './jwt.js';
 import { DomainError, transaction, lock, audit, type Scope, rateLimit } from './store.js';
@@ -21,7 +22,7 @@ export class IdentityService {
     this.secret=config.appTokenSecret;
     this.jwtSettings={issuer:config.jwt.issuer,audience:config.jwt.audience,serverAudience:config.jwt.serverAudience,keyId:config.jwt.keyId,accessTtlSeconds:config.jwt.accessTtlSeconds,refreshTtlSeconds:config.jwt.refreshTtlSeconds,privateKeyPem:config.jwt.privateKeyPem,publicKeyPem:config.jwt.publicKeyPem,previousPublicKeyPem:config.jwt.previousPublicKeyPem,previousKeyId:config.jwt.previousKeyId};
     this.jwtKeys=loadEd25519Keys(this.jwtSettings);
-    this.sms=options.sms ?? (config.smsProvider === 'mock' ? new MockSmsProvider() : new DisabledSmsProvider());
+    this.sms=options.sms ?? createSmsProvider(config);
     if (config.appEnv === 'production' && this.sms.mode === 'mock') throw new Error('PRODUCTION_MOCK_FORBIDDEN');
   }
   async sendCode(input:{phone:string;purpose:'sign_in'}, ip:string, key?:string) {
@@ -51,7 +52,12 @@ export class IdentityService {
     });
     if(existing)return existing;
     try { await this.sms.send({phone,code,purpose:'sign_in',requestId:id}); }
-    catch { await this.pool.query("UPDATE otp_requests SET delivery_status='failed' WHERE id=$1",[id]);throw new DomainError(503,'SMS_PROVIDER_FAILED'); }
+    catch (error) {
+      // A timeout may follow gateway acceptance. Keep pending and forbid same-key resends.
+      if (!(error instanceof SmsProviderError && error.outcome === 'unknown'))
+        await this.pool.query("UPDATE otp_requests SET delivery_status='failed' WHERE id=$1",[id]);
+      throw new DomainError(503,'SMS_PROVIDER_FAILED');
+    }
     await this.pool.query("UPDATE otp_requests SET delivery_status='sent' WHERE id=$1",[id]);
     return data;
   }

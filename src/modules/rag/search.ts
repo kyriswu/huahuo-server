@@ -38,7 +38,36 @@ export function dedupeByChunkKey<T extends { chunkKey: string; rrfScore?: number
 }
 
 export interface RerankAdapter {
-  rerank(query: string, candidates: RagSearchCandidate[]): Promise<Array<RagSearchCandidate & { rerankScore: number }>>;
+  rerank(query: string, candidates: RagSearchCandidate[], options?: { signal?: AbortSignal }): Promise<Array<RagSearchCandidate & { rerankScore: number }>>;
+}
+
+export type RerankFallback = 'timeout' | 'error' | 'invalid_response';
+
+/** Retain only authorized candidates in their Milvus order on failure. The
+ * deadline includes body decoding and also bounds adapters ignoring abort. */
+export async function rerankWithinBudget(adapter: RerankAdapter, query: string, candidates: RagSearchCandidate[], budgetMs: number): Promise<{ candidates: RagSearchCandidate[]; fallback?: RerankFallback }> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const original = candidates.map(candidate => ({ ...candidate }));
+  try {
+    const ranked = await Promise.race([
+      Promise.resolve().then(() => adapter.rerank(query, original.map(candidate => ({ ...candidate })), { signal: controller.signal })),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new RerankError('RERANK_BUDGET_EXCEEDED', 'Rerank deadline reached')); }, budgetMs); }),
+    ]);
+    const byKey = new Map(original.map(candidate => [candidate.chunkKey, candidate]));
+    const seen = new Set<string>();
+    if (ranked.length !== original.length) return { candidates: original, fallback: 'invalid_response' };
+    const trusted: RagSearchCandidate[] = [];
+    for (const row of ranked) {
+      const candidate = byKey.get(row.chunkKey);
+      if (!candidate || seen.has(row.chunkKey) || !Number.isFinite(row.rerankScore)) return { candidates: original, fallback: 'invalid_response' };
+      seen.add(row.chunkKey);
+      trusted.push({ ...candidate, rerankScore: row.rerankScore });
+    }
+    return { candidates: trusted.sort((a, b) => b.rerankScore! - a.rerankScore!) };
+  } catch (error) {
+    return { candidates: original, fallback: error instanceof RerankError && error.code === 'RERANK_BUDGET_EXCEEDED' ? 'timeout' : 'error' };
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 export class RerankError extends Error {
@@ -62,7 +91,7 @@ interface RerankProviderRow { index?: unknown; relevance_score?: unknown; score?
 export class HttpRerankAdapter implements RerankAdapter {
   constructor(private readonly options: HttpRerankOptions) {}
 
-  async rerank(query: string, candidates: RagSearchCandidate[]): Promise<Array<RagSearchCandidate & { rerankScore: number }>> {
+  async rerank(query: string, candidates: RagSearchCandidate[], options?: { signal?: AbortSignal }): Promise<Array<RagSearchCandidate & { rerankScore: number }>> {
     if (!candidates.length) return [];
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30_000);
@@ -74,7 +103,7 @@ export class HttpRerankAdapter implements RerankAdapter {
           ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}),
         },
         body: JSON.stringify({ model: this.options.model, query, documents: candidates.map((candidate) => candidate.content), top_n: candidates.length, return_documents: false }),
-        signal: controller.signal,
+        signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
       });
       if (!response.ok) throw new RerankError('RERANK_PROVIDER_UNAVAILABLE', `Rerank provider HTTP ${response.status}`, response.status >= 500 || response.status === 429);
       let payload: unknown;

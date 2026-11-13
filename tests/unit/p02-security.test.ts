@@ -3,7 +3,7 @@ import { describe,it,expect } from 'vitest';
 import { loadConfig } from '../../src/config/config.js';
 import { env } from '../helpers.js';
 import { normalizePhone,hashPassword,verifyPassword } from '../../src/modules/identity/crypto.js';
-import { LiveSmsProvider } from '../../src/integrations/sms.js';
+import { createSmsProvider } from '../../src/integrations/sms.js';
 describe('P02 security configuration and adapter boundary',()=>{
  it('normalizes only explicitly supported CN phone representations',()=>{
   expect(normalizePhone('13800000001')).toBe('+8613800000001');expect(normalizePhone('+8613800000001')).toBe('+8613800000001');
@@ -22,9 +22,7 @@ describe('P02 security configuration and adapter boundary',()=>{
  it('scrypt verifies valid passwords only',async()=>{
   const hash=await hashPassword('long-test-password');expect(await verifyPassword('long-test-password',hash)).toBe(true);expect(await verifyPassword('wrong',hash)).toBe(false);
  });
- it('live adapter requires an accepted provider response, without real calls',async()=>{
-  const message={phone:'+8613800000001',code:'123456',purpose:'sign_in' as const,requestId:'fixture'};
-  await expect(new LiveSmsProvider(async()=>({accepted:false})).send(message)).rejects.toThrow('SMS_PROVIDER_FAILED');
-  await expect(new LiveSmsProvider(async()=>({accepted:true})).send(message)).resolves.toBeUndefined();
+ it('live adapter cannot silently fall back to disabled or mock without vendor configuration',()=>{
+  expect(()=>createSmsProvider({smsProvider:'live'})).toThrow('INVALID_CONFIG:SMS_ALIYUN');
  });
 });

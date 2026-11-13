@@ -26,7 +26,7 @@ X-Huahuo-Service-Key: <HUAHUO_AGENT_TO_SERVER_API_KEY>
 
 - `POST /api/v1/rag/ingestions`：`user`
 - `GET /api/v1/rag/ingestions/:jobId`：`user`
-- `POST /api/v1/rag/query`、`POST /api/v1/huahuo_rag/query`：`user`
+- `POST /api/v1/rag/query`：`user`
 - `POST /internal/v1/rag/query`：`user+service`
 
 当前没有注册仅 `service` 的用户数据接口。新增系统接口时必须显式声明为

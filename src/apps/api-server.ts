@@ -14,7 +14,7 @@ import { registerAssetRoutes } from '../modules/assets/routes.js';
 import { AssetService } from '../modules/assets/service.js';
 import { registerStorageRoutes } from '../modules/storage/routes.js';
 import { registerIngestionRoutes } from '../modules/ingestion/routes.js';
-import { DocumentIngestionService } from '../modules/ingestion/service.js';
+import { NoteIndexService } from '../modules/ingestion/service.js';
 import { registerRagRoutes } from '../modules/rag/routes.js';
 import { RagIngestionRepository } from '../modules/rag/repository.js';
 import { RagQueryService, type RagQueryDependencies } from '../modules/rag/query-service.js';
@@ -30,8 +30,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  if (options.config.billingMode !== 'disabled') registerBillingRoutes(app,identity,billing);
  const storageService = new StorageService(pool,options.config);
  registerStorageRoutes(app,identity,storageService);
- registerAssetRoutes(app,identity,new AssetService(pool,options.config.appTokenSecret!,options.config));
- registerIngestionRoutes(app,identity,new DocumentIngestionService(pool,options.config.appTokenSecret!,options.config));
+ registerIngestionRoutes(app,identity,new NoteIndexService(pool,options.config));
  const textIngestion=new TextIngestionService(pool,options.config);
  registerTextIngestionRoutes(app,identity,textIngestion);
  const ragQuery = new RagQueryService(pool,options.config,{
@@ -48,6 +47,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
   },
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
- registerRagRoutes(app,identity,new RagIngestionRepository(pool,options.config.rag,options.config.appEnv,options.config.milvus.collection,options.config),storageService.storage,ragQuery);
+ registerAssetRoutes(app,identity,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery));
+ registerRagRoutes(app,identity,new RagIngestionRepository(pool,options.config.rag,options.config.appEnv,options.config.kb.documentCollection,options.config),storageService.storage,ragQuery);
  registerTaskRoutes(app,identity,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
 }

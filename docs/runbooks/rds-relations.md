@@ -21,8 +21,8 @@ PostgreSQL / RDS 使用普通关联 ID 和查询索引，不创建物理外键�
 | 协议接受 | `user_agreement_acceptances.user_id/session_id`；记录协议与隐私版本及接受入口 |
 | 业务归属 | `workspaces.user_id`；Note、Folder、资源、任务与账务分别保存明确的所属 ID |
 | 笔记内容 | `note_part_revisions.note_id`、标签映射、资源引用和显式关系由笔记业务校验 |
-| 文件 RAG | `rag_child_chunks.parent_id` 由 `version_id` 生成，指向整篇 `rag_ingestion_versions` 记录 |
-| 笔记 RAG | `document_ingestion_chunks.document_id` 指向整篇 `notes` 记录 |
+| 文件 RAG | `kb_document_keyword_builds.source_type/source_id` 指向所属整篇资料；分段只存构建 ID 与位置 |
+| 笔记 RAG | `kb_note_hybrid_builds.source_id` 指向整篇 `notes`；修订定位真实 raw part，分段不存正文 |
 
 箭头表示应用语义，不是物理外键声明。普通关联字段建立与实际过滤、连接和清理路径匹配的索引；不为替代外键增加全局关系模拟器或逐请求全表扫描。
 

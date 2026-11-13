@@ -18,8 +18,8 @@ describe('thin typed document tools',()=>{
  });
  it('can split raw text independently without invoking structure or requiring a business identity',async()=>{
   const tools=createDocumentProcessingTools({tokenizer,indexTargets:new Map()});const content='  重复😀段落\r\n重复😀段落  ';
-  const chunks=await tools.splitChunks.execute({content,format:'text',options:{targetTokens:10,maxEmbeddingTokens:30,overlapTokens:2,respectSections:false}});
-  expect(chunks.length).toBeGreaterThan(1);expect(chunks.every(chunk=>chunk.content===content.slice(chunk.source_start,chunk.source_end))).toBe(true);
+  const {chunks}=await tools.splitChunks.execute({content,format:'text',mode:'document-keyword'});
+  expect(chunks.length).toBe(1);expect(chunks.every(chunk=>chunk.content===content.slice(chunk.start,chunk.end))).toBe(true);
   expect(chunks.every(chunk=>!('parent_id'in chunk)&&!('pageContent'in chunk))).toBe(true);
  });
  it('indexes another tool prepared chunks through a registered binding',async()=>{

@@ -1,35 +1,11 @@
-# Note 手动文本入库
+# Note 正文入库
 
-本接口属于 Note 业务；PDF/OSS 文件入库见[文件入口](rag-url-ingestion.md)。两类业务复用[章节/切分/索引类库](modular-document-processing.md)，分别保存正文和 Chunk，使用明确绑定的向量目标。
+仅对已存在的真实 Note 原文建立混合索引。用户保存 `parts.raw` 后，业务事务固定真实 raw part 修订和授权归属，并创建 `kb_note_hybrid_builds`、Task 与 Outbox。标题等不改变 raw 正文的编辑不重新向量化。来源可以是手写、ASR、图片识别或链接解析，但必须先由业务创建 Note；未产生 Note 的导入资料使用关键词流程。
 
-```http
-POST /api/v1/workspaces/{workspaceId}/notes/{noteId}/document-ingestion
-Authorization: Bearer <USER_JWT>
-X-Idempotency-Key: <request-key>
-Content-Type: application/json
-```
+`KB_NOTE_INDEXING_ENABLED=true` 启用该流程。旧的“单独提交任意 content 覆盖 Note 索引”接口和 `MANUAL_TEXT_*` 配置已删除。正文只保留在 `note_part_revisions`，不复制到索引任务或 chunk 表。
 
-请求可包含 UTF-8 `content` 或 `contentBase64`、`fileName`、`mimeType` ；省略内容时读取 Note 最新 raw revision。接受纯文本/Markdown 等既有文本格式，不调用 PDF 解析服务。保存的原文不 trim、不规范化换行、不静默截断，输入上限按现有接口校验。
+Worker 使用 H1–H6 或自然段临时范围切分，上限 500 Unicode 码点，同范围重叠目标约 50 字，最终输入由固定 BGE-M3 tokenizer 校验。`kb_note_hybrid_chunks` 仅保存范围、核心范围、哈希和点 ID。完整构建发布前不可召回；编辑后旧正文立即退出查询，未变点可复用，失效点在准确目标中清理。
 
-接口返回 `jobId` 与 processing 状态，由现有 Task/Outbox/Worker 执行。启用手动文本 Profile 后，Note 创建和 raw 编辑也会在保存事务中自动创建同一入库任务；纯标题等元数据编辑不重复排队。
+`GET /api/v1/workspaces/{workspaceId}/notes/{noteId}/ingestions` 返回当前可授权的构建任务概况。搜索与精确读取使用已有 App 路径，搜索命中包含 `part=raw`、整篇 Note `revisionId`，RAG 详细结果另含 `partRevisionId`/`sourceRevision`。请求 `GET notes/{id}?revisionId=...` 时不符当前整篇版本返回 409；`GET notes/{id}/parts/raw?partRevisionId=...` 按真实 part 修订读取，仍执行用户/归属/删除校验。
 
-Worker 保存本次任务的正文快照和 TOC，以 `note_index_state.canonical_content` 及当前块的核心 UTF-16 切点为比较基线。对差分覆盖到的范围保留可用切点，按需局部重切。字符 diff 达到编辑量或耗时上限时，用通用切块器重切本条 Note，再按正文和最终 embedding 输入匹配可复用点。
-
-`document_ingestion_chunks` 维护每条 Note 的当前块。块的正文、最终 embedding 输入和模型配置一致时，继续引用原 Milvus ID。改动块可以沿用逻辑 `block_id`，但由任务分配独立的 Milvus 点 ID。失效点退出检索后，Worker 批量计算并写入待更新块。每批成功的块立即标记 `ready`，进入该 Note 的向量和 BM25 检索范围。失败重试继续处理未就绪的块。
-
-`note_index_jobs` 用于入库任务、重试和按任务读取章节。`documentVersion` 对应保存 Note 时已有的正文来源标识。RAG 发布范围由当前块的 `index_status` 决定。正文切分目标为 300 个 Unicode 码点，500 字为硬上限（含重叠），最终 embedding 输入另受模型 token 限制。
-
-必须明确配置 `MANUAL_TEXT_ENABLED`、目标 database/collection 与本地模型 tokenizer。未启用或目标缺失时明确失败，不静默落到文件 Collection。两类业务可共享同一 Milvus 实例，业务目标保持独立。
-
-`GET` 同一路径列出任务的 `jobId`、`tocStatus` 和处理状态。把该路径记为 `base`，所有读取使用用户 JWT。
-
-| 请求 | 返回 |
-| --- | --- |
-| `GET {base}/{jobId}` | 该次入库的 `documentVersion`、嵌套 `toc`、`tocStatus`、`offsetUnit` |
-| `GET {base}/{jobId}/sections/{sectionId}` | 该任务快照的精确正文切片，以及 `documentVersion`、`sourceStart`、`sourceEnd`、`offsetUnit` 和 `format` |
-
-`sectionId` 从 TOC 选取。父章范围包含子章，坐标为 UTF-16 半开区间。无标题时返回 `section-body`，标题前有非空正文时另列 `section-preamble`。目录未就绪返回 `409 DOCUMENT_TOC_NOT_READY`，未知章节、非所属工作区或删除的 Note 返回 404。使用旧 `jobId` 可精确读回其正文快照，只要仍有权访问该 Note。
-
-检索通过现有 RAG API 的 `sourceType=note` 走已固定的业务目标。索引期间可召回仍有效的旧块和已经就绪的新块。
-
-详见[模块化文档处理](modular-document-processing.md)中的完整配置、薄 Tool、Mock 测试、真实 tokenizer、重试与清理说明。
+没有 Parent 表、父 chunk 外键或章节向量。章节、切分、独立入库核心和薄 Tool 见 [模块化文档处理](modular-document-processing.md)，完整集合与发布策略见 [知识库手册](milvus.md)。

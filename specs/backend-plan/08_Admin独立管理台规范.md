@@ -1,7 +1,7 @@
 # admin独立容器：范围、权限与最小运营页
 
 用户要求admin、worker、api-server分别容器。本包把admin定义为**独立的管理API及最小运营网页**，以此作为首版默认，不再只交CLI。这不改变App UI，也不是重新选一套庞大后台前端栈。
-App产品事实仍参照 https://github.com/kyriswu/huahuo-app ，但App仓库不需要存在运营管理页面才允许建设内部后台。
+App产品事实仍参照 `../huahuo-ai`（本机源码；尚无远端） ，但App仓库不需要存在运营管理页面才允许建设内部后台。
 
 ## 1. 范围与实施顺序
 

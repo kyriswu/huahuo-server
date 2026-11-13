@@ -64,9 +64,8 @@ function isPlainText(input: DocumentParseInput): boolean {
 /**
  * Parser for the formats currently accepted by the indexing pipeline.
  *
- * PDF/DOCX parsing stays behind DocumentParserPort so the parser already
- * verified in the upstream document service can be injected without changing
- * chunking, embedding, or storage code.
+ * Only native UTF-8 text and Markdown are supported. Binary document formats
+ * fail explicitly instead of being sent to an external parsing service.
  */
 export class TextDocumentParser implements DocumentParserPort {
   async parse(input: DocumentParseInput): Promise<ParsedDocument> {

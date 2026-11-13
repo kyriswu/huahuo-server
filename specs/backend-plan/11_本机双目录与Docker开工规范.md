@@ -2,7 +2,7 @@
 
 ## 1. 本次已知事实与尚待检查
 
-用户当前把 `huahuo-app` 和 `huahuo-server` 放在截图所示的同级 Code 目录，说明 App 是现有代码、Server 是新后端起点，并已安装 Docker、授权必要时启动。本包生成环境不是用户的 Mac，不能从截图确认绝对路径、Server 内部文件、Git状态、Docker daemon/context、CPU架构、可用内存和现有卷。
+用户当前把 `huahuo-ai` 和 `huahuo-server` 放在截图所示的同级 Code 目录，说明 App 是现有代码、Server 是新后端起点，并已安装 Docker、授权必要时启动。本包生成环境不是用户的 Mac，不能从截图确认绝对路径、Server 内部文件、Git状态、Docker daemon/context、CPU架构、可用内存和现有卷。
 
 因此预检用于安全开工，不是一轮重新分析产品的阶段0。完成可执行的检查后，立即进入 P01，不仅给计划。
 
@@ -10,7 +10,7 @@
 
 ```text
 Code/                     # 只作为共同父目录，不变成工程
-├─ huahuo-app/            # 只读源码参照
+├─ huahuo-ai/            # 只读源码参照
 └─ huahuo-server/         # 唯一业务写入根
    ├─ specs/backend-plan/
    ├─ AGENTS.md
@@ -24,7 +24,7 @@ Code/                     # 只作为共同父目录，不变成工程
    └─ docs/
 ```
 
-从 Code 启动则将 `SERVER_ROOT` 定为 `./huahuo-server`；从 Server 启动则用当前目录。默认 `APP_ROOT` 解析为 Server 的 `../huahuo-app`。路径通过真实文件系统解析，支持空格；所有 shell 路径加引号。不从提示符猜 `/Users/kyriswu/Code`，不改目录名字。
+从 Code 启动则将 `SERVER_ROOT` 定为 `./huahuo-server`；从 Server 启动则用当前目录。默认 `APP_ROOT` 解析为 Server 的 `../huahuo-ai`。路径通过真实文件系统解析，支持空格；所有 shell 路径加引号。不从提示符猜 `/Users/kyriswu/Code`，不改目录名字。
 
 先看顶层和隐藏文件，不打印秘密文件内容。`.git`、README、specs、已有代码不算可以删除的杂项。若有 v1/v2 已实现内容，先判断可复用范围，不从空项目覆盖。工作区存在上级 Git 时，避免把 Code 当成仓库根；确认独立仓库后只在 Server 初始化。无授权不得 commit/push App，不能修改 App 的文件权限来“做只读”。
 
@@ -33,7 +33,7 @@ Code/                     # 只作为共同父目录，不变成工程
 ## 3. 本地 App 是第一依据
 
 - 来源顺序：当前本机源码与本地改动 → 已登记契约证据 → 经用户明确授权后的远端对照。
-- GitHub 地址始终保留：https://github.com/kyriswu/huahuo-app 。它用于识别来源，不要求每阶段联网。
+- GitHub 地址始终保留：`../huahuo-ai`（本机源码；尚无远端） 。它用于识别来源，不要求每阶段联网。
 - 使用 `git --no-optional-locks -C "$APP_ROOT" ...` 读取根、HEAD、状态；先确认 Git 根就是 App，不能误读上级 Code 仓库。
 - 只复制了源码、没有 `.git` 仍可读。标 `SOURCE_COPY_NO_GIT`，记录实际阅读文件的相对路径和 SHA-256，不能随意编一个 commit。
 - 本地与远端不同、不干净都不是自动修复条件。禁止 fetch/pull/reset/checkout/stash/clean 等改动 App 或其 Git 元数据的操作；远端比对另经批准，在独立位置做，不替换当前参照。
@@ -42,9 +42,9 @@ Code/                     # 只作为共同父目录，不变成工程
 
 ## 4. Codex 工作区和权限
 
-推荐主工作区直接选择 `Code/huahuo-server`，读取其上级同目录的 App。源码读取权限与写权限是两回事；权限受限时请求对 ../huahuo-app 的读取和本地 Docker 命令执行，不关闭审批/沙箱。
+推荐主工作区直接选择 `Code/huahuo-server`，读取其上级同目录的 App。源码读取权限与写权限是两回事；权限受限时请求对 ../huahuo-ai 的读取和本地 Docker 命令执行，不关闭审批/沙箱。
 
-不要用“移动到父目录就默认可以改全部文件”的方式放大授权。CLI 的 `--add-dir` 是额外写目录授权，不是只读挂载；此处不以 `--add-dir ../huahuo-app` 作为默认解法。工具版本不同，应使用该版本支持的受控读取/审批机制。
+不要用“移动到父目录就默认可以改全部文件”的方式放大授权。CLI 的 `--add-dir` 是额外写目录授权，不是只读挂载；此处不以 `--add-dir ../huahuo-ai` 作为默认解法。工具版本不同，应使用该版本支持的受控读取/审批机制。
 
 根 AGENTS 应明确 App 只读；它是行为约束，不是假装建立了操作系统级只读保护。若组织已有严格目录权限，遵循该权限。
 

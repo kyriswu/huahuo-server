@@ -6,7 +6,7 @@
 
 - 使用Files读取v2启动/容器/App参照规范，并读取已挂载v2完整ZIP中的配置与阶段文件进行增量编辑；不是用早期UI文档替代当前指令。
 - 保留v2全部44个文件路径与P01—P16完整业务，新增3份规范/变更文档、1份本机模板及2个辅助脚本。包内共50个文件（含本记录与manifest）。
-- 检查16阶段连续编号、文件对应、业务实施/验证段、App来源URL、本机../huahuo-app与huahuo-server写入范围。
+- 检查16阶段连续编号、文件对应、业务实施/验证段、App来源URL、本机../huahuo-ai与huahuo-server写入范围。
 - 检查相对Markdown链接、JSON索引、YAML结构、7服务/4业务入口、迁移依赖、端口/卷/角色、local/cloud必需插值字段。
 - node --check：preflight-local.mjs、healthcheck.mjs通过；bash -n：ensure-docker-local.sh通过；sh -n：PG初始化范例通过。
 - 在临时**人工测试目录**中实际验证：从Code/Server定位、空/非空Server保护、缺失App、同路径拒绝、无Git副本、Git dirty与相关文件哈希、remote示例凭据脱敏、前后文件内容一致。

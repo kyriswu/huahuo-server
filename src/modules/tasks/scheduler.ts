@@ -15,7 +15,10 @@ export class TaskScheduler {
    if(state==='queued')await enqueueIntent(tx,t.id);await event(tx,t.id);
   }
   // Redis is a delivery mechanism; periodic PG repair also covers acknowledged-but-lost jobs.
-  const pending=await tx.query<{id:string}>(`SELECT t.id FROM tasks t WHERE t.state IN ('queued','retry_scheduled') AND t.external_state='none' AND t.available_at<=now()
+  const pending=await tx.query<{id:string}>(`SELECT t.id FROM tasks t WHERE t.available_at<=now() AND (
+   (t.state IN ('queued','retry_scheduled') AND t.external_state='none') OR
+   (t.state='reconciling' AND t.kind IN ('rag.document-ingest','text.ingest') AND t.external_state='submitted'
+    AND (t.external_reference LIKE 'xberg-job:%' OR t.external_reference LIKE 'xberg-cancelling:%') AND t.attempt_no<t.max_attempts))
    AND NOT EXISTS(SELECT 1 FROM task_outbox o WHERE o.task_id=t.id AND (o.status IN ('pending','delivering') OR o.sent_at>now()-$1*interval '1 millisecond'))
    ORDER BY t.created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,[this.redeliveryMs]);
   for(const t of pending.rows)await enqueueIntent(tx,t.id);

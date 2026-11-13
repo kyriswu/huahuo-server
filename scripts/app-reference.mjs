@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-export function resolveRoots(start, appPath = '../huahuo-app', realpath = realpathSync) {
+export function resolveRoots(start, appPath = '../huahuo-ai', realpath = realpathSync) {
   let server = realpath(start);
   if (!server.endsWith('/huahuo-server')) server = realpath(resolve(server, 'huahuo-server'));
   const app = realpath(resolve(server, appPath));
@@ -21,7 +21,11 @@ export function snapshot(start, config, files) {
   let source = { mode: 'SOURCE_COPY_NO_GIT', head: null, branch: null, status: '' };
   try {
     if (realpathSync(git(app, ['rev-parse', '--show-toplevel'])) === app) {
-      source = { mode: 'GIT', head: git(app, ['rev-parse', 'HEAD']), branch: git(app, ['branch', '--show-current']), status: git(app, ['status', '--porcelain=v1']) };
+      const status = git(app, ['status', '--porcelain=v1']);
+      let head = null;
+      try { head = git(app, ['rev-parse', '--verify', 'HEAD']); } catch { /* A new repository may have no commit yet. */ }
+      source = { mode: head ? 'GIT' : 'GIT_UNBORN', head,
+        branch: head ? git(app, ['branch', '--show-current']) : git(app, ['symbolic-ref', '--short', 'HEAD']), status };
     }
   } catch { /* Source copies do not require Git. */ }
   const hashes = {};
@@ -33,7 +37,8 @@ export function snapshot(start, config, files) {
   return { recordedAt: new Date().toISOString(), repoUrl: config.repoUrl, localPath: relative(server, app), ...source, hashes };
 }
 export function compare(previous, current) {
-  return { headChanged: previous.head !== current.head, statusChanged: previous.status !== current.status,
+  return { sourceChanged: previous.localPath !== current.localPath || previous.repoUrl !== current.repoUrl || previous.mode !== current.mode,
+    headChanged: previous.head !== current.head, statusChanged: previous.status !== current.status,
     changedFiles: Object.keys({ ...previous.hashes, ...current.hashes }).filter(f => previous.hashes[f] !== current.hashes[f]) };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -47,7 +52,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (process.argv.includes('--diff')) {
       const diff = compare(JSON.parse(readFileSync(baseline, 'utf8')), current);
       console.log(JSON.stringify(diff, null, 2));
-      if (diff.headChanged || diff.statusChanged || diff.changedFiles.length) process.exitCode = 1;
+      if (diff.sourceChanged || diff.headChanged || diff.statusChanged || diff.changedFiles.length) process.exitCode = 1;
     } else {
       mkdirSync(resolve(root, 'docs'), { recursive: true });
       writeFileSync(baseline, JSON.stringify(current, null, 2) + '\n', { mode: 0o600 });

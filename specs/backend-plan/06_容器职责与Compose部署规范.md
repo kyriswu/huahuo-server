@@ -2,7 +2,7 @@
 
 ## 0. 这是用户已经明确的交付结构
 
-本机 **huahuo-server 独立后端目录**中的一个根目录 `compose.yaml` 管理下面所有服务。前端参考仓库固定为 https://github.com/kyriswu/huahuo-app ，仅供编码期只读核对，不进入Compose构建上下文或容器挂载。
+本机 **huahuo-server 独立后端目录**中的一个根目录 `compose.yaml` 管理下面所有服务。前端参考仓库固定为 `../huahuo-ai`（本机源码；尚无远端） ，仅供编码期只读核对，不进入Compose构建上下文或容器挂载。
 
 | 服务名（固定） | 默认长期运行 | 职责 | 网络边界 |
 |---|---|---|---|
@@ -116,7 +116,7 @@ api-server/admin独立HTTP健康；worker/scheduler可在各自容器内部监�
 
 ## 8. v3本机开发与资源归属
 
-App位于Server同级../huahuo-app，服务构建仍仅Server `.`，禁止扩大context到Code或挂载App。源码路径不是HTTP地址，APP_LOCAL_PATH不进入container env。
+App位于Server同级../huahuo-ai，服务构建仍仅Server `.`，禁止扩大context到Code或挂载App。源码路径不是HTTP地址，APP_LOCAL_PATH不进入container env。
 
 新环境Compose默认 `huahuo-server-dev`；同机已有其他项目不得stop/prune。已有Server数据沿用其project名、卷、口令。需要重建只重建明确属于本项目的容器，不带-v删卷。migrate已退出0是成功状态，不应为让7个服务都显示Up而变成常驻进程。
 

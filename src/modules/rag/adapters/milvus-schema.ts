@@ -53,41 +53,19 @@ export const BM25_FUNCTION: FunctionObject = {
 export const DENSE_INDEX_NAME = 'huahuo_dense_hnsw';
 export const SPARSE_INDEX_NAME = 'huahuo_sparse_bm25';
 
-// Fetch authoritative content from PostgreSQL after matching these identifiers.
-// Milvus does not allow returning BM25 function output in output_fields.
-export const MILVUS_OUTPUT_FIELDS = [
-  'id', 'doc_id', 'parent_id', 'document_version', 'index_status', 'chunk_index',
-  'embedding_profile', 'index_build_id', 'embedding_model', 'embedding_dimensions',
-];
+export const MILVUS_OUTPUT_FIELDS = ['id','source_id','source_type','text','index_status'];
 
-export function buildMilvusSchema(dimensions: number): FieldType[] {
-  if (!Number.isSafeInteger(dimensions) || dimensions < 1) {
-    throw new RangeError('MILVUS_INVALID_DIMENSIONS');
-  }
+export function buildMilvusSchema(mode: 'note-hybrid'|'document-keyword'): FieldType[] {
   return [
-    { name: 'id', data_type: DataType.VarChar, is_primary_key: true, autoID: false, max_length: 256 },
-    { name: 'doc_id', data_type: DataType.VarChar, max_length: 256 },
-    // Whole source record ID; never a chapter or another Chunk.
-    { name: 'parent_id', data_type: DataType.VarChar, max_length: 256, default_value: '' },
-    { name: 'source_type', data_type: DataType.VarChar, max_length: 64, default_value: 'file' },
-    { name: 'source_revision', data_type: DataType.VarChar, max_length: 128, default_value: '' },
-    { name: 'user_id', data_type: DataType.VarChar, max_length: 256 },
-    { name: 'workspace_id', data_type: DataType.VarChar, max_length: 256 },
-    {
-      name: 'text', data_type: DataType.VarChar, max_length: 65535,
-      enable_analyzer: true,
-      multi_analyzer_params: structuredClone(MULTI_ANALYZER_PARAMS),
-    },
-    { name: 'language', data_type: DataType.VarChar, max_length: 16 },
-    { name: 'dense_vector', data_type: DataType.FloatVector, dim: dimensions },
-    { name: 'sparse_vector', data_type: DataType.SparseFloatVector, is_function_output: true },
-    { name: 'document_version', data_type: DataType.VarChar, max_length: 128 },
-    { name: 'index_status', data_type: DataType.VarChar, max_length: 16 },
-    { name: 'embedding_profile', data_type: DataType.VarChar, max_length: 256 },
-    { name: 'index_build_id', data_type: DataType.VarChar, max_length: 256 },
-    { name: 'chunk_index', data_type: DataType.Int32 },
-    { name: 'embedding_model', data_type: DataType.VarChar, max_length: 256 },
-    { name: 'embedding_dimensions', data_type: DataType.Int32 },
-    { name: 'embedding_text_hash', data_type: DataType.VarChar, max_length: 64 },
+    {name:'id',data_type:DataType.VarChar,is_primary_key:true,autoID:false,max_length:256},
+    {name:'source_id',data_type:DataType.VarChar,max_length:256},
+    {name:'source_type',data_type:DataType.VarChar,max_length:32},
+    {name:'user_id',data_type:DataType.VarChar,max_length:256},
+    {name:'workspace_id',data_type:DataType.VarChar,max_length:256},
+    {name:'text',data_type:DataType.VarChar,max_length:65535,enable_analyzer:true,multi_analyzer_params:structuredClone(MULTI_ANALYZER_PARAMS)},
+    {name:'language',data_type:DataType.VarChar,max_length:16},
+    {name:'index_status',data_type:DataType.VarChar,max_length:16},
+    {name:'sparse_vector',data_type:DataType.SparseFloatVector,is_function_output:true},
+    ...(mode==='note-hybrid'?[{name:'dense_vector',data_type:DataType.FloatVector,dim:1024}]:[]),
   ];
 }

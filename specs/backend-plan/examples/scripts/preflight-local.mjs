@@ -79,22 +79,22 @@ function gitInfo(dir) {
 const cwd = fs.realpathSync(process.cwd());
 if (!serverInput) {
   if (path.basename(cwd) === 'huahuo-server') serverInput = cwd;
-  else if (fs.existsSync(path.join(cwd, 'huahuo-server')) && fs.existsSync(path.join(cwd, 'huahuo-app'))) {
+  else if (fs.existsSync(path.join(cwd, 'huahuo-server')) && fs.existsSync(path.join(cwd, 'huahuo-ai'))) {
     serverInput = path.join(cwd, 'huahuo-server');
   } else fail('Run from Code or huahuo-server, or supply --server-dir. Nothing has been created.');
 }
 const serverLexical = path.resolve(cwd, serverInput);
 const server = safeDir(serverLexical);
 if (path.basename(server) !== 'huahuo-server') fail('Resolved Server is not huahuo-server; confirm unexpected symlink/path before writing.');
-const app = safeDir(path.resolve(server, appInput || '../huahuo-app'));
+const app = safeDir(path.resolve(server, appInput || '../huahuo-ai'));
 if (nested(server, app) || nested(app, server)) fail('App and Server must be distinct non-nested directories.');
 const entries = fs.readdirSync(server).sort();
 const observedFiles = [];
 for (const rel of [
-  'Flutter/src/pubspec.yaml',
-  'Flutter/src/lib/app/navigation/app_route_paths.dart',
-  'Flutter/packages/huahuo_api/lib/src/api/endpoint_catalog.dart',
-  'Flutter/packages/huahuo_api/lib/src/api/api_envelope.dart',
+  'pubspec.yaml',
+  'lib/features/auth/domain/auth_repository.dart',
+  'lib/core/network/api_endpoints.dart',
+  'lib/features/auth/data/http_auth_repository.dart',
 ]) {
   try {
     const absolute = fs.realpathSync(path.join(app, rel));
@@ -115,7 +115,7 @@ const result = {
   server: { absolutePath: server, empty: entries.length === 0, topLevelEntryCount: entries.length,
     topLevelEntries: entries.slice(0, 60), git: gitInfo(server) },
   app: { absolutePath: app, relativeToServer: path.relative(server, app),
-    sourceUrl: 'https://github.com/kyriswu/huahuo-app', readOnlyIntent: true,
+    sourceUrl: null, readOnlyIntent: true,
     git: gitInfo(app), observedFiles },
   docker: { checked: !skipDocker },
   warnings: [],

@@ -48,7 +48,7 @@ describe('database cleanup invariants', () => {
     expect(result.rows).toEqual([]);
   });
 
-  it('retains unique event/chunk keys and the ordinary Note full-text index', async () => {
+  it('retains unique event/chunk keys without a PostgreSQL RAG full-text index', async () => {
     const indexes = await pool.query<{ table_name: string; method: string; is_unique: boolean; column_names: string[] }>(
       `SELECT t.relname AS table_name,am.amname AS method,i.indisunique AS is_unique,
               array_agg(a.attname::text ORDER BY k.ordinal) AS column_names
@@ -57,15 +57,14 @@ describe('database cleanup invariants', () => {
          JOIN pg_am am ON am.oid=idx.relam
          CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum,ordinal)
          JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum
-        WHERE n.nspname='public' AND t.relname IN ('content_events','rag_child_chunks','notes')
+        WHERE n.nspname='public' AND t.relname IN ('content_events','kb_note_hybrid_chunks','notes')
           AND i.indisvalid AND i.indisready AND i.indislive AND i.indpred IS NULL AND i.indexprs IS NULL
           AND k.ordinal<=i.indnkeyatts
         GROUP BY i.indexrelid,t.relname,am.amname,i.indisunique`,
     );
     expect(indexes.rows).toEqual(expect.arrayContaining([
       { table_name: 'content_events', method: 'btree', is_unique: true, column_names: ['workspace_id', 'cursor'] },
-      { table_name: 'rag_child_chunks', method: 'btree', is_unique: true, column_names: ['version_id', 'ordinal'] },
-      { table_name: 'notes', method: 'gin', is_unique: false, column_names: ['search_vector'] },
+      { table_name: 'kb_note_hybrid_chunks', method: 'btree', is_unique: true, column_names: ['build_id', 'ordinal'] },
     ]));
     const state = await pool.query("SELECT to_regclass('public.workspace_content_state') IS NOT NULL AS present");
     expect(state.rows[0]).toEqual({ present: true });
@@ -74,11 +73,11 @@ describe('database cleanup invariants', () => {
   it('stores TOC and its independent stage status for both business sources', async () => {
     const result = await pool.query<{ table_name: string; column_name: string; data_type: string; is_nullable: string }>(
       `SELECT table_name,column_name,data_type,is_nullable FROM information_schema.columns
-        WHERE table_schema='public' AND table_name IN ('rag_ingestion_versions','note_index_jobs')
+        WHERE table_schema='public' AND table_name IN ('rag_ingestion_versions','kb_note_hybrid_builds')
           AND column_name IN ('toc','toc_status')`,
     );
     expect(result.rows).toHaveLength(4);
-    for (const table of ['rag_ingestion_versions', 'note_index_jobs']) {
+    for (const table of ['rag_ingestion_versions', 'kb_note_hybrid_builds']) {
       expect(result.rows).toEqual(expect.arrayContaining([
         { table_name: table, column_name: 'toc', data_type: 'jsonb', is_nullable: 'YES' },
         { table_name: table, column_name: 'toc_status', data_type: 'text', is_nullable: 'NO' },

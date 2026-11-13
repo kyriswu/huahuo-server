@@ -144,15 +144,9 @@ END $$;
 
 
 
-CREATE FUNCTION public.notes_search_vector_update() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
- NEW.search_vector := setweight(to_tsvector('simple',coalesce(NEW.title,'')),'A') ||
-   setweight(to_tsvector('simple',coalesce((SELECT content_markdown FROM note_part_revisions
-     WHERE note_id=NEW.note_id AND part='raw' ORDER BY revision DESC LIMIT 1),'')),'B');
- RETURN NEW;
-END $$;
+
+
+
 
 
 
@@ -373,66 +367,8 @@ CREATE TABLE public.credit_reservations (
 
 
 
-CREATE TABLE public.note_index_state (
-    document_id uuid PRIMARY KEY,
-    workspace_id uuid NOT NULL,
-    canonical_content text NOT NULL DEFAULT '',
-    processing_snapshot jsonb NOT NULL,
-    pending_delete_ids text[] NOT NULL DEFAULT '{}'
-);
 
-CREATE TABLE public.document_ingestion_chunks (
-    chunk_id text PRIMARY KEY,
-    block_id text NOT NULL,
-    workspace_id uuid NOT NULL,
-    document_id uuid NOT NULL,
-    chunk_index integer NOT NULL CHECK (chunk_index >= 0),
-    chunk_hash character(64) NOT NULL,
-    text text NOT NULL CHECK (char_length(text) BETWEEN 1 AND 500),
-    heading_path jsonb NOT NULL DEFAULT '[]',
-    start_offset integer NOT NULL CHECK (start_offset >= 0),
-    end_offset integer NOT NULL CHECK (end_offset > start_offset),
-    core_start integer NOT NULL CHECK (core_start >= start_offset),
-    core_end integer NOT NULL CHECK (core_end > core_start AND core_end <= end_offset),
-    token_count integer NOT NULL CHECK (token_count >= 0),
-    embedding_text text NOT NULL,
-    embedding_text_hash text NOT NULL,
-    embedding_token_count integer NOT NULL CHECK (embedding_token_count >= 0),
-    index_status text NOT NULL DEFAULT 'pending' CHECK (index_status IN ('pending','ready','failed')),
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
-);
 
-CREATE TABLE public.note_index_jobs (
-    idempotency_key text NOT NULL,
-    workspace_id uuid NOT NULL,
-    document_id uuid NOT NULL,
-    document_version text NOT NULL,
-    content_hash character(64) NOT NULL,
-    pipeline_version text NOT NULL,
-    parser_version text NOT NULL,
-    chunker_version text NOT NULL,
-    source_type text NOT NULL,
-    status text NOT NULL,
-    chunk_count integer DEFAULT 0 NOT NULL,
-    error_code text,
-    error_message text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    canonical_content text,
-    task_id uuid,
-    processing_snapshot jsonb,
-    toc jsonb,
-    toc_status text DEFAULT 'pending'::text NOT NULL,
-    planned boolean NOT NULL DEFAULT false,
-    CONSTRAINT note_index_jobs_chunk_count_check CHECK ((chunk_count >= 0)),
-    CONSTRAINT note_index_jobs_document_version_check CHECK (((length(document_version) >= 1) AND (length(document_version) <= 128))),
-    CONSTRAINT note_index_jobs_pipeline_version_check CHECK (((length(pipeline_version) >= 1) AND (length(pipeline_version) <= 64))),
-    CONSTRAINT note_index_jobs_source_type_check CHECK ((source_type = 'note'::text)),
-    CONSTRAINT note_index_jobs_status_check CHECK ((status = ANY (ARRAY['processing'::text, 'ready'::text, 'failed'::text]))),
-    CONSTRAINT note_index_jobs_toc_status_check CHECK (toc_status IN ('pending', 'ready', 'failed')),
-    CONSTRAINT note_index_jobs_toc_check CHECK ((toc_status = 'ready') = (toc IS NOT NULL) AND (toc IS NULL OR jsonb_typeof(toc) = 'array'))
-);
 
 
 
@@ -522,7 +458,6 @@ CREATE TABLE public.notes (
     etag text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    search_vector tsvector,
     tag_set_version bigint DEFAULT 0 NOT NULL,
     tag_manual_override boolean DEFAULT false NOT NULL,
     processing_status text DEFAULT 'ready'::text NOT NULL,
@@ -575,48 +510,9 @@ CREATE TABLE public.provider_usage_measurements (
 
 
 
-CREATE TABLE public.rag_child_chunks (
-    id uuid NOT NULL,
-    version_id uuid NOT NULL,
-    ordinal integer NOT NULL,
-    content text NOT NULL,
-    embedding_text text NOT NULL,
-    content_hash text NOT NULL,
-    embedding_text_hash text NOT NULL,
-    heading_path jsonb DEFAULT '[]'::jsonb NOT NULL,
-    token_count integer NOT NULL,
-    char_start integer,
-    char_end integer,
-    embedding_status text DEFAULT 'pending'::text NOT NULL,
-    index_status text DEFAULT 'pending'::text NOT NULL,
-    embedding_model text NOT NULL,
-    embedding_dimension integer NOT NULL,
-    milvus_id text,
-    error_code text,
-    error_message text,
-    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    ordinal_global integer DEFAULT 0 NOT NULL,
-    document_key text NOT NULL,
-    chunk_key text NOT NULL,
-    chunk_profile text NOT NULL,
-    chunk_count integer NOT NULL,
-    embedding_profile text NOT NULL,
-    index_build_id text NOT NULL,
-    char_count integer NOT NULL,
-    parent_id uuid GENERATED ALWAYS AS (version_id) STORED,
-    source_type text DEFAULT 'file'::text NOT NULL,
-    source_revision text DEFAULT ''::text NOT NULL,
-    embedding_token_count integer,
-    CONSTRAINT rag_child_chunks_content_length_check CHECK (char_count = char_length(content) AND char_count BETWEEN 1 AND 2000),
-    CONSTRAINT rag_child_chunks_embedding_status_check CHECK ((embedding_status = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text]))),
-    CONSTRAINT rag_child_chunks_index_status_check CHECK ((index_status = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text])))
-);
 
 
 
-COMMENT ON COLUMN public.rag_child_chunks.parent_id IS 'Whole source record ID; ordinary indexed association, no database foreign key.';
 
 
 
@@ -632,12 +528,10 @@ CREATE TABLE public.rag_ingestion_versions (
     source_sha256 text,
     source_object_key text,
     mode text NOT NULL,
-    canonical_content text,
     canonical_content_uri text,
     parser_provider text,
     parser_version text,
     parser_config_hash text,
-    chunk_config_hash text NOT NULL,
     status text NOT NULL,
     current_stage text NOT NULL,
     failed_stage text,
@@ -646,16 +540,7 @@ CREATE TABLE public.rag_ingestion_versions (
     retryable boolean DEFAULT false NOT NULL,
     attempt_count integer DEFAULT 0 NOT NULL,
     last_attempt_at timestamp with time zone,
-    mineru_task_id text,
-    mineru_batch_id text,
-    mineru_trace_id text,
     parse_artifact_uri text,
-    embedding_status text DEFAULT 'pending'::text NOT NULL,
-    index_status text DEFAULT 'pending'::text NOT NULL,
-    embedding_model text NOT NULL,
-    embedding_dimension integer NOT NULL,
-    milvus_collection text NOT NULL,
-    child_count integer DEFAULT 0 NOT NULL,
     content_hash text,
     task_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -663,14 +548,9 @@ CREATE TABLE public.rag_ingestion_versions (
     raw_markdown_uri text,
     asset_manifest_uri text,
     enriched_canonical_markdown_uri text,
-    mineru_data_id text,
-    mineru_model_version text,
     parser_metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
     document_key text NOT NULL,
     source_type text DEFAULT 'file'::text NOT NULL,
-    source_pk text NOT NULL,
-    embedding_profile text NOT NULL,
-    index_build_id text NOT NULL,
     active boolean DEFAULT true NOT NULL,
     toc jsonb,
     toc_status text DEFAULT 'pending'::text NOT NULL,
@@ -679,8 +559,6 @@ CREATE TABLE public.rag_ingestion_versions (
     processing_info jsonb,
     deleted_at timestamp with time zone,
     cleanup_status text DEFAULT 'pending'::text NOT NULL,
-    CONSTRAINT rag_ingestion_versions_embedding_status_check CHECK ((embedding_status = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text]))),
-    CONSTRAINT rag_ingestion_versions_index_status_check CHECK ((index_status = ANY (ARRAY['pending'::text, 'running'::text, 'ready'::text, 'failed'::text]))),
     CONSTRAINT rag_ingestion_versions_mode_check CHECK ((mode = ANY (ARRAY['structured_document'::text, 'plain_text'::text]))),
     CONSTRAINT rag_ingestion_versions_status_check CHECK ((status = ANY (ARRAY['RECEIVED'::text, 'DOWNLOADING'::text, 'PARSE_SUBMITTED'::text, 'PARSING'::text, 'PARSED'::text, 'SEGMENTING'::text, 'CHUNKED'::text, 'EMBEDDING'::text, 'INDEXING'::text, 'SUCCEEDED'::text, 'FAILED'::text]))),
     CONSTRAINT rag_ingestion_versions_toc_status_check CHECK (toc_status IN ('pending', 'ready', 'failed')),
@@ -689,31 +567,6 @@ CREATE TABLE public.rag_ingestion_versions (
 
 
 
-CREATE VIEW public.rag_chunks AS
- SELECT c.chunk_key,
-    c.document_key,
-    c.parent_id,
-    c.source_type,
-    c.source_revision,
-    v.workspace_id,
-    'child'::text AS chunk_type,
-    c.ordinal AS chunk_index,
-    c.chunk_count,
-    c.content,
-    c.index_status,
-    c.created_at,
-    c.chunk_profile,
-    c.content_hash,
-    c.char_count,
-    c.token_count,
-    c.char_start AS source_start,
-    c.char_end AS source_end,
-    c.embedding_profile,
-    c.index_build_id,
-    c.embedding_status,
-    c.milvus_id
-   FROM (public.rag_child_chunks c
-     JOIN public.rag_ingestion_versions v ON ((v.id = c.version_id)));
 
 
 
@@ -1180,8 +1033,6 @@ ALTER TABLE ONLY public.credit_reservations
 
 
 
-ALTER TABLE ONLY public.note_index_jobs
-    ADD CONSTRAINT note_index_jobs_pkey PRIMARY KEY (idempotency_key);
 
 
 
@@ -1250,13 +1101,9 @@ ALTER TABLE ONLY public.provider_usage_measurements
 
 
 
-ALTER TABLE ONLY public.rag_child_chunks
-    ADD CONSTRAINT rag_child_chunks_pkey PRIMARY KEY (id);
 
 
 
-ALTER TABLE ONLY public.rag_child_chunks
-    ADD CONSTRAINT rag_child_chunks_version_id_ordinal_key UNIQUE (version_id, ordinal);
 
 
 
@@ -1511,20 +1358,13 @@ CREATE INDEX credit_reservations_rel_59d341c94760_idx ON public.credit_reservati
 
 
 
-CREATE INDEX note_index_state_workspace ON public.note_index_state (workspace_id, document_id);
-CREATE INDEX document_ingestion_chunks_document ON public.document_ingestion_chunks (workspace_id, document_id, chunk_index);
-CREATE INDEX document_ingestion_chunks_note ON public.document_ingestion_chunks (document_id);
-CREATE INDEX document_ingestion_chunks_ready ON public.document_ingestion_chunks (workspace_id, document_id, chunk_id) WHERE index_status = 'ready';
-
-CREATE INDEX note_index_jobs_rel_55052159c1a2_idx ON public.note_index_jobs USING btree (task_id);
 
 
 
-CREATE INDEX note_index_jobs_scope ON public.note_index_jobs USING btree (workspace_id, document_id, updated_at DESC);
 
 
 
-CREATE INDEX note_index_jobs_status ON public.note_index_jobs USING btree (document_id, status, updated_at DESC);
+
 
 
 
@@ -1568,7 +1408,6 @@ CREATE INDEX notes_scope ON public.notes USING btree (workspace_id, state, updat
 
 
 
-CREATE INDEX notes_search_gin ON public.notes USING gin (search_vector);
 
 
 
@@ -1584,30 +1423,24 @@ CREATE INDEX provider_usage_measurements_rel_feb5db0df5e1_idx ON public.provider
 
 
 
-CREATE INDEX rag_child_chunks_active_profile ON public.rag_child_chunks USING btree (document_key, embedding_profile, index_build_id, index_status);
-
-
-
-CREATE UNIQUE INDEX rag_child_chunks_chunk_key ON public.rag_child_chunks USING btree (chunk_key);
-
-
-
-CREATE INDEX rag_child_chunks_milvus ON public.rag_child_chunks USING btree (milvus_id) WHERE (milvus_id IS NOT NULL);
-
-
-
-CREATE INDEX rag_child_chunks_rel_e217f598b73d_idx ON public.rag_child_chunks USING btree (parent_id);
-
-
-
-CREATE UNIQUE INDEX rag_child_chunks_stable_key ON public.rag_child_chunks USING btree (document_key, chunk_profile, ordinal);
 
 
 
 
 
 
-CREATE INDEX rag_child_chunks_version_global ON public.rag_child_chunks USING btree (version_id, ordinal_global);
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1627,7 +1460,6 @@ CREATE UNIQUE INDEX rag_document_assets_version_source_key ON public.rag_documen
 
 
 
-CREATE INDEX rag_ingestion_versions_active_profile ON public.rag_ingestion_versions USING btree (workspace_id, active, embedding_profile, index_build_id);
 
 
 
@@ -1750,7 +1582,6 @@ CREATE TRIGGER note_tags_lifecycle_fence BEFORE UPDATE OF state ON public.notes 
 
 
 
-CREATE TRIGGER notes_search_vector_trigger BEFORE INSERT OR UPDATE OF title ON public.notes FOR EACH ROW EXECUTE FUNCTION public.notes_search_vector_update();
 
 -- Independent text import content. Execution stays in tasks/task_inputs/outbox.
 CREATE TABLE public.text_ingestion_jobs (
@@ -1758,80 +1589,121 @@ CREATE TABLE public.text_ingestion_jobs (
     source_type text NOT NULL CHECK (source_type IN ('MANUAL_INPUT','WEB_CRAWL','IMAGE_OCR','MEDIA_ASR','BOOK_OCR','FILE_UPLOAD')),
     raw_content text,
     origin_resource_uri text,
-    ingest_status text DEFAULT 'pending' NOT NULL CHECK (ingest_status IN ('pending','parsing','chunking','embedding','success','failed')),
+    ingest_status text DEFAULT 'pending' NOT NULL CHECK (ingest_status IN ('pending','parsing','chunking','success','failed')),
     error_msg text,
     created_at timestamptz DEFAULT now() NOT NULL,
     updated_at timestamptz DEFAULT now() NOT NULL,
     created_by uuid NOT NULL,
     workspace_id uuid NOT NULL,
     current_task_id uuid NOT NULL UNIQUE,
-    active_task_id uuid,
     content_hash text CHECK (content_hash IS NULL OR content_hash ~ '^[a-f0-9]{64}$'),
     artifact_uri text,
     CONSTRAINT text_ingestion_jobs_origin_check CHECK (
       (source_type='MANUAL_INPUT' AND origin_resource_uri IS NULL AND raw_content IS NOT NULL AND char_length(raw_content)<=50000)
       OR (source_type<>'MANUAL_INPUT' AND origin_resource_uri IS NOT NULL AND char_length(origin_resource_uri) BETWEEN 1 AND 4096)),
     CONSTRAINT text_ingestion_jobs_content_check CHECK (raw_content IS NULL OR btrim(raw_content)<>''),
-    CONSTRAINT text_ingestion_jobs_ready_text_check CHECK (ingest_status NOT IN ('chunking','embedding','success') OR raw_content IS NOT NULL)
+    CONSTRAINT text_ingestion_jobs_ready_text_check CHECK (ingest_status NOT IN ('chunking','success') OR raw_content IS NOT NULL)
 );
 CREATE INDEX text_ingestion_jobs_owner_scope ON public.text_ingestion_jobs(created_by,workspace_id,updated_at,id);
 CREATE INDEX text_ingestion_jobs_workspace ON public.text_ingestion_jobs(workspace_id,created_by);
-CREATE INDEX text_ingestion_jobs_active_task ON public.text_ingestion_jobs(active_task_id);
 COMMENT ON TABLE public.text_ingestion_jobs IS 'Independent imported content; source_type is acquisition method, not RAG business source. No business version counter.';
 
-CREATE TABLE public.text_ingestion_chunks (
-    chunk_key text PRIMARY KEY,
-    parent_id uuid NOT NULL,
-    task_id uuid NOT NULL,
-    ordinal integer NOT NULL CHECK (ordinal>=0),
-    content text NOT NULL CHECK (char_length(content) BETWEEN 1 AND 2000),
-    embedding_text text NOT NULL,
-    content_hash text NOT NULL CHECK (content_hash ~ '^[a-f0-9]{64}$'),
-    embedding_text_hash text NOT NULL CHECK (embedding_text_hash ~ '^[a-f0-9]{64}$'),
-    source_hash text NOT NULL CHECK (source_hash ~ '^[a-f0-9]{64}$'),
-    heading_path jsonb DEFAULT '[]' NOT NULL,
-    source_start integer NOT NULL CHECK (source_start>=0),
-    source_end integer NOT NULL,
-    char_count integer NOT NULL CHECK (char_count=char_length(content)),
-    token_count integer NOT NULL CHECK (token_count>=0),
-    embedding_token_count integer NOT NULL CHECK (embedding_token_count>=0),
-    index_status text DEFAULT 'pending' NOT NULL CHECK (index_status IN ('pending','ready','failed')),
-    created_at timestamptz DEFAULT now() NOT NULL,
-    CONSTRAINT text_ingestion_chunks_span_check CHECK (source_end>source_start),
-    UNIQUE(task_id,ordinal)
-);
-CREATE INDEX text_ingestion_chunks_parent_task ON public.text_ingestion_chunks(parent_id,task_id,ordinal);
-COMMENT ON COLUMN public.text_ingestion_chunks.parent_id IS 'Whole imported source ID; maps to vector parent_id, never a section or another chunk.';
-COMMENT ON COLUMN public.text_ingestion_chunks.source_hash IS 'Hash of the full fixed source text for this execution, separate from chunk content_hash.';
 
 -- Domain-specific least-privilege runtime grants.
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO huahuo_api, huahuo_admin, huahuo_worker, huahuo_scheduler;
 GRANT SELECT ON schema_migrations TO huahuo_api, huahuo_admin, huahuo_worker, huahuo_scheduler;
+GRANT SELECT(id,display_name,status,created_at) ON users TO huahuo_admin;
+GRANT SELECT(id,user_id,provider,subject_masked,verified_at,created_at) ON user_identities TO huahuo_admin;
 GRANT SELECT(id,user_id,state) ON workspaces TO huahuo_worker;
-GRANT SELECT ON account_memberships,asset_folders,asset_tags,billing_policies,content_events,content_jobs,credit_ledger_entries,credit_lots,credit_reservation_lots,credit_reservations,document_ingestion_chunks,note_index_state,note_index_jobs,note_part_revisions,note_relations,note_resource_refs,note_tag_suggestions,note_tags,notes,provider_usage_measurements,rag_child_chunks,rag_chunks,rag_document_assets,rag_ingestion_versions,resource_refs,resources,run_usage,storage_jobs,storage_reservations,task_attempts,upload_sessions,usage_periods,workspace_content_state TO huahuo_admin;
+GRANT SELECT ON account_memberships,asset_folders,asset_tags,billing_policies,content_events,content_jobs,credit_ledger_entries,credit_lots,credit_reservation_lots,credit_reservations,note_part_revisions,note_relations,note_resource_refs,note_tag_suggestions,note_tags,notes,provider_usage_measurements,rag_document_assets,rag_ingestion_versions,resource_refs,resources,run_usage,storage_jobs,storage_reservations,task_attempts,upload_sessions,usage_periods,workspace_content_state TO huahuo_admin;
 GRANT SELECT,INSERT ON admin_audit_events,api_idempotency,task_events,task_outbox TO huahuo_admin;
 GRANT SELECT,INSERT,UPDATE ON admin_login_limits,admin_sessions,admin_users TO huahuo_admin;
 GRANT SELECT,UPDATE ON tasks TO huahuo_admin;
-GRANT SELECT ON rag_chunks,task_results TO huahuo_api;
+GRANT SELECT ON task_results TO huahuo_api;
 GRANT SELECT,INSERT ON task_events,task_inputs,user_agreement_acceptances,user_audit_events TO huahuo_api;
 GRANT SELECT,INSERT,DELETE ON resource_refs TO huahuo_api;
 GRANT SELECT,INSERT,UPDATE ON account_memberships,api_idempotency,auth_rate_limits,billing_policies,credit_ledger_entries,credit_lots,credit_reservation_lots,credit_reservations,onboarding_drafts,otp_requests,provider_usage_measurements,refresh_tokens,resources,run_usage,storage_jobs,storage_reservations,task_outbox,tasks,upload_sessions,usage_periods,user_api_keys,user_identities,user_sessions,users,workspace_profiles,workspaces TO huahuo_api;
-GRANT SELECT,INSERT,UPDATE,DELETE ON asset_folders,asset_tags,content_events,content_jobs,document_ingestion_chunks,note_index_state,note_index_jobs,note_part_revisions,note_relations,note_resource_refs,note_tag_suggestions,note_tags,notes,rag_child_chunks,rag_document_assets,rag_ingestion_versions,workspace_content_state TO huahuo_api;
-GRANT SELECT ON account_memberships,asset_folders,asset_tags,billing_policies,content_events,content_jobs,credit_ledger_entries,credit_lots,credit_reservation_lots,credit_reservations,document_ingestion_chunks,note_index_state,note_index_jobs,note_part_revisions,note_relations,note_resource_refs,note_tag_suggestions,note_tags,notes,provider_usage_measurements,rag_child_chunks,rag_chunks,rag_document_assets,rag_ingestion_versions,run_usage,usage_periods,workspace_content_state TO huahuo_scheduler;
+GRANT SELECT,INSERT,UPDATE,DELETE ON asset_folders,asset_tags,content_events,content_jobs,note_part_revisions,note_relations,note_resource_refs,note_tag_suggestions,note_tags,notes,rag_document_assets,rag_ingestion_versions,workspace_content_state TO huahuo_api;
+GRANT SELECT ON account_memberships,asset_folders,asset_tags,billing_policies,content_events,content_jobs,credit_ledger_entries,credit_lots,credit_reservation_lots,credit_reservations,note_part_revisions,note_relations,note_resource_refs,note_tag_suggestions,note_tags,notes,provider_usage_measurements,rag_document_assets,rag_ingestion_versions,run_usage,usage_periods,workspace_content_state TO huahuo_scheduler;
 GRANT SELECT,INSERT ON storage_jobs,task_events,task_schedule_windows TO huahuo_scheduler;
 GRANT SELECT,INSERT,UPDATE ON task_outbox,task_schedules,tasks TO huahuo_scheduler;
 GRANT SELECT,UPDATE ON storage_reservations,task_attempts,upload_sessions TO huahuo_scheduler;
-GRANT SELECT ON billing_policies,rag_chunks,resource_refs,storage_jobs,task_inputs,users TO huahuo_worker;
+GRANT SELECT ON billing_policies,resource_refs,storage_jobs,task_inputs,users TO huahuo_worker;
 GRANT SELECT,INSERT ON task_events,task_outbox,task_results TO huahuo_worker;
 GRANT SELECT,INSERT,UPDATE ON account_memberships,credit_ledger_entries,credit_lots,credit_reservation_lots,credit_reservations,note_tag_suggestions,provider_usage_measurements,run_usage,storage_reservations,task_attempts,tasks,usage_periods TO huahuo_worker;
-GRANT SELECT,INSERT,UPDATE,DELETE ON asset_folders,asset_tags,content_events,content_jobs,document_ingestion_chunks,note_index_state,note_index_jobs,note_part_revisions,note_relations,note_resource_refs,note_tags,notes,rag_child_chunks,rag_document_assets,rag_ingestion_versions,workspace_content_state TO huahuo_worker;
+GRANT SELECT,INSERT,UPDATE,DELETE ON asset_folders,asset_tags,content_events,content_jobs,note_part_revisions,note_relations,note_resource_refs,note_tags,notes,rag_document_assets,rag_ingestion_versions,workspace_content_state TO huahuo_worker;
 GRANT SELECT,UPDATE ON resources,upload_sessions TO huahuo_worker;
 COMMENT ON TABLE schema_migrations IS 'Applied reviewed schema files; runtime roles are read-only.';
 INSERT INTO billing_policies(policy_version,mode,monthly_credit_limit,currency) VALUES('credit-policy-v1','development',10000000,'USD');
 INSERT INTO task_schedules(id,interval_seconds) VALUES('maintenance-check-v1',3600);
 
 GRANT SELECT,INSERT,UPDATE ON public.text_ingestion_jobs TO huahuo_api;
-GRANT SELECT ON public.text_ingestion_chunks TO huahuo_api;
 GRANT SELECT,UPDATE ON public.text_ingestion_jobs TO huahuo_worker;
-GRANT SELECT,INSERT,UPDATE,DELETE ON public.text_ingestion_chunks TO huahuo_worker;
+
+CREATE TABLE public.kb_note_hybrid_builds (
+ id uuid PRIMARY KEY, source_type text NOT NULL CHECK(source_type IN ('note')),
+ source_id uuid NOT NULL, source_revision text NOT NULL,
+ user_id uuid NOT NULL, workspace_id uuid NOT NULL, task_id uuid NOT NULL,
+ content_hash text NOT NULL, config_hash text NOT NULL, snapshot jsonb NOT NULL,
+ status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','indexing','ready','failed','superseded','deleted')),
+ published boolean NOT NULL DEFAULT false, planned boolean NOT NULL DEFAULT false,
+ chunk_count integer NOT NULL DEFAULT 0 CHECK(chunk_count>=0),
+ toc jsonb, toc_status text NOT NULL DEFAULT 'pending' CHECK(toc_status IN ('pending','ready','failed')),
+ error_code text, cleanup_status text NOT NULL DEFAULT 'pending' CHECK(cleanup_status IN ('pending','ready','failed')),
+ created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(source_type,source_id,source_revision,config_hash),
+ CHECK(NOT published OR status='ready')
+);
+CREATE UNIQUE INDEX kb_note_hybrid_builds_published ON public.kb_note_hybrid_builds(source_type,source_id) WHERE published;
+CREATE INDEX kb_note_hybrid_builds_owner ON public.kb_note_hybrid_builds(user_id,workspace_id,source_type,source_id,created_at DESC);
+CREATE INDEX kb_note_hybrid_builds_task ON public.kb_note_hybrid_builds(task_id);
+CREATE TABLE public.kb_note_hybrid_chunks (
+ build_id uuid NOT NULL, ordinal integer NOT NULL CHECK(ordinal>=0), point_id text NOT NULL,
+ source_start integer NOT NULL CHECK(source_start>=0), source_end integer NOT NULL,
+ core_start integer NOT NULL, core_end integer NOT NULL, section_id text, input_hash text NOT NULL, token_count integer NOT NULL CHECK(token_count BETWEEN 1 AND 8192),
+ content_hash text NOT NULL, char_count integer NOT NULL CHECK(char_count BETWEEN 1 AND 500),
+ index_status text NOT NULL DEFAULT 'pending' CHECK(index_status IN ('pending','ready','failed')),
+ PRIMARY KEY(build_id,ordinal), UNIQUE(build_id,point_id), CHECK(source_end>source_start)
+ ,CHECK(source_start<=core_start AND core_start<core_end AND core_end<=source_end)
+);
+CREATE INDEX kb_note_hybrid_chunks_point ON public.kb_note_hybrid_chunks(point_id);
+CREATE INDEX kb_note_hybrid_chunks_ready ON public.kb_note_hybrid_chunks(build_id,point_id) WHERE index_status='ready';
+GRANT SELECT,INSERT,UPDATE,DELETE ON public.kb_note_hybrid_builds,public.kb_note_hybrid_chunks TO huahuo_api,huahuo_worker;
+GRANT SELECT ON public.kb_note_hybrid_builds,public.kb_note_hybrid_chunks TO huahuo_admin,huahuo_scheduler;
+
+CREATE TABLE public.kb_document_keyword_builds (
+ id uuid PRIMARY KEY, source_type text NOT NULL CHECK(source_type IN ('file','text')),
+ source_id uuid NOT NULL, source_revision text NOT NULL,
+ user_id uuid NOT NULL, workspace_id uuid NOT NULL, task_id uuid NOT NULL,
+ content_hash text NOT NULL, config_hash text NOT NULL, snapshot jsonb NOT NULL,
+ status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','indexing','ready','failed','superseded','deleted')),
+ published boolean NOT NULL DEFAULT false, planned boolean NOT NULL DEFAULT false,
+ chunk_count integer NOT NULL DEFAULT 0 CHECK(chunk_count>=0),
+ toc jsonb, toc_status text NOT NULL DEFAULT 'pending' CHECK(toc_status IN ('pending','ready','failed')),
+ error_code text, cleanup_status text NOT NULL DEFAULT 'pending' CHECK(cleanup_status IN ('pending','ready','failed')),
+ created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(source_type,source_id,source_revision,config_hash),
+ CHECK(NOT published OR status='ready')
+);
+CREATE UNIQUE INDEX kb_document_keyword_builds_published ON public.kb_document_keyword_builds(source_type,source_id) WHERE published;
+CREATE INDEX kb_document_keyword_builds_owner ON public.kb_document_keyword_builds(user_id,workspace_id,source_type,source_id,created_at DESC);
+CREATE INDEX kb_document_keyword_builds_task ON public.kb_document_keyword_builds(task_id);
+CREATE TABLE public.kb_document_keyword_chunks (
+ build_id uuid NOT NULL, ordinal integer NOT NULL CHECK(ordinal>=0), point_id text NOT NULL,
+ source_start integer NOT NULL CHECK(source_start>=0), source_end integer NOT NULL,
+
+ content_hash text NOT NULL, char_count integer NOT NULL CHECK(char_count BETWEEN 1 AND 2000),
+ index_status text NOT NULL DEFAULT 'pending' CHECK(index_status IN ('pending','ready','failed')),
+ PRIMARY KEY(build_id,ordinal), UNIQUE(build_id,point_id), CHECK(source_end>source_start)
+
+);
+CREATE INDEX kb_document_keyword_chunks_point ON public.kb_document_keyword_chunks(point_id);
+CREATE INDEX kb_document_keyword_chunks_ready ON public.kb_document_keyword_chunks(build_id,point_id) WHERE index_status='ready';
+GRANT SELECT,INSERT,UPDATE,DELETE ON public.kb_document_keyword_builds,public.kb_document_keyword_chunks TO huahuo_api,huahuo_worker;
+GRANT SELECT ON public.kb_document_keyword_builds,public.kb_document_keyword_chunks TO huahuo_admin,huahuo_scheduler;
+
+CREATE INDEX kb_note_hybrid_builds_source ON public.kb_note_hybrid_builds(source_id,source_revision);
+CREATE INDEX kb_note_hybrid_builds_workspace ON public.kb_note_hybrid_builds(workspace_id);
+CREATE INDEX kb_document_keyword_builds_source ON public.kb_document_keyword_builds(source_id,source_revision);
+CREATE INDEX kb_document_keyword_builds_workspace ON public.kb_document_keyword_builds(workspace_id);

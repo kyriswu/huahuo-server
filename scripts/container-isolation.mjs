@@ -14,7 +14,7 @@ for(const role of roles){
  const vars=Object.fromEntries(c.Config.Env.map(x=>{const i=x.indexOf('=');return [x.slice(0,i),x.slice(i+1)];}));
  assert(!vars.DATABASE_MIGRATION_URL && !vars.POSTGRES_BOOTSTRAP_PASSWORD,'MIGRATION_SECRET_EXPOSED');
  assert(new URL(vars.DATABASE_URL).username===`huahuo_${role==='api-server'?'api':role}`,'ROLE_DATABASE_MISMATCH');
- assert(!c.Mounts.some(m=>m.Source.includes('huahuo-app')),'APP_MOUNTED');
+ assert(!c.Mounts.some(m=>['huahuo-ai','huahuo-app'].some(name=>m.Source.includes(name))),'APP_MOUNTED');
  if(['worker','scheduler'].includes(role)) assert(Object.keys(c.HostConfig.PortBindings??{}).length===0,'BACKGROUND_PORT_PUBLISHED');
  if(['admin','scheduler'].includes(role)) assert(!c.Mounts.some(m=>m.Destination==='/app/var/storage'),'UNEXPECTED_STORAGE_MOUNT');
 }
@@ -49,7 +49,7 @@ compose(['exec','-T','api-server','node','-e',"require('fs').writeFileSync('/app
 compose(['restart','api-server'],{stdio:['ignore','pipe','pipe']});await wait('api-server');
 compose(['exec','-T','worker','node','-e',"if(require('fs').readFileSync('/app/var/storage/p01-volume-probe','utf8')!=='p01-volume')process.exit(1);require('fs').unlinkSync('/app/var/storage/p01-volume-probe')"]);
 evidence.push('API/Worker shared volume survives API restart; Admin/Scheduler have no user volume');
-compose(['exec','-T','api-server','node','-e',"const f=require('fs');for(const p of ['/app/Flutter','/app/huahuo-app','/app/.git','/app/.env.compose.local','/app/config','/app/specs'])if(f.existsSync(p))process.exit(1)"]);
+compose(['exec','-T','api-server','node','-e',"const f=require('fs');for(const p of ['/app/Flutter','/app/huahuo-ai','/app/huahuo-app','/app/.git','/app/.env.compose.local','/app/config','/app/specs'])if(f.existsSync(p))process.exit(1)"]);
 evidence.push('Runtime image excludes App checkout, env, git, host reference config and specs');
 const result={recordedAt:new Date().toISOString(),evidence};
 writeFileSync('docs/container-checks.local.json',JSON.stringify(result,null,2)+'\n');

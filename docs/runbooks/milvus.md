@@ -1,147 +1,105 @@
-# Milvus 检索与入库
+# 知识库入库与检索
 
-文件 RAG 使用唯一的 `huahuo_chunks` Collection。Note 正文使用其业务 Profile 明确绑定的 `huahuo_manual_text`。二者是不同业务的目标，不是同一架构的迭代副本。没有 Collection 别名、按版本号选择适配器或旧检索回退。
+当前实现是两个并列的业务模式，不是迭代版本。只复用现有 Milvus 连接及 `default` database，不重建数据库或迁移旧向量。
 
-完整文档处理、正文存储、TOC、稳定身份与恢复流程见[模块化文档处理](modular-document-processing.md)。
+| 业务 | Collection | PostgreSQL 构建 / 分段 | 模型调用 |
+| --- | --- | --- | --- |
+| 真实 Note 正文 | `huahuo_kb_note_hybrid_chunks` | `kb_note_hybrid_builds` / `kb_note_hybrid_chunks` | BAAI/bge-m3，1024 维；可选独立 Rerank |
+| 文件 / 独立导入资料 | `huahuo_kb_keyword_chunks` | `kb_document_keyword_builds` / `kb_document_keyword_chunks` | Embedding、模型 tokenizer、Rerank 均为零 |
 
-## 职责与数据流
+资料集合只有文本 analyzer、BM25 Function 和稀疏索引，没有 Dense 字段或占位向量。笔记的 BM25 与 Dense 位于同一条记录，原生 Hybrid Search + `RRFRanker(k=60)` 完成融合。一次查询只访问对应业务绑定的一个集合；不同技术归属可以在同一集合中分组查询，不跨集合融合。知识图谱仍由标签关系驱动。
 
-```text
-业务正文 → LangChain 子 Chunk → PostgreSQL 业务 Chunk
-                                  ↓
-                         独立 indexChunks
-                                  ↓
-               Qwen Embedding → Milvus upsert
+## 入口与身份
 
-Query → Query Embedding ── Dense ┐
-原始 Query ─────────────── BM25 ├─ Milvus Hybrid/RRF
-                               ┘          ↓
-                       PostgreSQL 权限复核及正文回查
-                                          ↓
-                               独立 HTTP Reranker → 响应
+- 正常 Note 创建/编辑保存 `parts.raw` 后，在同一个业务事务创建构建、Task、Outbox；只有真实 Note 可以走混合流程。
+- `POST /api/v1/rag/ingestions`：OSS URL 文件入库，沿用现有文件名、MIME、幂等键与任务查询契约。原解析器、图片 OSS 转存、OCR 和 enriched Markdown 不变；解析后的资料走纯关键词流程。
+- `/api/v1/text-ingestions`：独立导入业务正文没有变成 Note，所以接入资料关键词流程。只有 MANUAL_INPUT 可以编辑原文；FILE_UPLOAD 复用现有解析；其它未接通渠道继续返回不可用，不伪造正文或成功。
+- `POST /api/v1/kb/notes/query`：笔记 Dense / Keyword / Hybrid。
+- `POST /api/v1/kb/documents/query`：资料 BM25。
+- 仍被 Agent 消费的 `POST /internal/v1/rag/query` 与通用用户入口 `POST /api/v1/rag/query` 使用同一查询实现；未指定 `sourceType` 时选择 Note。`sourceType=file|text` 由业务绑定资料关键词流程，即使请求包含 `mode=hybrid`，实际返回的 `mode` 也明确为 `keyword`，不会调用模型。
+- 已移除无人消费的 `/api/v1/huahuo_rag/query` 别名与可提交任意正文覆盖 Note 索引的旧入口。业务 ID 不能被用来选择任意数据库或集合。
+
+用户接口验证 `Authorization: Bearer <USER_JWT>`。内部用户接口同时验证 `X-Huahuo-Service-Key`（Agent→Server 方向）和用户 JWT；用户身份只来自验证过的 JWT `sub`。数据库再次验证用户、技术归属、删除状态及当前正文修订。
+
+```json
+{"query":"数据库 MVCC","sourceType":"note","mode":"hybrid","topK":10}
 ```
 
-PostgreSQL 是完整正文、TOC、Chunk、业务归属和处理状态的事实来源。Milvus 的 `text` 是原生 BM25 的输入索引副本；向量不保存到 PostgreSQL。RAG 没有 PostgreSQL 关键词召回或 Node.js 本地 RRF。独立 Note 业务搜索的全文/ILIKE 查询不属于 RAG 召回，继续保留。
+资料请求使用 `sourceType=file`；独立导入记录使用 `text`。可选 `documentKey` 是所属业务整篇记录 ID；没有 documentVersionId/indexBuildId 必填参数。结果包含 `documentKey`、整篇 `parentId`、`sourceRevision`、UTF-16 命中范围、Chunk 顺序、原始证据以及召回/重排分数。没有章节 Parent 表或章节父块回溯。`context` 当前为 null；显式章节读取继续从原文按范围读取，不复制持久化章节正文。
 
-`parent_id` 表示整篇来源内容的 ID；PDF 映射 `rag_ingestion_versions.id`，Note 映射 `notes.note_id`。不创建章节 Parent，不进行命中后的章节块回溯。临时章节仅用于 TOC 和可选切分提示。
+App 的现有工作区搜索仅沿用其技术路径和授权，不新增“工作区”产品概念；其中笔记关键词与混合检索都走笔记集合。命中返回 `part=raw`、整篇 Note 的 `revisionId`，并另外提供 `partRevisionId`，整篇精确读取校验 Note 修订；part 精确读取校验 part 修订，不再混淆两者。普通列表、状态和名称筛选仍由 PostgreSQL 负责；标签搜索/图谱关系没有改成向量关系。
 
-## 实际实现
+## 实现位置与切分
 
-| 能力 | 入口 |
+| 能力 | 位置 |
 | --- | --- |
-| Milvus SDK 连接、Schema 校验、upsert、召回及删除 | `src/modules/rag/adapters/milvus.ts` / `MilvusRepository` |
-| Schema、BM25 Function、多语言 Analyzer、语言判定 | `src/modules/rag/adapters/milvus-schema.ts` |
-| 通用目标绑定与索引适配器 | `src/modules/rag/vector-store.ts` |
-| 独立批量入库、部分失败与删除 | `src/lib/rag-indexing/index.ts` |
-| 用户权限、业务路由、PG 正文、Rerank 与结果组装 | `src/modules/rag/query-service.ts` |
-| HTTP Reranker | `src/modules/rag/search.ts` / `HttpRerankAdapter` |
+| 文本/Markdown 下载及完整正文检查点 | `rag/jobs.ts`、`rag/document-preparation.ts`、原生 UTF-8 parser；二进制文档解析已移除 |
+| H1–H6 分析、TOC、无重叠章节遍历 | `lib/document-processing/structure.ts` |
+| 两种字符规则与 UTF-16 映射 | `modules/kb/split.ts` / `splitKnowledgeContent` |
+| 纯关键词批量写入、超时、局部失败 | `modules/kb/keyword-indexing.ts` / `indexKeywordChunks` |
+| 独立 Embedding + Vector 入库 | `lib/rag-indexing/index.ts` / `indexChunks` |
+| 目标、模型和 tokenizer 快照 | `modules/kb/profile.ts` |
+| 统一业务编排、发布与精确清理 | `modules/kb/jobs.ts` / `KnowledgeIndexJobs` |
+| Milvus Schema / BM25 / Dense / Hybrid | `modules/rag/adapters/milvus-schema.ts`、`milvus.ts` |
+| 薄 Tool | `tools/document-processing.ts` |
+| 查询、授权、原文回查、最终复核 | `modules/rag/query-service.ts` |
 
-安装的 Node SDK 为 `@zilliz/milvus2-sdk-node@2.6.17`。当前 Dense 模型为 `Qwen/Qwen3-Embedding-8B`，配置和真实返回维度均为 4096。模型名称中的数字及 SDK 版本是外部依赖标识，不是架构版本。
+资料按自然段、句界、字符窗口切分，上限 2000 Unicode 码点、零重叠。笔记复用 H1–H6 结构；无标题时按自然段确定临时父层范围，短章节保持完整，长章节在范围内切分，单块上限 500 码点，同父层目标重叠约 50 字。核心区间不重叠，合起来覆盖有效正文；范围始终是保存原文的 UTF-16 半开区间。标题前缀不是原文，不能冒充原文坐标。嵌套 TOC 只遍历互斥正文范围，避免重复索引。没有独立的章节 Parent 实体。
 
-## Collection 与索引
+完整正文按正文修订保存在业务 Note 原文、独立导入原文或资料 canonical 对象中。四张索引表不保存 `content`、`embedding_text` 或向量；保存构建/修订/授权/目标/配置快照、顺序、范围、哈希、Milvus 点 ID 及状态。切片正文仅写 Milvus；查询必须按业务原文位置、哈希和有效修订复核，不能直接信任索引文本。
 
-当前 Schema 的关键字段：
+## BGE-M3 与配置
 
-| 字段 | 含义 |
-| --- | --- |
-| `id` | 稳定 Chunk Key，VARCHAR 主键，非自动生成 |
-| `doc_id` | 业务文档分组 |
-| `parent_id` | 整篇来源内容记录 ID |
-| `source_type` / `source_revision` | 业务来源与正文修订 |
-| `user_id` / `workspace_id` | 服务端提供的权限过滤范围 |
-| `text` / `language` | BM25 原文输入及 Analyzer 选择 |
-| `dense_vector` | 当前模型的 FLOAT_VECTOR |
-| `sparse_vector` | Milvus BM25 Function 自动生成的 SPARSE_FLOAT_VECTOR |
-| `document_version` / `index_build_id` / `embedding_profile` | 当前业务正文和有效索引的隔离范围 |
-| `index_status` / `chunk_index` | building/ready 状态及实际顺序 |
-| `embedding_model` / `embedding_dimensions` / `embedding_text_hash` | 实际输入及模型校验信息 |
+官方来源：[BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3)，固定 tokenizer 文件修订 `5617a9f61b028005a4858fdac845db406aefb181`。文件随 Server 镜像交付，不在每次任务下载。Manifest 位于 `resources/tokenizers/bge-m3/manifest.json`：
 
-Dense 索引 `huahuo_dense_hnsw` 使用 HNSW / COSINE；Sparse 索引 `huahuo_sparse_bm25` 使用 SPARSE_INVERTED_INDEX / BM25。BM25 Function `huahuo_text_bm25` 为 `text → sparse_vector`。BM25 Function 产物必须使用 BM25 metric，不能把普通稀疏 IP 示例直接套入该字段。应用仅写文本和 Dense Vector，不生成 Sparse Vector。
+- tokenizer.json SHA-256：`21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08`
+- tokenizer_config.json SHA-256：`a62b2b6784f990259fddef5f16388693a8043be4f69179e6a5257eeb3f9abac4`
 
-Schema 创建幂等，已存在时校验维度、Function、Analyzer 和索引。应用启动或任务执行均不 DROP Collection。Schema 不符明确失败，不通过创建另一个带迭代号的 Collection 自动绕过。目标SQL基线切换不改变默认Collection或Schema，不触发向量清空、Collection重建或付费向量补建。
-
-## 中英文 Analyzer
-
-`text.multi_analyzer_params.by_field=language`，每条记录只选择一个 Analyzer：
-
-| language | Analyzer |
-| --- | --- |
-| `zh` | Jieba + `cnalphanumonly` + lowercase |
-| `en` | English Analyzer |
-| `mixed` | Jieba + `cnalphanumonly` + lowercase |
-| `unknown` | alias 到 ICU + lowercase |
-
-`detectChunkLanguage()` 使用 Han 字符和 Latin 词单元的轻量规则，不调用模型、不手工分词。查询使用同一规则选择 Analyzer。真实多语言 `runAnalyzer` 和 BM25 Query 行为由下述脚本验证。
-
-## 配置与业务路由
+使用 `@huggingface/tokenizers@0.2.0` 真实编码，包含特殊 token，输入硬上限 8192 tokens。文件哈希不符时失败关闭。缓存键不受 JSONB 字段排序影响，同一进程复用模型 tokenizer。模型与维度/profile 固定匹配当前业务，不维护多模型兼容路径。
 
 ```env
+RAG_EMBEDDING_MODEL=BAAI/bge-m3
+RAG_EMBEDDING_DIMENSIONS=1024
+RAG_EMBEDDING_PROFILE=bge-m3-1024
+RAG_TOKENIZER_PATH=resources/tokenizers/bge-m3/tokenizer.json
+RAG_TOKENIZER_CONFIG_PATH=resources/tokenizers/bge-m3/tokenizer_config.json
+RAG_TOKENIZER_MAX_INPUT_TOKENS=8192
 MILVUS_DATABASE=default
-MILVUS_COLLECTION=huahuo_chunks
-RAG_DENSE_CANDIDATES=20
-RAG_BM25_CANDIDATES=20
-RAG_HYBRID_CANDIDATES=30
-RAG_RRF_K=60
-MANUAL_TEXT_MILVUS_DATABASE=default
-MANUAL_TEXT_MILVUS_COLLECTION=huahuo_manual_text
+MILVUS_SEARCH_CONCURRENCY=50
+KB_NOTE_INDEXING_ENABLED=true
+KB_NOTE_HYBRID_COLLECTION=huahuo_kb_note_hybrid_chunks
+KB_DOCUMENT_KEYWORD_COLLECTION=huahuo_kb_keyword_chunks
 ```
 
-连接、TLS、凭据、超时和有界并发使用项目全局 `MILVUS_*`。标准 `grpc_proxy` 仅用于传输代理；直连留空，本机Compose使用 `http://host.docker.internal:1082`，宿主机验证覆盖为 `http://127.0.0.1:1082`。根 `.env` 是部署配置来源；不在文档打印凭据或完整连接串。手动文本仅在 `MANUAL_TEXT_ENABLED=true` 且目标明确配置时运行。每个任务保存无凭据的目标快照；重试、读取和清理不能切到当前默认目标。
+现有 Embedding 凭据沿用；Rerank 端点、模型、密钥和 Note 200ms 预算独立配置，不随 Embedding 模型切换。资料关键词和 Note 纯关键词完全不调用这两个模型或模型 tokenizer。服务端连接及对象存储配置仍是全局配置。
 
-现有 API 为 `POST /api/v1/rag/query`、`POST /api/v1/huahuo_rag/query`、`POST /internal/v1/rag/query`。用户入口使用 JWT；内部用户入口同时要求 JWT 与方向 Service Key。用户身份来自 JWT `sub`，正文回查再次执行归属和有效状态校验。`sourceType=file|note` 选择注册的业务路由，调用方不能传任意 Collection。
+Milvus SDK 2.6.17 连接及就绪状态按进程复用，应用并发闸门与 SDK 池 max 同为 50（min=2，按需增长）；排队最多 32。新建集合幂等，Sparse 使用 SPARSE_INVERTED_INDEX / BM25，Dense 使用 HNSW / COSINE（M=16、efConstruction=128）。SDK 数值 Strong=0 的默认值问题以明确的 Strong 枚举名称处理。启动和正常任务不 DROP 集合或清库。
 
-Dense/BM25 两路使用相同 scope。`keyword` 仅发送原始 Query，不调用 Query Embedding。`hybrid` 使用 SDK 原生 Hybrid Search 与 `RRFRanker(RAG_RRF_K)`，不在本地二次融合。原生 Hybrid 返回融合分数；响应中未单独测量的 `denseScore` / `keywordScore` 为 0 占位，不能解释为两路真实分数。Reranker 使用从 PostgreSQL 查回的真实正文。
+## 修订、发布与恢复
 
-## 幂等和一致性
+构建身份固定来源类型、整篇 ID、正文修订和配置哈希。Note 修订使用真实 raw part 修订 UUID；资料使用解析正文 hash。Note 点 ID 还包含目标/规则/实际 Embedding 输入哈希和相同内容出现序号，因此局部编辑可复用未变点，同时不把重复段落误合并。文件和独立文本共用关键词模式但来源类型不同，不互相覆盖。
 
-稳定 ID 包含来源、整篇 ID、正文修订、切分配置和顺序。相同任务重试使用同一主键 upsert；ready 状态只在向量写入和业务发布条件满足后更新。新正文索引完成前保留原有有效索引，发布后按原目标和旧修订定向清理。
+Task lease 与同来源 advisory lock 防止并发晚到写入。PG 事务复核归属、正文修订与有效租约后才发布，同一业务对象只允许一个 published 构建。编辑提交后旧修订立即不能命中；旧点在新构建成功前仍可作为复用资源，但不能当作新正文查询结果。远端写成功、PG 未确认时按同一 ID upsert 重试，不增加逻辑点。部分批次失败只重新处理未 ready 的记录。
 
-`pnpm rag:consistency` 分别输出 PG ready、Milvus ready 唯一逻辑键、building、物理 `row_count`、重复逻辑键及两侧缺失数。统计接口可能未覆盖 growing/unflushed 数据，不能用物理行数代替实时逻辑行数。查询按稳定 Chunk Key 去重，并经过 PG 权限及当前业务状态复核。
+删除/清空正文立即过滤命中，再通过正常 Task 精确清理原目标、原点 ID；仍被当前有效或正在构建的修订引用的点受到保护。恢复已删除内容时不能信任已清理的 ready 元数据，必须重新建立缺失点。Rerank 后再次复核修订，避免在途结果泄露已替换/删除的正文。Rerank 超时按已授权初排结果回退；资料与纯关键词不执行 Rerank。
 
-## 可执行验收
+`pnpm rag:consistency` 使用强一致 Query 检查逻辑 ready 点及 PG 对应关系，`getCollectionStatistics.row_count` 仅作为物理诊断。物理行数可能含历史写入和未压缩数据，不用于判断重复或发布成功。
+
+## 验收与复现
 
 ```bash
+pnpm typecheck
+pnpm lint
 pnpm build
-# 仅连接、Schema、索引和 Analyzer；不调用模型
+pnpm test
+pnpm test:integration --milvus
+docker compose config --quiet
+git diff --check
+# 仅检查/幂等创建已配置集合，不调用任何模型、不删除旧数据
 node --env-file=.env scripts/verify-milvus.mjs --schema-only
-# 包含真实 Embedding 和可配置 Rerank；仅在明确授权真实模型调用时执行
-pnpm rag:verify-milvus
-# 只读一致性诊断
 pnpm rag:consistency
 ```
 
-脚本要求配置目标为 `huahuo_chunks`，使用固定隔离身份 `__huahuo_smoke__` 和 `milvus-smoke` 文档键。完整模式写入3条公开中文/英文/混合测试文本，重复 upsert，另写 building 与其他用户哨兵；验证5类 Dense/BM25/Hybrid Query 以及配置的 HTTP Rerank。稳定 ID 保证重复执行不增加逻辑样本。隔离样本不对应业务 PG 文档，不会进入业务 API 授权结果。
+集成 runner 只启动本项目独立 tmpfs PostgreSQL/Redis/Milvus，不读取开发 `.env`；用真实 BGE tokenizer、确定性 Embedding 替身验证两条正常业务入口、中文/英文/混合检索、App/Agent 契约、局部编辑、部分失败、租约丢失、恢复、删除与越权。真实模型和真实解析供应商没有通过 Mock 测试被声称验证。
 
-报告写入 `.local/milvus-live-verification.json`，不包含密钥、完整向量或真实用户正文。脚本不操作解析器和 PostgreSQL，不再维护旧 Collection 保留检查。BM25 产物通过 Function/索引与原始文本正召回证明：Milvus 不允许将该 Function 输出作为普通 output field 返回。
-
-## 现有 huahuo 库切换结果与RAG验收边界
-
-已在原阿里云 `huahuo` 库完成安全切换，未新增数据库。旧 `public` 整体改名封存为 `initialization_backup`，58表4149行及OID/relfilenode/视图内容摘要保持一致；新 `public` 已按唯一 `migrations/0001_initial_schema.sql` 初始化，版本1重放幂等、全库FK0。四角色已部署统一模型且healthy，readiness与JWKS真实检查通过。
-
-旧业务数据完整保留在封存Schema，四运行角色无其USAGE/CREATE；新 `public` 未复制产品用户或会话，`users/user_sessions`均为0。Milvus默认目标仍为`huahuo_chunks`与`huahuo_manual_text`，连接、Schema、Qwen模型、4096维和索引配置不变；本次未清理Milvus或OSS，也未付费重建历史向量。
-
-SQL切换没有删除任何旧行，Milvus旧smoke也未作为当前业务查询结果。新模型后续RAG验收须建立新的合法用户会话，经过Workspace、正文和有效状态校验，再以受控来源记录验证入库；本轮未执行真实文件RAG入库，部署healthy不能替代这一验收。
-
-新业务验收应核对：
-
-1. 新用户JWT与数据库active用户/会话一致，跨用户或Workspace请求不能返回正文。
-2. 新文档正文、Chunk、目标快照与索引状态在业务库中真实保存，Child使用稳定ID写入正确Collection。
-3. Dense、原始文本BM25、MilvusHybrid/RRF和独立Rerank各自按实际依赖完成验证；Mock与真实模型调用分开报告。
-4. 使用新用户范围核对PG与Milvus的ready逻辑数量，确认重复任务、building及其他用户记录不会进入响应。
-
-```bash
-# 构建后执行，只读；以新入库用户为业务验收范围
-node --env-file=.env scripts/rag-consistency.mjs --user-id "<new-user-uuid>"
-```
-
-不带`--user-id`的全Collection诊断会如实包含仅存在于Milvus的公开样本和旧索引记录；当SQL业务范围与这些记录不匹配时，它们可能计入`missing_in_postgres_count`。必须明确统计范围，不能把全库物理行数当成新用户的业务Chunk数量，也不能为使数字相等而删除未经授权的数据。
-
-本次typecheck、lint、build、229项unit/contract、115项隔离PG/Redis integration及额外6项Schema归档安全检查通过。真实RDS基线、归档保护、运行部署与JWKS结果见[RDS基线验收](rds-relations.md)；模型和短信调用均为0，不把这些检查描述成新一次真实文件RAG或Rerank验收。
-
-## 历史依赖证据与当前边界
-
-2026-11-03公开固定样本曾真实验证Qwen4096维、Dense、BM25、多语言Analyzer、MilvusHybrid/RRF、HTTP Rerank、稳定upsert和权限过滤。2026-11-04通用索引核心对两个业务目标执行过隔离写入、读取和删除，使用已保存公开向量，没有新增模型调用。这些记录只证明当时样本与依赖行为，不等于本次新 `public` 已完成真实文件RAG入库。
-
-2026-11-05命名整理历史证据确认了无迭代号的两个业务Collection、BM25 Function和Dense/Sparse索引。服务端不能原地修改BM25 Function的限制属于该次维护记录，不是SQL基线切换需要再次重建Collection的理由。
-
-本次不以真实付费解析、Embedding或Rerank作为Schema整理的隐含步骤。新文档完整链路、实际供应商调用、生产规模性能和部署连通性须分别记录真实结果；未执行的项目明确为待验证。
+本阶段验收与实际重置结果见 `docs/acceptance/knowledge-base.md`；运行和命令原始证据在忽略提交的 `.local/kb-refactor/`。旧切片表、旧视图、旧 Collection 路由与旧分路索引实现均已由新代码替换，不双写、不兼容回读、不补算旧向量。

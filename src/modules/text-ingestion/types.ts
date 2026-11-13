@@ -11,7 +11,7 @@ export enum TextIngestionSourceType {
   FILE_UPLOAD = 'FILE_UPLOAD',
 }
 
-export type TextIngestionStatus = 'pending' | 'parsing' | 'chunking' | 'embedding' | 'success' | 'failed';
+export type TextIngestionStatus = 'pending' | 'parsing' | 'chunking' | 'success' | 'failed';
 
 export interface TextIngestionJob {
   id: string;

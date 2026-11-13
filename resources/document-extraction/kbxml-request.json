@@ -1,0 +1,28 @@
+{
+  "output_format": "markdown",
+  "use_cache": false,
+  "force_ocr": false,
+  "ocr": {
+    "backend": "paddle-ocr",
+    "language": ["chi_sim"],
+    "paddle_ocr_settings": {"model_version": "pp-ocrv5", "model_tier": "server", "rec_batch_num": 6}
+  },
+  "acceleration": {"provider": "cuda", "device_id": 0},
+  "extraction_timeout_secs": 3000,
+  "images": {
+    "extract_images": true,
+    "target_dpi": 150,
+    "auto_adjust_dpi": false,
+    "max_image_dimension": 4096,
+    "max_images_per_page": 16,
+    "inject_placeholders": true,
+    "include_page_rasters": false,
+    "run_ocr_on_images": true,
+    "include_data_base64": false,
+    "output_format": {"type": "jpeg", "quality": 85}
+  },
+  "ocr_embedded_images": true,
+  "use_layout_for_markdown": false,
+  "pages": {"extract_pages": true},
+  "native_first": {"ocr_fallback": true, "min_native_body_chars": 80, "min_image_dimension": 32}
+}

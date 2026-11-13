@@ -14,7 +14,7 @@ interface TextJobRow {
   id: string; source_type: TextIngestionSourceType; raw_content: string | null;
   origin_resource_uri: string | null; ingest_status: TextIngestionStatus; error_msg: string | null;
   created_at: Date | string; updated_at: Date | string; created_by: string;
-  workspace_id: string; current_task_id: string; active_task_id: string | null; artifact_uri: string | null;
+  workspace_id: string; current_task_id: string; artifact_uri: string | null;
 }
 export function textIngestionDto(row: TextJobRow): TextIngestionJob {
   return { id: row.id, source_type: row.source_type, raw_content: row.raw_content,
@@ -22,8 +22,8 @@ export function textIngestionDto(row: TextJobRow): TextIngestionJob {
     error_msg: row.error_msg, created_at: new Date(row.created_at).getTime(),
     updated_at: new Date(row.updated_at).getTime(), created_by: row.created_by };
 }
-const jobFields = `j.*,CASE WHEN t.state IN ('failed','cancelled') AND j.active_task_id IS DISTINCT FROM j.current_task_id THEN 'failed' ELSE j.ingest_status END AS ingest_status,
-  CASE WHEN t.state IN ('failed','cancelled') AND j.active_task_id IS DISTINCT FROM j.current_task_id THEN coalesce(j.error_msg,t.error_code,'TEXT_INGESTION_FAILED') ELSE j.error_msg END AS error_msg`;
+const jobFields = `j.*,CASE WHEN t.state IN ('failed','cancelled') AND j.ingest_status<>'success' THEN 'failed' ELSE j.ingest_status END AS ingest_status,
+  CASE WHEN t.state IN ('failed','cancelled') AND j.ingest_status<>'success' THEN coalesce(j.error_msg,t.error_code,'TEXT_INGESTION_FAILED') ELSE j.error_msg END AS error_msg`;
 const etag = (row: TextJobRow) => `"text-${row.id}-${row.current_task_id}"`;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -31,7 +31,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 export class TextIngestionService {
   constructor(private readonly pool: pg.Pool, private readonly config: AppConfig) {}
   private available(source: TextIngestionSourceType): void {
-    if (!this.config.rag.enabled || this.config.rag.providerMode === 'disabled') throw new DomainError(503, 'TEXT_INGESTION_DISABLED');
+    if (!this.config.rag.enabled) throw new DomainError(503, 'TEXT_INGESTION_DISABLED');
     if (source !== TextIngestionSourceType.MANUAL_INPUT && source !== TextIngestionSourceType.FILE_UPLOAD) throw new DomainError(503, 'TEXT_SOURCE_ADAPTER_UNAVAILABLE');
   }
   private async owned(tx: pg.PoolClient, scope: Scope, id: string, lock = false): Promise<TextJobRow> {
@@ -69,7 +69,8 @@ export class TextIngestionService {
           (id,source_type,raw_content,origin_resource_uri,created_by,workspace_id,current_task_id,content_hash)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
         [id, input.source_type, raw, uri, scope.userId, workspace.id, taskId, raw === null ? null : hash(raw)])).rows[0]!;
-        await this.schedule(tx, scope, workspace.id, id, taskId);
+        await this.schedule(tx, scope, workspace.id, id, taskId,fileProcessingSnapshot(this.config,'markdown',
+          input.source_type===TextIngestionSourceType.FILE_UPLOAD?{sourceResourceId:id,parseRunId:taskId}:undefined));
         return textIngestionDto(row);
       });
     });
@@ -151,7 +152,7 @@ export class TextIngestionService {
         if (!current || !['failed', 'cancelled'].includes(current.state)) throw new DomainError(409, 'TEXT_INGESTION_RETRY_NOT_ALLOWED');
         let frozen: { jobId?: string; snapshot?: FileProcessingSnapshot };
         try { frozen = JSON.parse(current.body) as typeof frozen; } catch { throw new DomainError(409, 'TEXT_INGESTION_SNAPSHOT_INVALID'); }
-        if (frozen.jobId !== id || frozen.snapshot?.version !== 'file-processing' || !frozen.snapshot.vectorTarget?.collection) throw new DomainError(409, 'TEXT_INGESTION_SNAPSHOT_INVALID');
+        if (frozen.jobId !== id || frozen.snapshot?.version !== 'file-processing' || !frozen.snapshot.keyword?.target.collection) throw new DomainError(409, 'TEXT_INGESTION_SNAPSHOT_INVALID');
         const taskId = randomUUID();
         const updated = (await tx.query<TextJobRow>("UPDATE text_ingestion_jobs SET current_task_id=$2,ingest_status='pending',error_msg=NULL,updated_at=now() WHERE id=$1 RETURNING *", [id, taskId])).rows[0]!;
         await this.schedule(tx, scope, row.workspace_id, id, taskId, frozen.snapshot); return textIngestionDto(updated);

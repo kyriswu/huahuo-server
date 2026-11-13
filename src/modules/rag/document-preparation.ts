@@ -1,20 +1,11 @@
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { isIP } from 'node:net';
-import { Readable } from 'node:stream';
 import { fileTypeFromBuffer } from 'file-type';
 import type { AppConfig } from '../../config/config.js';
-import type { StoragePort } from '../storage/port.js';
-import { parseDocument } from '../ingestion/document-parser.js';
-import { MineruParserAdapter, MockMineruParser, type MineruParser } from './adapters/mineru.js';
-import { stableUuid } from './chunkers.js';
-import { buildMineruContentBindingsFromAssets, type MineruBindingDiagnostics } from './mineru-bindings.js';
-import type { ParsedDocument } from './types.js';
+import { DocumentParseError, parseDocument } from '../ingestion/document-parser.js';
 
 export class DocumentPreparationError extends Error {
   constructor(readonly code: string, readonly retryable = false) { super(code); this.name = 'DocumentPreparationError'; }
 }
-const digest = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
 const normalizedMime = (value: string | null) => value?.split(';', 1)[0]?.trim().toLowerCase() || null;
 
 function signedDate(value: string): number {
@@ -105,44 +96,20 @@ export async function downloadSourceBytes(uri: string, config: Pick<AppConfig, '
   }
 }
 
-export interface PreparedAsset {
-  id: string; sourceAssetKey: string; assetRef: string; sourcePath: string; objectKey: string;
-  sha256: string; mimeType: string; byteSize: number; assetType: string; pageNo: number | null;
-  sourceBlockId: string | null; charStart: number | null; charEnd: number | null;
-  caption: string | null; altText: string | null; ocrText: string | null; captionText: string | null;
-  uploadStatus: 'ready' | 'failed'; enrichmentStatus: 'none' | 'bound' | 'unresolved' | 'failed';
-  enrichmentProvider: string | null; enrichmentSource: string | null; enrichmentHash: string | null;
-  metadata: Record<string, unknown>;
-}
-export interface PreparedContent { canonical: string; assets: PreparedAsset[]; diagnostics?: MineruBindingDiagnostics; }
-async function putStable(storage: StoragePort, key: string, input: Readable, mimeType: string, maxBytes: number) {
-  try { const result = await storage.stat(key, mimeType); input.destroy(); return result; }
-  catch { return storage.put(key, input, mimeType, maxBytes); }
-}
-function assetExtension(path: string, mimeType: string): string {
-  const extension = path.toLowerCase().match(/\.[a-z0-9]+$/u)?.[0];
-  return extension && extension.length <= 8 ? extension : ({ 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif', 'image/svg+xml': '.svg' } as Record<string, string>)[mimeType] ?? '.bin';
-}
-/** Uses the existing binding algorithm. The caller owns database persistence. */
-export async function prepareParsedContent(parsed: ParsedDocument, options: { storage: StoragePort; prefix: string; identity: string; rawMarkdown?: string }): Promise<PreparedContent> {
-  const rawMarkdown = options.rawMarkdown ?? parsed.artifacts.canonicalMarkdown ?? parsed.markdown ?? parsed.rawMarkdown ?? '';
-  const bindings = buildMineruContentBindingsFromAssets({ rawMarkdown, contentListV2: parsed.artifacts.contentListV2, model: parsed.artifacts.model, assets: (parsed.artifacts.assets ?? []).map(asset => ({ sourcePath: asset.path, bytes: asset.bytes, mimeType: asset.mimeType, assetType: asset.assetType, sha256: asset.sha256 })) });
-  const rows: PreparedAsset[] = [];
-  for (const asset of bindings.assets) {
-    const objectKey = `${options.prefix}/${asset.sha256}${assetExtension(asset.sourcePath, asset.mimeType)}`;
-    const input = asset.bytes ? Readable.from([asset.bytes]) : asset.filePath ? createReadStream(asset.filePath) : undefined;
-    if (!input) throw new DocumentPreparationError('RAG_ASSET_CONTENT_MISSING');
-    try { await putStable(options.storage, objectKey, input, asset.mimeType, Math.max(asset.byteSize, 1)); }
-    catch { input.destroy(); throw new DocumentPreparationError('RAG_ASSET_UPLOAD_FAILED', true); }
-    rows.push({ id: stableUuid(`asset:${options.identity}:${asset.sourceAssetKey}`), sourceAssetKey: asset.sourceAssetKey, assetRef: asset.assetRef, sourcePath: asset.sourcePath, objectKey, sha256: asset.sha256, mimeType: asset.mimeType, byteSize: asset.byteSize, assetType: asset.assetType, pageNo: asset.pageNo ?? null, sourceBlockId: asset.sourceBlockId ?? null, charStart: null, charEnd: null, caption: asset.captionText ?? null, altText: asset.captionText ?? null, ocrText: asset.ocrText ?? null, captionText: asset.captionText ?? null, uploadStatus: 'ready', enrichmentStatus: asset.enrichmentStatus, enrichmentProvider: asset.enrichmentProvider ?? null, enrichmentSource: asset.enrichmentSource ?? null, enrichmentHash: asset.enrichmentHash ?? null, metadata: { sourceAssetKey: asset.sourceAssetKey, assetRef: asset.assetRef, sourcePath: asset.sourcePath, sourceType: asset.sourceType ?? null, bbox: asset.bbox ?? null } });
-  }
-  return { canonical: bindings.canonicalMarkdown, assets: rows, diagnostics: bindings.diagnostics };
-}
-
 const structured = new Set(['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']);
 const textMimes = new Set(['text/plain', 'text/markdown', 'text/x-markdown', 'text/csv']);
 const extensionMimes: Record<string, string> = { pdf: 'application/pdf', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-async function verifiedType(source: DownloadedSource): Promise<{ mimeType: string; plain: boolean }> {
+export async function verifyStructuredSource(source: Pick<DownloadedSource,'bytes'|'contentType'|'fileName'>):Promise<void>{
+  let detected:Awaited<ReturnType<typeof fileTypeFromBuffer>>;
+  try{detected=await fileTypeFromBuffer(source.bytes);}catch{throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');}
+  const ext=source.fileName.toLowerCase().match(/\.([a-z0-9]+)$/u)?.[1]??'';
+  const cfb=detected?.ext==='cfb'||detected?.mime==='application/x-cfb';
+  const mime=cfb&&['doc','ppt','xls'].includes(ext)?extensionMimes[ext]:detected?.mime;
+  if(!mime||!structured.has(mime))throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
+  if(source.contentType&&source.contentType!=='application/octet-stream'&&source.contentType!==mime)throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
+  if(extensionMimes[ext]&&extensionMimes[ext]!==mime)throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
+}
+async function verifiedTextType(source: Pick<DownloadedSource, 'bytes' | 'contentType' | 'fileName'>): Promise<string> {
   let detected: Awaited<ReturnType<typeof fileTypeFromBuffer>>;
   try { detected = await fileTypeFromBuffer(source.bytes); } catch { detected = undefined; }
   const declared = source.contentType, extension = source.fileName.toLowerCase().match(/\.([a-z0-9]+)$/u)?.[1] ?? '';
@@ -151,38 +118,31 @@ async function verifiedType(source: DownloadedSource): Promise<{ mimeType: strin
     const cfb = detected.ext === 'cfb' || detected.mime === 'application/x-cfb';
     const legacy = ['doc', 'ppt', 'xls'].includes(extension) ? extensionMimes[extension] : ['application/msword', 'application/vnd.ms-powerpoint', 'application/vnd.ms-excel'].includes(declared ?? '') ? declared! : undefined;
     const actual = cfb && legacy ? legacy : detected.mime;
-    if (!structured.has(actual)) throw new DocumentPreparationError('RAG_FILE_TYPE_UNSUPPORTED');
     if (declared && declared !== 'application/octet-stream' && declared !== actual) throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
     if (extensionMimes[extension] && extensionMimes[extension] !== actual) throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
-    return { mimeType: actual, plain: false };
+    throw new DocumentPreparationError('RAG_FILE_TYPE_UNSUPPORTED');
   }
   if (declared && structured.has(declared)) throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
   if (extensionMimes[extension]) throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
   if ((declared && !textMimes.has(declared) && declared !== 'application/octet-stream') || (!textMimes.has(declared ?? '') && !['txt', 'md', 'markdown', 'csv'].includes(extension))) throw new DocumentPreparationError('RAG_FILE_TYPE_UNSUPPORTED');
   if (source.bytes.includes(0)) throw new DocumentPreparationError('RAG_FILE_TYPE_MISMATCH');
-  return { mimeType: ['md', 'markdown'].includes(extension) || declared === 'text/markdown' || declared === 'text/x-markdown' ? 'text/markdown' : declared === 'text/csv' ? 'text/csv' : 'text/plain', plain: true };
+  return ['md', 'markdown'].includes(extension) || declared === 'text/markdown' || declared === 'text/x-markdown' ? 'text/markdown' : declared === 'text/csv' ? 'text/csv' : 'text/plain';
 }
-export interface PreparedFileText { content: string; format: 'markdown' | 'text'; artifactUri?: string; }
-export async function prepareFileText(config: AppConfig, storage: StoragePort, input: { id: string; uri: string }, dependencies: { fetchImpl?: typeof fetch; parser?: MineruParser } = {}): Promise<PreparedFileText> {
-  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(input.id)) throw new DocumentPreparationError('TEXT_INGESTION_ID_INVALID');
-  if (config.rag.providerMode === 'disabled' || (config.rag.providerMode === 'mock' && config.appEnv === 'production')) throw new DocumentPreparationError('TEXT_SOURCE_ADAPTER_UNAVAILABLE');
-  const source = await downloadSourceBytes(input.uri, config, dependencies.fetchImpl);
-  const type = await verifiedType(source);
-  if (type.plain) {
-    const result = await parseDocument({ content: source.bytes, fileName: source.fileName, mimeType: type.mimeType });
-    if ([...result.content].length > config.rag.plainTextMaxChars) throw new DocumentPreparationError('RAG_PLAIN_TEXT_TOO_LARGE');
+export interface PreparedFileText { content: string; format: 'markdown' | 'text'; }
+/** Only the existing UTF-8 text parser is available; binary formats have no adapter. */
+export async function parseDownloadedText(source: Pick<DownloadedSource, 'bytes' | 'contentType' | 'fileName'>, maxChars: number): Promise<PreparedFileText> {
+  const mimeType = await verifiedTextType(source);
+  try {
+    const result = await parseDocument({ content: source.bytes, fileName: source.fileName, mimeType });
+    if ([...result.content].length > maxChars) throw new DocumentPreparationError('RAG_PLAIN_TEXT_TOO_LARGE');
     return { content: result.content, format: result.format };
+  } catch (error) {
+    if (error instanceof DocumentParseError) throw new DocumentPreparationError('RAG_SOURCE_INVALID_TEXT');
+    throw error;
   }
-  if (!dependencies.parser && config.rag.providerMode === 'live' && !config.rag.mineruToken) throw new DocumentPreparationError('RAG_MINERU_CONFIG_MISSING');
-  const parser = dependencies.parser ?? (config.rag.providerMode === 'mock' ? new MockMineruParser() : new MineruParserAdapter({ baseUrl: config.rag.mineruBaseUrl, token: config.rag.mineruToken!, model: config.rag.mineruModel, pollIntervalMs: config.rag.mineruPollIntervalMs, timeoutMs: config.rag.mineruTimeoutMs }));
-  const parsed = await parser.parse({ ossUrl: source.finalUrl, fileName: source.fileName, mimeType: type.mimeType, sourceBytes: source.bytes });
-  const prepared = await prepareParsedContent(parsed, { storage, prefix: `text-ingestions/${input.id}/assets`, identity: input.id });
-  if (!prepared.canonical.trim()) throw new DocumentPreparationError('RAG_SOURCE_EMPTY');
-  const raw = parsed.rawMarkdown ?? parsed.markdown ?? '';
-  const rawUri = `text-ingestions/${input.id}/raw/${digest(raw)}.md`;
-  await putStable(storage, rawUri, Readable.from([raw]), 'text/markdown', Math.max(Buffer.byteLength(raw), 1));
-  const manifest = JSON.stringify({ assets: prepared.assets, diagnostics: prepared.diagnostics, rawMarkdownUri: rawUri, parserProvider: parsed.parserProvider, parserVersion: parsed.parserVersion, parserMeta: parsed.parserMeta });
-  const artifactUri = `text-ingestions/${input.id}/artifacts/manifest-${digest(manifest)}.json`;
-  await putStable(storage, artifactUri, Readable.from([manifest]), 'application/json', Buffer.byteLength(manifest));
-  return { content: prepared.canonical, format: 'markdown', artifactUri };
+}
+export async function prepareFileText(config: AppConfig, input: { id: string; uri: string }, dependencies: { fetchImpl?: typeof fetch } = {}): Promise<PreparedFileText> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(input.id)) throw new DocumentPreparationError('TEXT_INGESTION_ID_INVALID');
+  const source = await downloadSourceBytes(input.uri, config, dependencies.fetchImpl);
+  return parseDownloadedText(source, config.rag.plainTextMaxChars);
 }

@@ -1,6 +1,6 @@
 # AGENTS项目规则模板 · 合并到独立后端，不覆盖已有规则
 
-- 当前仓库：独立花火Fastify后端；前端只读参照仓库：**https://github.com/kyriswu/huahuo-app**。
+- 当前仓库：独立花火Fastify后端；前端只读参照仓库：**`../huahuo-ai`（本机源码；尚无远端）**。
 - 读取specs/backend-plan/总提示词、06容器规范、07App参照规范与当前阶段；开始读docs/progress.md与docs/app-reference.md。
 - 一份compose.yaml：api-server、worker、admin、scheduler、postgres、redis、一次性migrate。前三者必须独立容器，不用同容器多进程伪装；同镜像复用允许。
 - buildApiServer与buildAdminServer分开，公共端不注册admin路由；worker消费，scheduler投递/扫描，所有角色共用已审核领域服务。
@@ -17,7 +17,7 @@
 
 ## v3本机路径与Docker（应用到根AGENTS，保留已有规则）
 
-- 唯一项目写入根是现有huahuo-server；App默认../huahuo-app只读，源URL https://github.com/kyriswu/huahuo-app 。不另建huahuo-backend，不在Code根初始化混合工程。
+- 唯一项目写入根是现有huahuo-server；App默认../huahuo-ai只读，源URL `../huahuo-ai`（本机源码；尚无远端） 。不另建huahuo-backend，不在Code根初始化混合工程。
 - 开始先检查当前/隐藏文件与git边界，不能把“用户说空目录”当允许清空。已有.env、口令、卷、代码必须保留。
 - 本地源码优先，未提交改动要纳入证据；不自动clone/pull/fetch/checkout/stash/reset。无.git用所读文件哈希，不能编造commit。
 - 本机Docker已安装且用户允许必要时启动。先查context本地性/权限/daemon；只操作本项目，禁止全局清理、down -v或动其他项目。权限受限申请最小必要审批，不绕过沙箱。

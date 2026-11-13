@@ -4,7 +4,7 @@
 
 ## 本阶段固定部署与 App 参照
 
-- App只读参考仓库：**https://github.com/kyriswu/huahuo-app**。本机后端根为 `huahuo-server`，App位于同级 `../huahuo-app` 且只读；禁止把服务写进App、复制Flutter作为运行依赖或擅自修改UI。
+- App只读参考仓库：**`../huahuo-ai`（本机源码；尚无远端）**。本机后端根为 `huahuo-server`，App位于同级 `../huahuo-ai` 且只读；禁止把服务写进App、复制Flutter作为运行依赖或擅自修改UI。
 - 同一根目录Compose：`api-server`、`worker`、`admin`、`scheduler`独立容器；`postgres`（可切云）、`redis`、一次性`migrate`。本阶段涉及：scheduler调度/投递；worker执行；api-server受理/状态；admin受控运维入口。
 - 先按 `07_App代码持续参照与契约核对.md` 核对本阶段：task/run、轮询/取消/重试、事件游标与结果确认消费者。路径/符号从当前checkout发现，不猜它们一定在旧目录；记录实际commit和本地改动。
 - 实施前保存App基线；过程中每个客户端端点均能追到请求与响应解析；结束更新 `docs/app-reference.md` 和契约测试。不能等P15才第一次对照App。
@@ -13,7 +13,7 @@
 
 ## 本机工作区约束（v3，全部阶段适用）
 
-- 优先读取 `../huahuo-app` 的当前本地源码和未提交内容，源地址仅用于识别： https://github.com/kyriswu/huahuo-app 。不要默认clone/fetch/pull或新建参考目录；阶段内记录实际阅读文件的哈希。
+- 优先读取 `../huahuo-ai` 的当前本地源码和未提交内容，源地址仅用于识别： `../huahuo-ai`（本机源码；尚无远端） 。不要默认clone/fetch/pull或新建参考目录；阶段内记录实际阅读文件的哈希。
 - 所有实现、文档、依赖和测试都放现有 `huahuo-server`。不是Code父目录，不是App，也不是再新建huahuo-backend。开始先检查隐藏文件，保留已有工作与数据。
 - 同一份 `huahuo-server/compose.yaml` 管理独立容器；只操作本项目资源，保留数据卷，不能全局清理或停止其他项目。
 - 按 `11_本机双目录与Docker开工规范.md` 检查本机Docker，必要时启动已安装的本机Desktop；若权限受限申请最小权限，不把ChatGPT的沙箱执行当用户Mac执行。

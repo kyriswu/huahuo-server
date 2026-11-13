@@ -1,5 +1,127 @@
 # App 只读参照基线
 
+## 文档 HTTP/关键词接线核对（2026-11-14）
+
+只读核对当前 `../huahuo-ai`，仍为 GIT_UNBORN。`ApiEndpoints` 使用 HUAHUO_SERVER/HUAHUO_AGENT；认证 HTTP 客户端保持 Authorization、JSON 与 x-idempotency-key。两文件 SHA256 仍为 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`、`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`，完整相对路径同下方基线，记录见 Server `.local/ecs-power/extraction-app-reference.json`。
+
+当前 App 未找到 rag/ingestions、text-ingestion 或 sourceResourceId 的调用代码，本轮端点接线为 Server CODE/用户协议，不冒称 Flutter 端到端通过。只新增后端文件请求可选母资源/批次 UUID、受控产物/图片读取；既有 envelope、Task 身份和原生文本行为保留。未写 App 或运行 Flutter 命令。
+
+## 解析机运行库只读核对（2026-11-14）
+
+当前实际 App 为 `../huahuo-ai`，Git 为 GIT_UNBORN、尚无 commit/remote。再次只读核对 `lib/core/network/api_endpoints.dart`（HUAHUO_SERVER/HUAHUO_AGENT，SHA256 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`）及 `lib/features/auth/data/http_auth_repository.dart`（既有 `/api/v1/auth/*`、x-idempotency-key，SHA256 `d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`）。
+
+本次是内部库和 scheduler 事件监听，不新增 App 请求/响应字段或控制实例接口；未修改或运行 App 命令。源码核对为 CODE，解析协议与真实端到端调用为 UNVERIFIED；只读记录在 Server `.local/ecs-power/app-reference.json`，见[验收](acceptance/document-parser-machine.md)。
+
+## A10续测的App只读核对（2026-11-13）
+
+本轮仍只在Server内使用独立测试链路；读取../huahuo-ai的api_endpoints.dart和http_auth_repository.dart，结束时哈希一致，Git复核GIT_UNBORN。未写App或运行Flutter，GPU/KB协议未冒充App接线。详见[验收](acceptance/xberg-a10-kbxml-retest.md)。
+
+## Xberg T4续测的App只读参照（2026-11-13）
+
+本轮仅在Server内操作独立GPU测试工具、结果和docs；读取../huahuo-ai的api_endpoints.dart、http_auth_repository.dart，两份SHA前后一致，Git GIT_UNBORN，未运行Flutter命令或写App。未把Xberg新KB协议伪装成App接通。详见[验收](acceptance/xberg-oss-kbxml-trial.md)。
+
+## Xberg OSS/KBXML核对与申请未完成（2026-11-13）
+
+新镜像digest c8ad143d…783e25/build xberg-kbxml-v1-20261113-r4已静态核对；新增北京I交换机已加入本机GPU配置。T4单区/四区及A10两档实际申请均NoStock，关闭缓存和570驱动也未成功，无325页解析或性能结果。所有自有调度实例和临时输入已清理，新镜像缓存Ready并保留。长期GPU仍disabled，未改业务/App/数据库。本轮App只读基线仍GIT_UNBORN，两个实际参照文件SHA阶段末一致。详见[本轮记录](acceptance/xberg-oss-kbxml-trial.md)。
+
+## A10测试的当前App只读参照（2026-11-13）
+
+当前只读../huahuo-ai，Git仍GIT_UNBORN。实际读取lib/core/network/api_endpoints.dart（SHA256 17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1）和lib/features/auth/data/http_auth_repository.dart（d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5），阶段末一致。本轮只是独立云端镜像测试，无App接线、Flutter运行或App文件写入；不复用历史huahuo-app提交号，也不宣称客户端解析流程验收通过。详见[本轮验收](acceptance/xberg-a10-native-first-trial.md)。
+
+## 当前只读源码基线（2026-11-12，用户修正目录）
+
+当前 App 根目录为 `../huahuo-ai`，已替换活动 AGENTS、Pxx 规范、默认路径、示例配置及实际本机配置。App Git 根目录一致，分支 main，尚无 commit、未配置 origin，登记为 `GIT_UNBORN`，不沿用旧 App 的 HEAD 或 GitHub 地址。此前 `huahuo-app` 和 Flutter/packages 的材料保留为历史证据，不能用于宣称当前 App 已兼容。
+
+已读 `HttpAuthRepository.sendCode/verifyCode/_post/_readSession` 及认证测试。新 App 明确使用 purpose=sign_in、clientType/clientId、x-idempotency-key、success/data/error envelope，服务端现有认证契约可直接承接；Base URL 从 `HUAHUO_SERVER` 注入，Agent 地址由 `HUAHUO_AGENT` 单独注入。只核对本次认证消费者，不声明其他业务兼容。
+
+| 当前 App 相对路径 | SHA-256 |
+| --- | --- |
+| `lib/core/network/api_endpoints.dart` | `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1` |
+| `lib/features/auth/data/http_auth_repository.dart` | `3ba7ab4618094cc535860312fed9fe892d233799ed610a321d75ceac75b03bf0` |
+| `lib/features/auth/domain/auth_repository.dart` | `7804ece505e60e7c2269bd56068fcd923d024ab7f4448a1cd6d186a42de8aebe` |
+| `test/auth_api_test.dart` | `d7ac13fac8f7ec45bae706478a56a03ce93e291df9504aab2502978c36c70eb6` |
+| `test/auth_flow_test.dart` | `91cbf6077a98d14af13447f2db8983176b5c053be3c89cb4343cb693dc28fa42` |
+
+`app:reference` 与 `--diff`、本机路径预检通过；未运行 Flutter、pub get、构建、格式化或改动 App。工作树状态摘要与上述文件哈希在本轮结束复核，私有证据位于 `.local/sms-service/`。
+
+## Xberg 新图片策略测试的只读参照（2026-11-12）
+
+App HEAD20f61b78887f9288d1fd3227f326e6374d516f27。只读核对endpoint_catalog.dart及work_ai_task_api.dart，SHA分别c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92、3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e；阶段末一致。本轮仅独立ECI测试和本机证据，没有App API消费接线、Flutter运行或App文件写入，不宣称客户端联调完成。详见[本轮验收](acceptance/xberg-cuda-image-policy-trial.md)。
+
+## 文件解析供应商移除的只读核对（2026-11-12）
+
+App HEAD `20f61b78887f9288d1fd3227f326e6374d516f27`；实际读取 `endpoint_catalog.dart:437` 的工作区Note导入路径、JWT和幂等声明，目录中没有供应商专属API，不能与Server通用 `/api/v1/rag/ingestions` 直接等同。目录文件SHA-256 `c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92`；domain_clients.dart哈希 `28ac16b834fd4bd4491ef25fab26b53ec66f12428ea7cecc7b04b09e1099853e`。本轮仅移除Server外部解析适配器，未写入App或运行Flutter，不声明客户端联调通过。见[移除验收](acceptance/mineru-removal.md)。
+
+## FunASR ECI 申请只读核对（2026-11-12）
+
+App HEAD仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`。实际读取 `endpoint_catalog.dart:805` 的taskDetail/retryTask与 `work_ai_task_api.dart:16` 的任务接口，SHA-256仍分别为 `c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92`、`3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e`。本轮只申请独立FunASR实例，无App写入、Flutter运行或ASR任务接线。见[实例记录](acceptance/funasr-eci.md)。
+
+随后完整音频转写仍由Server本地试验脚本直接调用镜像HTTP完成，没有接入App任务/录音契约；真实响应和重复“嗯”的质量问题独立记录，不作为移动端/语音业务验收。
+
+## Xberg CUDA全文试验只读核对（2026-11-12）
+
+App HEAD仍20f61b78887f9288d1fd3227f326e6374d516f27，两个Task参照文件SHA仍c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92、3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e。真实Task ID查询/重试只读核对；本轮仅云端325页测试，无App写入、Flutter运行或契约接线。见[全文CUDA验收](acceptance/xberg-cuda-full-trial.md)。
+
+## Xberg CUDA镜像试验只读核对（2026-11-12）
+
+App HEAD仍20f61b78887f9288d1fd3227f326e6374d516f27；真实Task ID查询/重试源码只读核对。endpoint_catalog.dart、work_ai_task_api.dart SHA仍c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92、3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e。无App写入、Flutter运行或接口接线；本轮仅临时T4镜像与调用配置测试，见[CUDA验收](acceptance/xberg-cuda-trial.md)。
+
+## Xberg全文试验只读核对（2026-11-12）
+
+App HEAD仍20f61b78887f9288d1fd3227f326e6374d516f27，endpoint_catalog.dart和work_ai_task_api.dart SHA仍c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92、3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e。只读核对真实Task ID查询/重试源码；本轮仅云端全文试验，无App写入、Flutter运行或接口接线。见[全文验收](acceptance/xberg-full-trial.md)。
+
+## Xberg优化对照的只读核对（2026-11-11）
+
+App HEAD及endpoint_catalog.dart、work_ai_task_api.dart SHA与前轮一致，实际Task ID查询/重试契约不变。本轮只测试镜像官方按页OCR/线程参数，未接移动端、改App或运行Flutter。哈希仍c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92、3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e，HEAD20f61b78887f9288d1fd3227f326e6374d516f27。见[验收](acceptance/xberg-optimization-trial.md)。
+
+## Xberg独立测试只读核对（2026-11-11）
+
+App HEAD仍为20f61b78887f9288d1fd3227f326e6374d516f27，endpoint_catalog.dart、work_ai_task_api.dart的SHA仍分别为c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92、3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e。实际源码继续按Task ID查询/重试；本轮仅镜像HTTP前20页测试，无App接线、Flutter运行或写入。详见[验收记录](acceptance/xberg-trial.md)。
+
+## 新镜像对照的只读核对（2026-11-11）
+
+App HEAD仍20f61b78887f9288d1fd3227f326e6374d516f27，既有endpoint_catalog.dart和work_ai_task_api.dart哈希与前述GPU记录一致；只读核对，无Flutter运行或App写入。本轮为独立云端10页测试。详见[对照验收](acceptance/gpu-parse-ocr-trial.md)。
+
+## huahuo-parse 试验核对（2026-11-11）
+
+再次只读核对同级 App HEAD 与下表两个 Task 文件，哈希仍分别为 `c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92`、`3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e`，HEAD 仍 `20f61b78887f9288d1fd3227f326e6374d516f27`。本轮仅运行 Server 本地操作脚本及用户授权的云端容器，不注册 App 路由，不修改 Task DTO，未运行 Flutter 或向 App 写入。
+
+## 阿里云 AK 配置修复核对（2026-11-11）
+
+再次只读核对 App HEAD `20f61b78887f9288d1fd3227f326e6374d516f27` 与下列两个任务文件 SHA-256，均与 GPU 阶段记录一致。仅修改 Server 环境读取、Compose、示例和测试，不改 App 文件或 HTTP/Task 契约，未运行 Flutter。
+
+## GPU 底层模块的只读核对（2026-11-11）
+
+本机 App HEAD 为 `20f61b78887f9288d1fd3227f326e6374d516f27`。工作树原有 iOS 工程/Info.plist、V3 页面、pubspec 及未跟踪设计/资源文件的用户改动；未覆盖、暂存或还原。只读取以下文件，阶段末复核哈希；未运行任何向 App 写入的命令。
+
+| App 相对路径 | 本轮依据 | SHA-256 |
+| --- | --- | --- |
+| `Flutter/packages/huahuo_api/lib/src/api/endpoint_catalog.dart` | `taskDetail/retryTask/regenerateTask`，805—826 行；目录无 GPU/ECI 管理端点 | `c91cdd32b5f7ca9a9da082b1407b45ebb0f4d7ed88acea61219cb7059ccbed92` |
+| `Flutter/src/lib/features/work_ai/data/work_ai_task_api.dart` | `WorkAiTaskApiPort`、`getTask/retryTask`、`parseWorkAiTaskDetail`，16—115 行 | `3075a15afa3ce959b83c3ffe38555562cdfe5a8d3c241f1828a99263a4151a6e` |
+
+本轮没有新增 App 消费端或修改 HTTP 契约，ECI 内部状态不直接写入移动端 Task DTO。源码核对、Mock SDK 测试和后端契约回归不等于 Dart/真机或真实 GPU 验收。
+
+北京 T4/网络配置细化时再次复核上述 HEAD 与两个 SHA-256，均一致；只变更 Server 内部配置、网络校验和 CLI。真实 VPC/ECS 网络查询不作为移动端或 GPU 计算验收。
+
+一次性真实试申请及初始化元数据修复后再复核上述 HEAD/哈希，仍一致；原用户 App 工作树改动保持。没有新增 App 云资源管理端点，也没有运行 Flutter。实际云端验收独立记录于 `acceptance/gpu-spot-trial.md`。
+
+第二次真实阶段计时再次只读核对上述 HEAD 与两个 SHA-256，均一致；读取实际 `WorkAiTaskApi` 仍按 Task ID 查询/重试。仅补 Server 本地采集与文档，无 App 写入或契约变更。31.785 秒为 Nginx 实例 Ready 的观测时序，详见 `acceptance/gpu-spot-timing.md`，不作为移动端或模型计算验收。
+
+## 知识库检索重构的实际消费者核对（2026-11-10）
+
+本轮仍只读同级 App，未运行 Flutter、生成器、格式化或包管理命令。实际 HEAD 为 `20f61b78887f9288d1fd3227f326e6374d516f27`，本轮证据在忽略提交的 `.local/kb-refactor/app-reference.json`。App 当前有用户自己的移动端界面/iOS改动；未覆盖、暂存或还原，以下契约文件哈希按实际读取内容记录。
+
+| 真实 App 路径 | 核对点 | SHA-256 |
+| --- | --- | --- |
+| `Flutter/packages/huahuo_api/lib/src/contracts/contract_models.dart` | SharedWorkspaceSearchResult 的 ownerRef、part、revisionId | `5a248f30bd1fa04594072bbd57afe6c70edfa9973fc3627dc03b7edd16aa01a0` |
+| `Flutter/packages/huahuo_api/lib/src/api/domain_clients.dart` | note GET 的 revisionId（1257行附近）、part GET 的 partRevisionId（1311行附近） | `28ac16b834fd4bd4491ef25fab26b53ec66f12428ea7cecc7b04b09e1099853e` |
+| `Flutter/desktop/lib/features/editor/presentation/editor_workspace.dart` | `_openWorkspaceSearchResult`（2802行附近）、`_openExactWorkspaceNote`；要求part和精确整篇修订 | `a44e26b903c5920943f7d294f660eeec8e143d5e6c815de7201ca1461ef020fa` |
+| `Flutter/desktop/lib/features/integration/data/desktop_api_domains_adapters.dart` | 转发整篇与part读取的不同修订参数 | `da448533c040bdd2f06efe74ce17dd76b68a54164b687cd5ea035839b0f27ad1` |
+
+服务端关键词/混合搜索返回 `part=raw`、整篇 Note 的 `revisionId`，另提供 `partRevisionId`。读取整篇和读取part分别验证自己的修订，不再将raw part UUID作为整篇修订。独立真实PG/Redis/Milvus与HTTP契约测试覆盖搜索→精确读取、错误修订和跨用户读取失败；没有宣称执行了Dart运行时或手机联调。旧客户端技术路径仍保留，不在产品界面或集合命名中增加工作区概念。图谱继续按标签关系运行。
+
+以下保留各阶段的原始读取证据。
+
 - 来源仓库：https://github.com/kyriswu/huahuo-app
 - Server 根：本机 `huahuo-server`；App 路径相对为 `../huahuo-app`
 - 记录时间：2026-10-09

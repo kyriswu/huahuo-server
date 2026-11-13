@@ -1,6 +1,6 @@
 # 本地 App／Docker 联调地址与验证 · v3
 
-App本地目录：`../huahuo-app`；来源：https://github.com/kyriswu/huahuo-app 。Server本地根为 `huahuo-server`。本文件是部署与验证指令，不代表已经修改了App运行配置。
+App本地目录：`../huahuo-ai`；来源：`../huahuo-ai`（本机源码；尚无远端） 。Server本地根为 `huahuo-server`。本文件是部署与验证指令，不代表已经修改了App运行配置。
 
 ## 1. 同机源码，不等于所有连接地址都用localhost
 

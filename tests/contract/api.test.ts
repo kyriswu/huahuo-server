@@ -10,7 +10,7 @@ describe('P01 routes and App-compatible base envelope (no Dart runtime)',()=>{
    const r=await app.inject({method:'GET',url:'/health/ready',headers:{'x-trace-id':'trace_docs_fixture'}});
    expect(r.statusCode).toBe(200);expect(r.json()).toEqual({success:true,data:{service:'api-server',status:'ready',stage:'P06',mode:'asset-knowledge'},traceId:'trace_docs_fixture'});
    expect(r.headers['x-trace-id']).toBe('trace_docs_fixture');
-   for(const url of ['/admin','/admin/api/v1','/api/v1/home']) expect((await app.inject(url)).statusCode).toBe(404);
+   for(const url of ['/admin','/admin/api/v1','/admin/api/v1/users','/api/v1/home']) expect((await app.inject(url)).statusCode).toBe(404);
    expect(Object.keys(app.swagger().paths ?? {})).toContain('/api/v1/auth/login');
    expect(Object.keys(app.swagger().paths ?? {}).some(p=>p.startsWith('/admin'))).toBe(false);
   } finally {await app.close();}
@@ -18,7 +18,7 @@ describe('P01 routes and App-compatible base envelope (no Dart runtime)',()=>{
  it('denies admin independently even with an App Bearer token',async()=>{
   const app=await buildAdminServer({config:config('admin'),dependencies:dependencies()});
   try {
-   for(const url of ['/admin','/admin/api/v1','/admin/login']) {
+   for(const url of ['/admin','/admin/api/v1','/admin/api/v1/users','/admin/login']) {
     const r=await app.inject({url,headers:{authorization:'Bearer fake-user-token'}});expect(r.statusCode).toBe(401);expect(r.json().error.code).toBe('ADMIN_UNAUTHORIZED');
    }
    expect((await app.inject('/api/v1/home')).statusCode).toBe(404);

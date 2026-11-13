@@ -1,0 +1,17 @@
+{
+  "model": "BAAI/bge-m3",
+  "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+  "source": "https://huggingface.co/BAAI/bge-m3",
+  "maxInputTokens": 8192,
+  "dimensions": 1024,
+  "files": {
+    "tokenizer.json": {
+      "sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
+      "bytes": 17098108
+    },
+    "tokenizer_config.json": {
+      "sha256": "a62b2b6784f990259fddef5f16388693a8043be4f69179e6a5257eeb3f9abac4",
+      "bytes": 444
+    }
+  }
+}
