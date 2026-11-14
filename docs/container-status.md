@@ -1,5 +1,9 @@
 # 当前容器与数据库状态
 
+## 文档解析CPU ECS目标配置已替换（2026-11-15）
+
+本机与示例目标改为 `i-2zejbbo2svjieb44tqy8` / `172.18.102.103`，仅配置和只读身份核对；实际触发模式仍默认disabled，主业务容器未重建、Redis状态/数据卷/业务数据库未改。首次Describe为Stopped+StopCharging，末次为Running，本轮没有调用Start/Stop。未验证CPU服务HTTP或文件解析。见[验收](acceptance/document-parser-cpu-target.md)。
+
 ## prod-callback独立云测试已释放（2026-11-14）
 
 独立ECI `eci-2zeg0m8zdkp9vfuhmk8s`（8核/30GiB/A10）已删除，ID与专属allocation标签双查为空；原首选ECS启动被NoStock拒绝，最终仍Stopped+StopCharging。753临时OSS对象逐项404、原PDF保留，共享镜像缓存未删除。只更新本地源码/构建和无密钥模板，主业务角色、真实.env、业务PG/已有卷不变；本机隔离PG/Redis测试容器已清理。见[验收](acceptance/xberg-a10-prod-callback.md)。

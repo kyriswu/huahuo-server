@@ -1,5 +1,9 @@
 # Provider 与业务存储状态
 
+## 当前文档解析CPU ECS目标（2026-11-15）
+
+用户将按量目标换为 `i-2zejbbo2svjieb44tqy8`，64核/128GiB、PostPaid/NoSpot，私网 `172.18.102.103`。共享RAM仅Describe校验通过；本机与示例已同步，实际模式disabled、A10回退false。CPU提取配置/HTTP接口未验收，不将此前CUDA配置直接启用；下面GPU结果均是历史基线。见[验收](acceptance/document-parser-cpu-target.md)。
+
 ## prod-callback真实A10验证（2026-11-14）
 
 共享RAM凭据下ECS StartInstance真实NoStock；ECI NoSpot取得8核/30GiB A10，北京I。用户新固定digest全文325页成功，OSS751对象核验、异步领取/小TXT回调/ack语义通过。新增ListTagResources只读归属查询，避免DescribeContainerGroups标签筛选返回无关记录而误报。实例/753临时Key已确认清理；生产业务PG/回调接收/Redis云端闭环未部署，模型仍有漏字。详见[验收](acceptance/xberg-a10-prod-callback.md)。

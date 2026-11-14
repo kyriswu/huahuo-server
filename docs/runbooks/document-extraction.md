@@ -6,18 +6,19 @@
 
 ## 测试环境配置
 
-仅在能访问 ECS 私网的测试环境启用，合并 `.env.document-parser.example` 中的配置到部署环境：
+当前控制目标已换为通用文档解析CPU ECS `i-2zejbbo2svjieb44tqy8`。只有获得CPU服务完整config并确认端口/协议后，才在能访问私网的测试环境启用；下面先保持提取disabled，避免将GPU/CUDA请求配置发往CPU服务：
 
 ```dotenv
 DOCUMENT_PARSER_MODE=ecs
-DOCUMENT_PARSER_BASE_URL=http://172.18.102.101:8000
+DOCUMENT_PARSER_BASE_URL=http://172.18.102.103:8000
 DOCUMENT_PARSER_HEALTH_PATH=/health
 DOCUMENT_PARSER_ECS_REGION_ID=cn-beijing
-DOCUMENT_PARSER_ECS_INSTANCE_ID=i-2zegwjwejyvpxoluhyx8
-DOCUMENT_PARSER_ECS_PRIVATE_IP=172.18.102.101
+DOCUMENT_PARSER_ECS_INSTANCE_ID=i-2zejbbo2svjieb44tqy8
+DOCUMENT_PARSER_ECS_PRIVATE_IP=172.18.102.103
+DOCUMENT_PARSER_ECI_FALLBACK_ENABLED=false
 DOCUMENT_PARSER_CONCURRENCY=1
 DOCUMENT_PARSER_IDLE_SECONDS=60
-DOCUMENT_EXTRACTION_MODE=async
+DOCUMENT_EXTRACTION_MODE=disabled
 DOCUMENT_EXTRACTION_CONFIG_PATH=resources/document-extraction/kbxml-request.json
 DOCUMENT_EXTRACTION_POLL_MS=2000
 DOCUMENT_EXTRACTION_MAX_RESPONSE_BYTES=67108864
@@ -25,7 +26,7 @@ DOCUMENT_EXTRACTION_MAX_RESPONSE_BYTES=67108864
 
 ECS 控制使用已有共享 RAM 环境变量；API/worker 共用提取模式及配置文件，只有 worker/scheduler 收到机器控制配置。worker 在启用提取但未配置运行模式时拒绝启动。构建已包含 resources 文件，不在启动/请求时下载模型。启用配置后，真实任务会访问解析服务，并在 ECS 模式下按需开停机；2026-11-14 的 VPC 复测使用临时部署配置，未修改原 `.env`。
 
-`resources/document-extraction/kbxml-request.json` 是用户提供的完整请求配置：Markdown、关闭缓存与 force_ocr、PP-OCRv5 server/chi_sim/batch 6、CUDA 0、3000 秒、150 DPI/JPEG85、每页最多16图、无图片 Base64、native-first 80/32 等全部字段原样保留。覆盖文件必须提供完整配置；不做默认值合并，不接受省略必需部分的局部配置。每个任务创建时将整份配置及 hash 写入 PG 快照，重试不读取新默认值。客户端总期限默认 3120 秒，覆盖 3000 秒提取上限并留传输预算。
+`resources/document-extraction/kbxml-request.json` 保留的是此前用户提供的GPU完整请求配置：Markdown、关闭缓存与force_ocr、PP-OCRv5 server/chi_sim/batch6、CUDA0、3000秒、150DPI/JPEG85、每页最多16图、无图片Base64、native-first80/32。它不是当前CPU实例的已验证配置。本轮不猜测CPU模型/提供器；后续将CPU服务完整JSON配置到 `DOCUMENT_EXTRACTION_CONFIG_PATH` 后，再将提取模式设为async。覆盖文件必须完整，不做默认合并；每个任务受理时将整份配置及hash写入PG快照，重试不读取新默认值。默认客户端3120秒覆盖3000秒提取上限并留传输预算。
 
 单次请求最多16个文件，总文件字节预算略低于服务100MiB上限（预留multipart开销）；响应上限64MiB，规范正文沿用存储侧16MiB文本上限，超出明确失败而不截断。完整JSON压缩保存，避免大量定位元数据占用文本文件预算。所有资料入口只依赖关键词索引，不因全局模型提供方关闭而拒绝资料导入；`RAG_INGESTION_ENABLED` 仍控制业务功能开关。
 

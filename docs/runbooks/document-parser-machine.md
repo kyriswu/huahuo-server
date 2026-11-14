@@ -7,23 +7,23 @@
 | 配置 | 当前 ECS 方案 | 长期在线 API |
 | --- | --- | --- |
 | `DOCUMENT_PARSER_MODE` | `ecs` | `always-on` |
-| `DOCUMENT_PARSER_BASE_URL` | `http://172.18.102.101:8000` | 运营方配置的 HTTPS API 地址，可包含路径前缀 |
+| `DOCUMENT_PARSER_BASE_URL` | `http://172.18.102.103:8000` | 运营方配置的 HTTPS API 地址，可包含路径前缀 |
 | `DOCUMENT_PARSER_HEALTH_PATH` | `/health`（待实际服务核对） | 服务的健康路径；没有健康接口时显式留空 |
 | `DOCUMENT_PARSER_API_TOKEN` | 如有 Bearer 鉴权则设置 | 如有 Bearer 鉴权则设置 |
 | 云凭据和实例参数 | 必须；仅使用指定实例 | 不需要，不调用 ECS |
 | Redis 去重、排队和并发 | 共用 | 共用 |
 | 空闲停机 | 默认 60 秒 | 无开停机操作 |
 
-样本见根目录 `.env.document-parser.example`，已提供 ECS + async 的 VPC 测试配置。实际 `.env` 未修改，应用默认 `disabled`。只有 worker、scheduler 装载机器控制配置，提取配置另外共享给 API/worker。内网基址为 `172.18.102.101:8000`，健康路径 `/health`；协议和任务接线已经本地模拟服务/真实隔离依赖验证，本轮按用户要求不请求该内网服务。此文的 callback 示例解释底层接口，正式业务已使用 ManagedDocumentExtractor。
+当前目标是用户2026-11-15指定的通用文档解析CPU ECS `i-2zejbbo2svjieb44tqy8`，北京、64核/128GiB，私网 `172.18.102.103`。根目录 `.env.document-parser.example` 与本机 `.env` 的目标已同步，应用模式仍默认 `disabled`。服务地址沿用8000与 `/health`，新实例的HTTP服务尚未验证。只有worker、scheduler装载机器控制配置，提取配置另外共享给API/worker。CPU版完整提取参数待提供；既有kbxml-request.json仍是CUDA基线，示例提取模式先disabled，不能直接发送到CPU服务。此文callback示例解释底层接口，正式业务已使用ManagedDocumentExtractor。
 
 ECS 目标由环境变量指定，代码中没有固定实例 ID：
 
 ```dotenv
 DOCUMENT_PARSER_MODE=ecs
 DOCUMENT_PARSER_ECS_REGION_ID=cn-beijing
-DOCUMENT_PARSER_ECS_INSTANCE_ID=i-2zegwjwejyvpxoluhyx8
-DOCUMENT_PARSER_ECS_PRIVATE_IP=172.18.102.101
-DOCUMENT_PARSER_BASE_URL=http://172.18.102.101:8000
+DOCUMENT_PARSER_ECS_INSTANCE_ID=i-2zejbbo2svjieb44tqy8
+DOCUMENT_PARSER_ECS_PRIVATE_IP=172.18.102.103
+DOCUMENT_PARSER_BASE_URL=http://172.18.102.103:8000
 DOCUMENT_PARSER_HEALTH_PATH=/health
 DOCUMENT_PARSER_IDLE_SECONDS=60
 DOCUMENT_PARSER_CONCURRENCY=1
@@ -32,6 +32,8 @@ DOCUMENT_PARSER_CONCURRENCY=1
 ECS 模式的地址必须匹配指定私网 IP，避免实例身份和请求目标错位。长期 API 模式允许配置其他 HTTPS 地址或私网 HTTP 地址；地址只来自可信部署配置，不接受文档请求传入控制目标。认证 token 通过 callback 的 `headers` 提供，健康检查也使用同一认证；健康检查拒绝重定向。健康接口的 200 只表示可以提交请求，OCR/正文质量仍由具体客户端校验。
 
 ## A10 按量 ECS 缺货时回退 ECI
+
+以下是先前GPU方案的可选能力；当前CPU解析机保持 `DOCUMENT_PARSER_ECI_FALLBACK_ENABLED=false`，不将CPU缺货转换成A10申请。历史GPU镜像/验收保留，未当成CPU解析配置。
 
 `DOCUMENT_PARSER_ECI_FALLBACK_ENABLED=true` 可选开启；完整配置见 [环境示例](../../.env.document-parser.example)。当前首选仍是已配置的单台 ECS：恢复节省停机实例，不新增 ECS RunInstances 分配器。只有 `StartInstance` 明确返回 `OperationDenied.NoStock` 才回退；权限、余额、配额、网络超时、启动慢或 HTTP 健康失败不会创建另一台机器。资格还要求 ECS 为同地域/VPC、单 A10、PostPaid/NoSpot、Stopped/StopCharging。此错误码依据 [StartInstance 官方说明](https://help.aliyun.com/zh/ecs/developer-reference/api-ecs-2014-05-26-startinstance)。
 

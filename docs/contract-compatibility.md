@@ -1,5 +1,9 @@
 # 契约兼容性（P01 历史与 P02 增量）
 
+## 通用文档解析ECS目标替换（2026-11-15）
+
+仅内部电源目标切到CPU实例 `i-2zejbbo2svjieb44tqy8`，私网与配置基址同步103；无App DTO/路由/Task协议变更。原GPU请求JSON不改成未经验证的CPU配置，示例提取模式disabled；A10回退保持关闭。后续若已有旧Redis协调状态，仍按原排空/configure-idle规则切换，不清空或迁移活动请求。见[验收](acceptance/document-parser-cpu-target.md)。
+
 ## prod-callback提取协议（2026-11-14）
 
 跟随用户新镜像：GET /jobs/{id}仅状态，完成后GET /result完整领取并消费；202等待、410已消费不可自动重跑，失败/取消终态POST /ack。旧状态内嵌result不保留兼容分支，ECS/ECI服务须同步升级。既有App envelope/任务/KB Markdown/图片UUID不变；没有新增公开业务回调路由。仅隔离小TXT接收器验证保存后2xx，325页通过结果接口领取。见[验收](acceptance/xberg-a10-prod-callback.md)。

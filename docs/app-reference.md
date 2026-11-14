@@ -1,5 +1,9 @@
 # App 只读参照基线
 
+## CPU解析机目标切换（2026-11-15）
+
+只读核对实际`../huahuo-ai`的api_endpoints.dart（SHA256 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`）与http_auth_repository.dart（`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`），内容与前次一致。本轮只换Server内部ECS ID/IP，不改App合约、不写App或运行Flutter。见[验收](acceptance/document-parser-cpu-target.md)。
+
 ## prod-callback实测只读复核（2026-11-14）
 
 App仍GIT_UNBORN，api_endpoints.dart/hash `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`、http_auth_repository.dart/hash `d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5` 前后一致，路径仍为 `lib/core/network/` 与 `lib/features/auth/data/`。新异步领取属于Server内部协议；未写App/运行Flutter，也未声称移动端消费新结果通过。见[验收](acceptance/xberg-a10-prod-callback.md)。
