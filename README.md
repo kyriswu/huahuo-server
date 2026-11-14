@@ -10,6 +10,8 @@ Fastify 5 / Node 26.11.0 / PostgreSQL / Redis，严格 TypeScript + ESM。Node �
 
 当前同一 `compose.yaml` 运行独立 api-server、admin、worker、scheduler、redis 和一次性 migrate；业务 PostgreSQL 使用根目录 `.env` 中的阿里云连接。本地 postgres 仅保留为显式隔离测试 profile，不参与日常启动。API `http://127.0.0.1:3000/health/ready`，Admin `http://127.0.0.1:3001/health/ready`；管理身份独立于 App，无默认账号。
 
+项目负责应用服务、监听端口、公开 URL 和可信代理配置。域名入口、TLS 证书与自动续期由宿主机独立管理，其配置、脚本和运维文档存放在仓库之外。
+
 ## Admin 工作台
 
 安装依赖后运行 `pnpm dev:admin-ui`，打开 `http://127.0.0.1:4173/admin/`。本地预览使用四条示例记录，无需数据库或管理员账号。

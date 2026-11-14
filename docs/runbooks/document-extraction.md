@@ -2,6 +2,8 @@
 
 现有 `/api/v1/rag/ingestions` 和 `FILE_UPLOAD` 已接入 Xberg 提取；解析结果进入原来的 `document-keyword` / BM25 流水线，不新增 Embedding、Rerank 或第二套知识库。原生 UTF-8 文本、Markdown、CSV 继续本地解析；独立图片 OCR 不改成文档任务。默认不开启外部解析。
 
+大文件测试前须确认 Worker 临时磁盘容量及上游异步任务保留时间能够覆盖完整处理流程。2026-11-14 的325页 VPC 复测先遇128MiB临时磁盘 `ENOSPC`，随后异步任务约5分钟后返回404；实际接口声明任务5分钟过期，全文未完成入库及查询。相关设置尚未调整，同步接口尚未复测，详见[失败记录](../acceptance/document-extraction.md#完整325页复测未通过解析机已停止2026-11-14)。
+
 ## 测试环境配置
 
 仅在能访问 ECS 私网的测试环境启用，合并 `.env.document-parser.example` 中的配置到部署环境：
@@ -21,7 +23,7 @@ DOCUMENT_EXTRACTION_POLL_MS=2000
 DOCUMENT_EXTRACTION_MAX_RESPONSE_BYTES=67108864
 ```
 
-ECS 控制使用已有共享 RAM 环境变量；API/worker 共用提取模式及配置文件，只有 worker/scheduler 收到机器控制配置。worker 在启用提取但未配置运行模式时拒绝启动。构建已包含 resources 文件，不在启动/请求时下载模型。本轮没有修改真实 `.env`、重建业务服务、请求 ECS/解析私网或执行云端写操作。
+ECS 控制使用已有共享 RAM 环境变量；API/worker 共用提取模式及配置文件，只有 worker/scheduler 收到机器控制配置。worker 在启用提取但未配置运行模式时拒绝启动。构建已包含 resources 文件，不在启动/请求时下载模型。启用配置后，真实任务会访问解析服务，并在 ECS 模式下按需开停机；2026-11-14 的 VPC 复测使用临时部署配置，未修改原 `.env`。
 
 `resources/document-extraction/kbxml-request.json` 是用户提供的完整请求配置：Markdown、关闭缓存与 force_ocr、PP-OCRv5 server/chi_sim/batch 6、CUDA 0、3000 秒、150 DPI/JPEG85、每页最多16图、无图片 Base64、native-first 80/32 等全部字段原样保留。覆盖文件必须提供完整配置；不做默认值合并，不接受省略必需部分的局部配置。每个任务创建时将整份配置及 hash 写入 PG 快照，重试不读取新默认值。客户端总期限默认 3120 秒，覆盖 3000 秒提取上限并留传输预算。
 
@@ -89,4 +91,4 @@ PG 的外部提交意图先于 POST 持久化。返回 job_id 时只允许关联
 
 Worker lease 变化会通知排队/启动等待及时退出；已经提交的解析不使用该本地取消信号冒充远端停止，而由持久取消意图和终态查询收尾。同步请求无法按 job_id 取消时，继续等待其响应再确认终态；不因为前端取消就提前释放已提交请求的 Redis 名额。
 
-实际验收见[本轮记录](../acceptance/document-extraction.md)。本轮测试仅访问 loopback 模拟提取服务和独立 PG/Redis/Milvus，真实私网解析质量、时延和服务镜像身份留待测试环境验证。`/version` 可核对引擎版本，build-id 应核对镜像清单/标签；保存的 `kb-markdown-v1` 是输出协议标记，不冒充镜像版本。
+验证分为 loopback 模拟解析与隔离依赖测试、VPC 真实文件测试；2页样本通过，325页全文失败，详细边界见[验收记录](../acceptance/document-extraction.md)。当前测试数据已清理，本项目及远端解析服务均已停止。`/version` 可核对引擎版本，build-id 应核对镜像清单/标签；保存的 `kb-markdown-v1` 是输出协议标记，不冒充镜像版本。

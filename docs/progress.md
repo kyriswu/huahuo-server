@@ -1,5 +1,15 @@
 # 当前开发进度
 
+## 服务器运维职责移出仓库（2026-11-14）
+
+域名入口、TLS 与证书续期的配置、脚本和运维文档已移出仓库，由宿主机独立管理；项目只维护应用监听、公开 URL 与可信代理设置。应用代码、Compose 和运行参数未改，本项目及远端解析服务保持停止。
+
+## 测试服务器 PDF 真实复测（2026-11-14）
+
+2页原生文本与扫描 PDF 通过真实 Xberg、OSS、PostgreSQL、Redis 和内网 Milvus 完成解析、关键词入库、查询及删除，权限隔离与产物完整性通过。随后325页完整 PDF 复测未通过：先遇 Worker 128MiB 临时磁盘 `ENOSPC`，重试解析后远端异步任务返回404，未完成全文入库及查询。详细结果和证据统一保留在[文档提取验收](acceptance/document-extraction.md)。
+
+两轮临时数据均已清理，原 PDF 保留；远端解析机已确认 `Stopped + StopCharging`，本项目容器恢复停止。原 `.env`、Schema 和凭据未改，未实施同步复测、任务保留时间或临时磁盘调整。测试服务器缺少 App 源码，App 验收为 `UNVERIFIED_APP`。
+
 ## Xberg 接入现有文件与关键词流水线（2026-11-14）
 
 现有 `/api/v1/rag/ingestions` PDF/Office 任务和 `FILE_UPLOAD` 已接到同一提取器/ECS-Redis 运行库，后续复用 document-keyword/BM25，不调用 Embedding/Rerank。完整 config 与母文件/解析批次 UUID 在受理时持久化；同步/异步、已知 job 恢复只 GET、模糊提交阻断、取消/删除晚到结果 fencing 已接通。规范正文原样保存，完整 JSON 无损 gzip、图片上传回执/资产关联另存；provider 转换前字节位置不冒充规范正文坐标。
@@ -163,11 +173,10 @@ Typecheck、Lint、Build、337 项 unit/contract、120 项真实隔离 PG/Redis/
 - 1 秒 P95 目标未达成；剩余主要是 Milvus RPC、Embedding 首字节长尾及 12 次 PostgreSQL 网络往返。端点、模型、请求和凭据一致，未复现容器固定数秒的 Embedding 中位数；系统代理/虚拟 DNS 仍在链路内，未修改 VPN。
 - Typecheck、Lint、Build、354 项 unit/contract 和 216 项隔离真实 PG/Redis/Milvus integration 通过。实际 3000 API 两次 smoke 200；运行 API 使用 note-hybrid-budget-dev，其他角色未重建。详细指标、统计口径、真实/Mock边界及复现命令见 docs/runbooks/milvus.md。
 
-## 测试服务器运维（2026-11-07 至 2026-11-14）
+## 测试服务器后端维护（2026-11-07 至 2026-11-14）
 
-- 宿主 Nginx + Certbot 已配置 `test-api.chuda.cc` → 回环 3000、`test-admin.chuda.cc` → 回环 3001，公开地址同步至对应环境变量。真实 HTTPS 和续期演练通过，配置与续期脚本保留于 `infra/nginx/`，维护步骤见 [测试域名 HTTPS](runbooks/test-https.md)。
 - Milvus 已确认连接内网 `172.18.102.95:19530`；按授权清除失效的 `grpc_proxy` 并补齐现有路径缺失的 tokenizer 文件，测试数据及临时探针已清理。
-- 项目容器于 2026-11-10 按用户要求整体停止；2026-11-14 确认仍停止，宿主 Nginx 和自动续期定时器继续运行。本次仅整理文档、删除首次签发模板和性能报告，未改动运行配置或恢复服务。
+- 项目容器于 2026-11-10 按用户要求整体停止；2026-11-14 确认仍停止。当时仅整理文档、删除首次签发模板和性能报告，未改动运行配置或恢复服务。
 
 ## Note 块级增量索引（2026-11-07）
 

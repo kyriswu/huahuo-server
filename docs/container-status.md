@@ -1,5 +1,11 @@
 # 当前容器与数据库状态
 
+## 测试服务器及远端解析机已停止（2026-11-14）
+
+本项目 API、Admin、Worker、Scheduler、Redis 均已停止。远端解析 ECS `i-2zegwjwejyvpxoluhyx8` 在全文测试结束后手动节省停机，云端确认 `Stopped + StopCharging`；Redis 未知请求及临时测试数据已清理，原 PDF 保留。
+
+本次使用从 `8825986` 构建的 `huahuo-server:pdf-e2e-8825986` 和临时部署配置：2页 PDF 流程通过，325页全文未完成入库及查询，详见[文档提取验收](acceptance/document-extraction.md)。原 `.env`、数据库结构及现有卷未改。以下为历史部署证据，不表示服务当前运行。
+
 ## 文档提取链路代码完成，待测试环境部署（2026-11-14）
 
 同一 Compose 四角色/一次性 migrate 保持。API/worker 共用提取模式与完整配置文件，worker/scheduler 另用受控 ECS/Redis 运行配置；资源 JSON 已纳入现有 Docker resources 打包。未改业务 Schema/迁移、未执行 RDS 迁移、未重建运行容器或修改真实 `.env`，也没有请求当前内网 ECS。
