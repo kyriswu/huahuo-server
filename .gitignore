@@ -7,5 +7,6 @@ coverage/
 config/*.local.json
 docs/*.local.json
 .local/
+.impeccable/review/
 infra/certs/*
 !infra/certs/README.md

@@ -60,13 +60,14 @@ describe('document extraction protocol; fetch is mocked, no private-network call
   const order:string[]=[],h=hooks();h.submitted.mockImplementation(async id=>{order.push('saved:'+id);});
   const fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>{
    if(init?.method==='POST'){order.push('POST');return json({job_id:'job-1'},202);}
-   order.push('GET');return json({job_id:'job-1',state:'completed',result:sampleExtraction()});
+   if(String(url).endsWith('/result')){order.push('GET-result');return json({job_id:'job-1',state:'completed',result:sampleExtraction()});}
+   order.push('GET-status');return json({job_id:'job-1',state:'completed',result_state:'available'});
   });
   const result=await new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,h);
-  expect(order).toEqual(['POST','saved:job-1','GET']);expect(result.results[0]!.content).toContain(sampleImage);expect(String(fetch.mock.calls[1]![0])).toMatch(/\/jobs\/job-1$/);
+  expect(order).toEqual(['POST','saved:job-1','GET-status','GET-result']);expect(result.results[0]!.content).toContain(sampleImage);expect(String(fetch.mock.calls[1]![0])).toMatch(/\/jobs\/job-1$/);
  });
  it('resumes a persisted async job using GET only',async()=>{
-  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({job_id:'existing-job',state:'completed',result:sampleExtraction()})),h=hooks();
+  const fetch=vi.fn<typeof globalThis.fetch>(async url=>json(String(url).endsWith('/result')?{job_id:'existing-job',state:'completed',result:sampleExtraction()}:{job_id:'existing-job',state:'completed',result_state:'available'})),h=hooks();
   await new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,h,'existing-job');expect(h.beforeSubmit).not.toHaveBeenCalled();expect(h.submitted).not.toHaveBeenCalled();expect(fetch.mock.calls.every(([,i])=>i?.method==='GET')).toBe(true);
  });
  it.each([404,500])('treats async job HTTP %s as unknown without resubmitting',async status=>{
@@ -77,7 +78,34 @@ describe('document extraction protocol; fetch is mocked, no private-network call
   let reads=0;const methods:string[]=[];
   const fetch=vi.fn<typeof globalThis.fetch>(async(_url,init)=>{methods.push(init?.method??'GET');return json({job_id:'job-1',state:init?.method==='DELETE'?'cancelled':++reads===1?'running':'cancelled'});});
   await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,{...hooks(),cancellation:async()=>'send'},'job-1')).rejects.toMatchObject({code:'DOCUMENT_EXTRACTION_CANCELLED',terminalState:'cancelled',outcome:'settled'});
-  expect(methods).toEqual(['DELETE','GET','GET']);
+  expect(methods).toEqual(['DELETE','GET','GET','POST']);
+ });
+ it('waits after a 202 result response without submitting another extraction',async()=>{
+  let results=0;const fetch=vi.fn<typeof globalThis.fetch>(async url=>{
+   if(String(url).endsWith('/result'))return ++results===1?json({job_id:'job-1',state:'running'},202):json({job_id:'job-1',state:'completed',result:sampleExtraction()});
+   return json({job_id:'job-1',state:'completed',result_state:'available'});
+  });
+  await new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,hooks(),'job-1');
+  expect(results).toBe(2);expect(fetch.mock.calls.every(([,init])=>init?.method==='GET')).toBe(true);
+ });
+ it.each([true,false])('fails a consumed result without automatic reparse (reported by status=%s)',async statusReports=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async url=>String(url).endsWith('/result')?json({},410):json({job_id:'job-1',state:'completed',result_state:statusReports?'consumed':'available'}));
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,hooks(),'job-1')).rejects.toMatchObject({code:'DOCUMENT_EXTRACTION_RESULT_CONSUMED',outcome:'settled',retryable:false});
+  expect(fetch).toHaveBeenCalledTimes(statusReports?1:2);expect(fetch.mock.calls.every(([,init])=>init?.method==='GET')).toBe(true);
+ });
+ it('keeps result transport loss unknown and never resubmits or acknowledges unseen output',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async url=>{if(String(url).endsWith('/result'))throw Error('connection lost');return json({job_id:'job-1',state:'completed',result_state:'available'});});
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,hooks(),'job-1')).rejects.toMatchObject({outcome:'unknown'});
+  expect(fetch).toHaveBeenCalledTimes(2);expect(fetch.mock.calls.every(([,init])=>init?.method==='GET')).toBe(true);
+ });
+ it('rejects another job in a full result envelope before publishing its content',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async url=>json(String(url).endsWith('/result')?{job_id:'other-job',state:'completed',result:sampleExtraction()}:{job_id:'job-1',state:'completed'}));
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,hooks(),'job-1')).rejects.toMatchObject({code:'DOCUMENT_EXTRACTION_JOB_MISMATCH',outcome:'unknown'});
+ });
+ it('acknowledges a known failed job to release its unconsumed record',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({job_id:'job-1',state:'failed'}));
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,hooks(),'job-1')).rejects.toMatchObject({code:'DOCUMENT_EXTRACTION_FAILED',outcome:'settled'});
+  expect(fetch.mock.calls.map(([url,init])=>[String(url),init?.method])).toEqual([[ctx.baseUrl+'/jobs/job-1','GET'],[ctx.baseUrl+'/jobs/job-1/ack','POST']]);
  });
  it('reads confirmed resources with the exact parse-run and optional mother-file filter',async()=>{
   const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({uploaded_resources:[]}));

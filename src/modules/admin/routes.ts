@@ -8,6 +8,7 @@ import type { AppConfig } from '../../config/config.js';
 import { DomainError } from '../identity/store.js';
 import { AdminService, type AdminScope } from './service.js';
 import { Envelope, Text, Strict, Id } from '../identity/schemas.js';
+import { AdminUserList, AdminUserQuery } from './user-schemas.js';
 declare module 'fastify' { interface FastifyRequest { adminScope?:AdminScope; } }
 function sessionCookie(req:FastifyRequest){
  const values=(req.headers.cookie??'').split(';').map(x=>x.trim()).filter(x=>x.startsWith('hh_admin_session='));
@@ -57,6 +58,10 @@ export function registerAdminRoutes(
  app.post('/admin/api/v1/sessions/:adminId/revoke',{preHandler:[auth,csrf],schema:{params:Type.Object({adminId:Id},Strict),body:Type.Object({reason:Text(500)},Strict),response:{200:Envelope(Type.Object({revokedCount:Type.Integer()})),...errors}}},async req=>{
   return success(await service.revoke(scope(req),(req.params as {adminId:string}).adminId,(req.body as {reason:string}).reason,req.id),req.id);
  });
+ app.get('/admin/api/v1/users', {
+  preHandler: auth,
+  schema: { querystring: AdminUserQuery, response: { 200: Envelope(AdminUserList), ...errors } },
+ }, async req => success(await service.users(scope(req), req.query as AdminUserQuery, req.id), req.id));
  app.get('/admin/api/v1/tasks/:taskId',{preHandler:auth,schema:{params:Type.Object({taskId:Id},Strict),response:{200:Envelope(Type.Object({task:TaskSchema})),...taskErrors}}},async req=>success(await tasks.adminDetail(scope(req),(req.params as {taskId:string}).taskId),req.id));
  app.post('/admin/api/v1/tasks/:taskId/retry',{preHandler:[auth,csrf],schema:{params:Type.Object({taskId:Id},Strict),body:Type.Object({reason:Text(500)},Strict),response:{200:Envelope(MutationSchema),...taskErrors}}},async req=>success(await tasks.adminRetry(scope(req),(req.params as {taskId:string}).taskId,idempotencyKey(req,'required')!,(req.body as {reason:string}).reason,req.id),req.id));
  app.get('/admin/api/v1/resources/:resourceId',{preHandler:auth,schema:{params:Type.Object({resourceId:Id},Strict),response:{200:Envelope(Type.Object({resourceId:Id,userId:Id,workspaceId:Id,fileName:Type.String(),mimeType:Type.String(),sizeBytes:Type.Integer(),status:Type.String(),processingStatus:Type.String(),createdAt:Type.String()})),...errors}}},async req=>success(await service.resource(scope(req),(req.params as {resourceId:string}).resourceId,req.id),req.id));

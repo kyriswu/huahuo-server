@@ -1,5 +1,23 @@
 # Provider 与业务存储状态
 
+## prod-callback真实A10验证（2026-11-14）
+
+共享RAM凭据下ECS StartInstance真实NoStock；ECI NoSpot取得8核/30GiB A10，北京I。用户新固定digest全文325页成功，OSS751对象核验、异步领取/小TXT回调/ack语义通过。新增ListTagResources只读归属查询，避免DescribeContainerGroups标签筛选返回无关记录而误报。实例/753临时Key已确认清理；生产业务PG/回调接收/Redis云端闭环未部署，模型仍有漏字。详见[验收](acceptance/xberg-a10-prod-callback.md)。
+
+## A10 ECS → ECI 可选回退（2026-11-14）
+
+仅 StartInstance 明确 NoStock 且首选 ECS 符合单A10/按量/VPC/StopCharging 才创建 NoSpot ECI。模型/解析协议与 OSS 图片流沿用；共享 RAM 凭据仅 SDK 边界注入，不进入 Redis。云接口测试为替身，未查询或申请真实机器，默认关闭。见[验收](acceptance/document-parser-eci-fallback.md)和[配置手册](runbooks/document-parser-machine.md)。
+
+## 图片 UUID 与存储方案（2026-11-14）
+
+404 项 unit/contract、178 项独立 PG/Redis/Milvus integration 通过，新增图片节点定位、URL→owned UUID、无变化写入、当前／历史引用与最终查询图片验证。PG/Redis/Milvus 为真实本机临时依赖；模型、解析和 OSS 签名为替身，未访问真实 OSS／内网解析／模型或生产付费服务。普通 Note 预览生成只读资源元数据；links 查询不读原图，FILE_UPLOAD 必要时只读所选源的有界解析清单。
+
+已记录用户套餐／容量而非基础设施扩缩容的[存储方案](runbooks/user-storage-layout.md)，明确当前全局额度、分散产物计量和 OSS 物理回收缺口。未配置生命周期／套餐容量、移动对象或调整真实 Bucket；源码优化待部署。见[验收](acceptance/markdown-images.md)。
+
+## Admin 基础用户页面验证（2026-11-14）
+
+新增用户查询使用本项目 PostgreSQL；没有调用短信、模型、解析、OSS 或其他付费供应商。394 项单元/契约与 167 项隔离真实 PG/Redis 集成通过，另 1 项需要 Milvus 的无关用例跳过；测试中的模型/解析替身不计为供应商通过。浏览器使用隔离真实 PG/Redis 和合成用户。实际开发 RDS 只同步只读授权与基线校验，不修改产品用户资料或凭据。见[验收记录](acceptance/admin-users.md)。
+
 ## Xberg 文档 HTTP 适配器已接入（2026-11-14）
 
 按用户给定协议接入 `/extract`、`/extract-async`、`/jobs/{job_id}`、取消及 parse-run 资源清单读取；基址配置为测试示例 `http://172.18.102.101:8000`，完整 config 原样发送。现有文件 Worker/FILE_UPLOAD 使用同一运行库，解析后进入原有关键词索引；支持长期同协议 API 模式。完整 KB 产物、规范 Markdown 和已确认上传的图片元数据保存，未重新引入 MinerU 或图片二次 OCR。

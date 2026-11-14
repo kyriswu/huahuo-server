@@ -1,5 +1,25 @@
 # App 只读参照基线
 
+## prod-callback实测只读复核（2026-11-14）
+
+App仍GIT_UNBORN，api_endpoints.dart/hash `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`、http_auth_repository.dart/hash `d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5` 前后一致，路径仍为 `lib/core/network/` 与 `lib/features/auth/data/`。新异步领取属于Server内部协议；未写App/运行Flutter，也未声称移动端消费新结果通过。见[验收](acceptance/xberg-a10-prod-callback.md)。
+
+## A10 ECI 回退内部调度（2026-11-14）
+
+只读核对 `../huahuo-ai/lib/core/network/api_endpoints.dart`（`17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`）与 `lib/features/auth/data/http_auth_repository.dart`（`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`），当前 GIT_UNBORN。本轮只改 Server 内部云调度，无 App 合约变更；未运行 Flutter 或写 App。见[回退验收](acceptance/document-parser-eci-fallback.md)。
+
+## 图片编辑与查询契约只读核对（2026-11-14）
+
+当前 `../huahuo-ai` 为 GIT_UNBORN。只读核对 `lib/features/inspiration/presentation/inspiration_image_embed.dart`（SHA256 `3b23860d989bf7f9729e092d25d98ef95281492994c4359d590a61c8f7cd3296`），图片仍由 FileImage(File(path)) 读取本地文件，未消费 Server displayMarkdown/imageLinks。全 lib 未找到本轮 Note/RAG 查询／新字段 HTTP 消费者。
+
+双 Base URL 的 `lib/core/network/api_endpoints.dart`（`17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`）与认证 `lib/features/auth/data/http_auth_repository.dart`（`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`）也已核对；三文件前后哈希一致，未写 App 或运行 Flutter 命令。新增响应字段属于 Server CODE/用户确认方案，404/178 后端测试不冒充 Flutter 端到端通过。证据 `.local/markdown-images/baseline.json`、verification.json，见[验收](acceptance/markdown-images.md)。
+
+## Admin 用户列表只读核对（2026-11-14）
+
+当前 App 仍为 GIT_UNBORN。只读核对 `lib/core/network/api_endpoints.dart`（SHA256 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`）和 `lib/features/auth/data/http_auth_repository.dart`（`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`）；前后哈希及工作树状态一致，记录在 Server `.local/admin-users/app-reference-{start,end}.json`。
+
+新用户列表仅装载在独立 Admin 的 `/admin/api/v1/users`，沿用管理员 Session；App 原有手机号登录和用户 JWT 契约没有变化。没有运行 Flutter 或修改 App，不以管理台浏览器验证冒充 App 端到端验收。见[本轮验收](acceptance/admin-users.md)。
+
 ## 文档 HTTP/关键词接线核对（2026-11-14）
 
 只读核对当前 `../huahuo-ai`，仍为 GIT_UNBORN。`ApiEndpoints` 使用 HUAHUO_SERVER/HUAHUO_AGENT；认证 HTTP 客户端保持 Authorization、JSON 与 x-idempotency-key。两文件 SHA256 仍为 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`、`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`，完整相对路径同下方基线，记录见 Server `.local/ecs-power/extraction-app-reference.json`。

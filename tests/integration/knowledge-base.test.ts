@@ -13,7 +13,7 @@ import {KnowledgeIndexJobs} from '../../src/modules/kb/jobs.js';
 import {kbSnapshot,kbEmbedding} from '../../src/modules/kb/profile.js';
 import {mockKnowledgeIndex} from '../support/kb-index.js';
 import type {KbBuild,KbSnapshot,HybridIndex} from '../../src/modules/kb/types.js';
-import {RagQueryService} from '../../src/modules/rag/query-service.js';
+import {RagQueryService,ragImageKey,type RagImageRequest} from '../../src/modules/rag/query-service.js';
 import {RagIngestionRepository} from '../../src/modules/rag/repository.js';
 import {RagIngestionJobs} from '../../src/modules/rag/jobs.js';
 import {storageFor} from '../../src/modules/storage/port.js';
@@ -47,6 +47,41 @@ async function create(body='PostgreSQL 数据库支持 MVCC 和 B-tree 索引。
 beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:url}));});
 afterAll(async()=>{await queries.close();await Promise.all([pool.end(),wp.end(),root.end()]);await rm(temp,{recursive:true,force:true});});
 describe('two-mode knowledge indexing with real dependencies and deterministic model',()=>{
+ it('keeps canonical rerank evidence and hydrates only deduplicated images of final topK on explicit request',async()=>{
+  const f=await fixture(),a=randomUUID(),b=randomUUID();
+  for(const id of [a,b])await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,source_scene,file_name,mime_type,size_bytes,duration_seconds,sha256,object_key,object_version,storage_driver,status)
+   VALUES($1,$2,$3,$4,'note_image','fixture.png','image/png',1,0,$5,$1,'fixture','local','ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64)]);
+  const first=await assets.createNote(f.scope,f.workspaceId,{title:'A',parts:{raw:`imageselect ![A](asset://${a})`}},randomUUID());
+  const body=`imageselect ![B](asset://${b}) ![repeat](asset://${b})`;
+  const second=await assets.createNote(f.scope,f.workspaceId,{title:'B',parts:{raw:body}},randomUUID());
+  await runNote(first.noteId);await runNote(second.noteId);
+  const resolveImages=vi.fn(async(_scope:unknown,images:RagImageRequest[])=>new Map(images.map(image=>[ragImageKey(image),{url:`https://preview.test/${image.resourceId}`,expiresAt:'2099-01-01T00:00:00.000Z'}])));
+  const rerank=vi.fn(async(_query:string,candidates:import('../../src/modules/rag/search.js').RagSearchCandidate[])=>{
+   expect(candidates.every(c=>!c.content.includes('preview.test')&&!c.content.includes('playbackToken='))).toBe(true);
+   return candidates.map(c=>({...c,rerankScore:c.documentKey===second.noteId?10:1}));
+  });
+  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'BAAI/bge-m3',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'note-hybrid','markdown')).embed(texts)},rerank:{rerank},resolveImages});
+  try{
+   const ids=await q.query(f.scope,{query:'imageselect',mode:'hybrid',topK:1});
+   expect(ids.results[0]).toMatchObject({documentKey:second.noteId,content:body,evidence:{child:body},images:[{resourceId:b},{resourceId:b}]});
+   expect(resolveImages).not.toHaveBeenCalled();expect(ids.results[0]).not.toHaveProperty('displayMarkdown');
+   const links=await q.query(f.scope,{query:'imageselect',mode:'hybrid',topK:1,assetMode:'links'});
+   expect(resolveImages).toHaveBeenCalledTimes(1);expect(resolveImages.mock.calls[0]![1]).toMatchObject([{sourceId:second.noteId,resourceId:b,workspaceId:f.workspaceId}]);
+   expect(resolveImages.mock.calls[0]![1]).toHaveLength(1);
+   expect(links.results[0]).toMatchObject({content:body,evidence:{child:body},sourceStart:0,sourceEnd:body.length});
+   expect(links.results[0]!.displayMarkdown).toContain(`https://preview.test/${b}`);
+  }finally{await q.close();}
+ });
+ it('never requests previews for a candidate deleted during reranking',async()=>{
+  const f=await fixture(),id=randomUUID();
+  await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,source_scene,file_name,mime_type,size_bytes,duration_seconds,sha256,object_key,object_version,storage_driver,status)
+   VALUES($1,$2,$3,$4,'note_image','fixture.png','image/png',1,0,$5,$1,'fixture','local','ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64)]);
+  const note=await assets.createNote(f.scope,f.workspaceId,{title:'删除竞态',parts:{raw:`imagedelete ![图](asset://${id})`}},randomUUID());await runNote(note.noteId);
+  const resolveImages=vi.fn(async()=>new Map());
+  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'BAAI/bge-m3',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'note-hybrid','markdown')).embed(texts)},resolveImages,
+   rerank:{rerank:async(_query,candidates)=>{await assets.deleteNote(f.scope,f.workspaceId,note.noteId,note.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
+  try{expect((await q.query(f.scope,{query:'imagedelete',mode:'hybrid',assetMode:'links',documentKey:note.noteId})).results).toEqual([]);expect(resolveImages).not.toHaveBeenCalled();}finally{await q.close();}
+ });
  it('initializes exactly four metadata tables with indexed associations and no physical FKs',async()=>{
   const cols=await root.query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name LIKE 'kb_%'");
   expect(new Set(cols.rows.map(r=>r.table_name)).size).toBe(4);expect(cols.rows.some(r=>['content','embedding_text','embedding_vector'].includes(r.column_name))).toBe(false);

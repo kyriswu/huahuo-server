@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Redis } from 'ioredis';
 import type { EnabledDocumentParserMachineConfig, DocumentParserMachineConfig } from '../../config/document-parser-machine.js';
-import { AliyunEcsPower, EcsPowerError, assertEconomicalStopEligible, type EcsPowerPort } from '../../integrations/ecs-power.js';
+import { AliyunEcsPower, EcsPowerError, assertEconomicalStopEligible, isEcsCapacityRejection, type EcsPowerPort } from '../../integrations/ecs-power.js';
+import { AliyunEciGpuProvider } from '../../integrations/gpu-spot/aliyun-eci.js';
+import { DocumentParserEciFallback, type ParserEciProvider } from './eci-fallback.js';
 import { ParserMachineRedis, ParserMachineError, type MachinePhase } from './redis.js';
 import { ParserMachineIdleMonitor, type MonitorEvents } from './monitor.js';
 
@@ -45,8 +47,12 @@ export type IdleAction = 'always_on' | 'unmanaged' | 'busy' | 'transition_pendin
 
 export class DocumentParserMachine {
   private readonly healthy: HealthCheck;
-  constructor(readonly state: ParserMachineRedis, private readonly cloud: EcsPowerPort | undefined, private readonly config: EnabledDocumentParserMachineConfig, healthCheck?: HealthCheck) {
+  private readonly eci?: DocumentParserEciFallback;
+  constructor(readonly state: ParserMachineRedis, private readonly cloud: EcsPowerPort | undefined, private readonly config: EnabledDocumentParserMachineConfig, healthCheck?: HealthCheck, eciProvider?: ParserEciProvider) {
     if (config.mode === 'ecs' && !cloud) throw new ParserMachineError('DOCUMENT_PARSER_ECS_REQUIRED');
+    if (config.mode === 'ecs' && config.eciFallback) this.eci = new DocumentParserEciFallback(state, config.eciFallback,
+      eciProvider ?? new AliyunEciGpuProvider({ regionId: config.regionId, credentials: config.credentials,
+        connectTimeoutMs: 1000, readTimeoutMs: 6000, workloadRamCredentials: true }));
     this.healthy = healthCheck ?? (async ({ baseUrl, signal, headers }) => {
       if (!config.healthPath) return true;
       try {
@@ -71,6 +77,7 @@ export class DocumentParserMachine {
     const token = randomUUID(), phase = await this.state.lock(token, 'request', id, owner);
     if (!phase) return false;
     try {
+      if ((await this.state.status())?.eciTarget) return await this.eci!.online(token, phase);
       const instance = await cloud.describe();
       if (phase === 'stopping' || phase === 'unknown-stop') {
         if (instance.status === 'Stopped') {
@@ -90,7 +97,18 @@ export class DocumentParserMachine {
         // Persist intent BEFORE the RPC. A new owner reconciles it instead of resubmitting.
         if (await this.state.phase(token, 'starting', id, owner)) {
           try { await cloud.start(); }
-          catch (error) { return await this.rejectedOperation(token, 'start', error); }
+          catch (error) {
+            if (this.eci && isEcsCapacityRejection(error)) {
+              // A definitive rejected start cannot have allocated ECS compute. Never race two clouds.
+              try { await this.eci.select(token, instance); }
+              catch (selectionError) {
+                if (selectionError instanceof ParserMachineError && selectionError.code === 'DOCUMENT_PARSER_ECS_FALLBACK_INELIGIBLE') await this.state.phase(token, 'ready');
+                throw selectionError;
+              }
+              return false;
+            }
+            return await this.rejectedOperation(token, 'start', error);
+          }
         }
       }
       return false;
@@ -101,15 +119,15 @@ export class DocumentParserMachine {
     while (Date.now() < until) {
       assertNotAborted(signal);
       if (await this.online(id, owner)) {
-        if (await this.healthy(this.context(signal))) return;
+        if (await this.healthy(await this.context(signal))) return;
       }
       await pause(this.config.pollMs, signal);
     }
     throw new ParserMachineError('DOCUMENT_PARSER_STARTUP_TIMEOUT');
   }
-  private context(signal: AbortSignal): ParserContext {
+  private async context(signal: AbortSignal): Promise<ParserContext> {
     const headers: Record<string, string> = this.config.apiToken ? { Authorization: `Bearer ${this.config.apiToken}` } : {};
-    return { baseUrl: this.config.baseUrl, signal, headers: Object.freeze(headers) };
+    return { baseUrl: await this.eci?.baseUrl() ?? this.config.baseUrl, signal, headers: Object.freeze(headers) };
   }
 
   /** Wrap the complete remote parse, including uploads/result collection, with this method. */
@@ -146,8 +164,10 @@ export class DocumentParserMachine {
       assertNotAborted(admissionSignal);
       await this.state.renew(id, owner);
       assertNotAborted(admissionSignal);
+      const context = await this.context(signal);
+      assertNotAborted(admissionSignal);
       submitted = true;
-      value = await execute(this.context(signal));
+      value = await execute(context);
       outcome = 'succeeded';
     } catch (error) {
       outcome = !submitted ? 'cancelled' : error instanceof ParserExecutionError && error.outcome === 'settled' ? 'failed' : 'unknown';
@@ -169,6 +189,21 @@ export class DocumentParserMachine {
     const token = randomUUID(), phase: MachinePhase | undefined = await this.state.lock(token, 'idle');
     if (!phase) return (await this.state.status()) ? 'busy' : 'unmanaged';
     try {
+      if ((await this.state.status())?.eciTarget) {
+        if (phase === 'stopping' || phase === 'unknown-stop' || await this.state.beginEciStop(token)) {
+          if (!await this.eci!.cleanup(token)) return 'transition_pending';
+          // ECI is gone; confirm the preferred ECS still has no billable compute before sleeping.
+          const primary = await cloud.describe();
+          if (primary.status === 'Stopped' && primary.stoppedMode === 'StopCharging') {
+            await this.confirmStopped(token); return 'stop_confirmed';
+          }
+          return 'transition_pending';
+        }
+        if (phase === 'starting' || phase === 'unknown-start') {
+          return await this.eci!.online(token, phase, false) ? 'start_observed' : 'transition_pending';
+        }
+        return 'busy';
+      }
       const instance = await cloud.describe();
       if (phase === 'stopping' || phase === 'unknown-stop') {
         if (instance.status !== 'Stopped') return 'transition_pending';

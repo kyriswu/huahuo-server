@@ -31,6 +31,22 @@ DOCUMENT_PARSER_CONCURRENCY=1
 
 ECS 模式的地址必须匹配指定私网 IP，避免实例身份和请求目标错位。长期 API 模式允许配置其他 HTTPS 地址或私网 HTTP 地址；地址只来自可信部署配置，不接受文档请求传入控制目标。认证 token 通过 callback 的 `headers` 提供，健康检查也使用同一认证；健康检查拒绝重定向。健康接口的 200 只表示可以提交请求，OCR/正文质量仍由具体客户端校验。
 
+## A10 按量 ECS 缺货时回退 ECI
+
+`DOCUMENT_PARSER_ECI_FALLBACK_ENABLED=true` 可选开启；完整配置见 [环境示例](../../.env.document-parser.example)。当前首选仍是已配置的单台 ECS：恢复节省停机实例，不新增 ECS RunInstances 分配器。只有 `StartInstance` 明确返回 `OperationDenied.NoStock` 才回退；权限、余额、配额、网络超时、启动慢或 HTTP 健康失败不会创建另一台机器。资格还要求 ECS 为同地域/VPC、单 A10、PostPaid/NoSpot、Stopped/StopCharging。此错误码依据 [StartInstance 官方说明](https://help.aliyun.com/zh/ecs/developer-reference/api-ecs-2014-05-26-startinstance)。
+
+ECI 固定 `NoSpot` 按量付费、单 A10，规格按 8核/30GiB → 16核/60GiB → 32核/188GiB → 48核/310GiB 的配置顺序交给 ECI 多规格调度；四交换机放入同一次请求，不创建四台。创建接口明确缺货时按15秒间隔重试，受原 startup timeout 约束。已接受的实例若进入 Failed/ScheduleFailed 等终态，则本次启动失败并由空闲流程回收，不丢弃实例身份后盲目重建。没有转成抢占式、T4 或其他地域。实际库存、权限及价格由申请时的阿里云结果决定；代码验收后用户授权的独立云测试已取得8核A10，见[新镜像验收](../acceptance/xberg-a10-prod-callback.md)，不代表完整生产Worker闭环已部署。
+
+部署参数包括 VPC、安全组、交换机、私网镜像、ACR 实例；当前样本固定 `152b65be…31a6c7` digest（对应 `cuda-a10-native-first-oss-kbxml-v1-prod-callback`），沿用镜像默认入口、8000/TCP、`/health`、1GiB `/dev/shm`、默认30GiB之外额外40GiB临时存储和自动匹配镜像缓存。运行环境与用户新基线一致，OSS并发8/待上传32；API并发16不改变全局文档并发设置。ECS也须使用同版服务，不能继续旧的状态内嵌结果协议。创建参数使用 [CreateContainerGroup 官方 API](https://help.aliyun.com/zh/eci/developer-reference/api-eci-2018-08-08-createcontainergroup)。
+
+OSS Bucket 与根前缀读取现有 `STORAGE_ALIYUN_OSS_BUCKET`、`STORAGE_ALIYUN_OSS_KEY_PREFIX`，图片前缀为 `<根前缀>/resources`，OSS Endpoint 使用所选地域内网地址。只在 SDK 创建边界注入共享 `ALIYUN_RAM_ACCESS_KEY_ID/SECRET` 和可选 `ALIYUN_RAM_SECURITY_TOKEN`，隐藏环境变量值；Redis/checkpoint/配置签名不保存密钥。RAM 需要 ECI 创建/查询/删除、`eci:ListTagResources`只读、交换机与安全组只读、对应 ACR 拉取和目标 OSS 图片读写权限。归属先用专用ListTagResources查唯一allocation，再逐一核对VPC与manager，不依赖实测未生效的DescribeContainerGroups标签过滤。安全组应允许 Worker/Scheduler 私网访问8000；不会申请 EIP。无需改 App、Xberg 核心、OCR 参数或业务 Schema。
+
+Redis 持久保存 allocation/checkpoint、受管标签、实例 ID 和私网 IP；所有进程共用控制锁与文档信号量。创建超时或 prepared 后崩溃时，仅按精确归属标签对账，不再创建；空结果不当作“肯定没申请到”。已知缺货才推进重试代次。请求提交、job 查询、取消和结果收集始终使用同一实例。运行任务结果不明时保留槽位，不能空闲删除或换机。
+
+无活动/排队/未知任务且空闲到期后，删除本模块归属的 ECI，观察已接受删除后的实例与标签查询均为空，再清除目标；同时确认首选 ECS 仍为 StopCharging 才休眠。下一轮重新优先 ECS。ECI 没有强制寿命上限，避免解析中被定时销毁；无法确认创建/删除的记录保持阻断，需要以云控制面与日志核实，不可直接删 Redis 或 `configure-idle` 绕过。ECI 的本地 ledger 随实例释放，结果/图片回执必须在 callback 结束前收集持久化，继续沿用现有提取器。
+
+worker/scheduler 必须同时使用完全相同的非秘密配置。开启/关闭回退或换镜像前，先排空任务、释放已追踪 ECI，再按下文 `configure-idle` 更新签名；有 ECI 记录时拒绝切换。`status` 增加 `activeProvider`、Redis `eciTarget` 及已知 ECI 的只读快照，不触发创建。默认配置关闭、主栈未部署启用。代码阶段见[回退验收](../acceptance/document-parser-eci-fallback.md)，后续独立云实测见[新镜像验收](../acceptance/xberg-a10-prod-callback.md)。
+
 ## 在解析任务中使用
 
 每个长期运行的 worker 创建一个模块并复用连接，关闭角色时断开连接。不要每个请求创建一个 Redis 客户端。`loadConfig('worker')` 已有 `documentParserMachine` 字段，也可以独立加载此模块的配置。

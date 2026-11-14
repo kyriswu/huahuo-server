@@ -1,4 +1,5 @@
 export type SpotPolicy =
+  | { strategy: 'NoSpot' }
   | { strategy: 'SpotAsPriceGo' }
   | { strategy: 'SpotWithPriceLimit'; priceLimit: number };
 
@@ -12,7 +13,8 @@ export interface GpuSpotSpec {
   instanceTypes: string[];
   image: string;
   gpuCount: number;
-  activeDeadlineSeconds: number;
+  /** Managed pay-as-you-go services may omit a deadline; spot jobs remain bounded. */
+  activeDeadlineSeconds?: number;
   spot?: SpotPolicy;
   spotDuration?: 0 | 1;
   gpuDriverVersion?: string;
@@ -20,6 +22,11 @@ export interface GpuSpotSpec {
   command?: string[];
   args?: string[];
   environment?: Record<string, string>;
+  port?: number;
+  sharedMemoryGiB?: number;
+  extraStorageGiB?: number;
+  autoMatchImageCache?: boolean;
+  acrInstanceId?: string;
 }
 
 export interface PreparedGpuSpotSpec extends GpuSpotSpec {

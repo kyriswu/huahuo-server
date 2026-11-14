@@ -81,11 +81,11 @@ export function validateExtractionResponse(value: unknown, contexts: readonly (F
 export class DocumentExtractionClient {
   constructor(readonly config: EnabledDocumentExtractionConfig, private readonly fetchImpl: typeof fetch = fetch) { assertCompleteExtractionConfig(config.parameters); }
   private url(baseUrl: string, path: string): URL { return new URL(baseUrl.replace(/\/$/, '') + path); }
-  private async request(url: URL, init: RequestInit, signal: AbortSignal, submitting: boolean): Promise<unknown> {
+  private async request(url: URL, init: RequestInit, signal: AbortSignal, submitting: boolean, allowPending = false): Promise<{status:number;body:unknown}> {
     let response: Response;
     try { response = await this.fetchImpl(url, { ...init, signal, redirect: 'error' }); }
     catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN', 'unknown', true); }
-    if (response.status !== 200 && !(submitting && this.config.mode==='async' && response.status === 202)) {
+    if (response.status !== 200 && !((submitting && this.config.mode==='async' || allowPending) && response.status === 202)) {
       await response.body?.cancel();
       const settled = submitting && response.status >= 400 && response.status < 500 && response.status !== 408;
       throw new DocumentExtractionError('DOCUMENT_EXTRACTION_HTTP_FAILED', settled ? 'settled' : 'unknown', response.status >= 500 || response.status === 429,response.status);
@@ -99,7 +99,7 @@ export class DocumentExtractionClient {
         if (size > this.config.maxResponseBytes) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_TOO_LARGE', 'unknown');
         parts.push(chunk.value);
       }
-      return JSON.parse(Buffer.concat(parts).toString('utf8')) as unknown;
+      return {status:response.status,body:JSON.parse(Buffer.concat(parts).toString('utf8')) as unknown};
     } catch (error) {
       if (error instanceof DocumentExtractionError) throw error;
       throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE', 'unknown');
@@ -124,8 +124,8 @@ export class DocumentExtractionClient {
       form.append('config', JSON.stringify(this.config.parameters)); form.append('file_contexts', JSON.stringify(contexts));
       try{await hooks.beforeSubmit();}catch{throw new DocumentExtractionError('DOCUMENT_EXTRACTION_PRE_SUBMISSION_FAILED','settled',true);}
       const response = await this.request(this.url(context.baseUrl, this.config.mode === 'sync' ? '/extract' : '/extract-async'), { method: 'POST', headers: context.headers, body: form }, signal, true);
-      if (this.config.mode === 'sync') return validateExtractionResponse(response, contexts);
-      const id = object(response).job_id;
+      if (this.config.mode === 'sync') return validateExtractionResponse(response.body, contexts);
+      const id = object(response.body).job_id;
       if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_ID_UNKNOWN', 'unknown');
       jobId = id; await hooks.submitted(id);
     }
@@ -138,12 +138,32 @@ export class DocumentExtractionClient {
         cancelling=true;
         if(cancellation==='send'&&first)try{await this.cancel(jobId,context);}catch(error){if(!(error instanceof DocumentExtractionError&&error.statusCode===409))throw error;}
       }
-      const job = object(await this.request(this.url(context.baseUrl, `/jobs/${jobId}`), { method: 'GET', headers: context.headers }, signal, false));
+      const job = object((await this.request(this.url(context.baseUrl, `/jobs/${jobId}`), { method: 'GET', headers: context.headers }, signal, false)).body);
       if (job.job_id !== jobId) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_MISMATCH', 'unknown');
-      if(cancelling&&['completed','failed','cancelled'].includes(String(job.state)))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CANCELLED','settled',false,undefined,String(job.state));
-      if (job.state === 'completed') return validateExtractionResponse(job.result, contexts);
-      if (job.state === 'failed' || job.state === 'cancelled') throw new DocumentExtractionError('DOCUMENT_EXTRACTION_FAILED', 'settled', job.state === 'failed');
-      if (!['pending', 'running'].includes(String(job.state))) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN', 'unknown');
+      if(cancelling&&['completed','failed','cancelled'].includes(String(job.state))){
+        await this.ack(jobId,context);
+        throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CANCELLED','settled',false,undefined,String(job.state));
+      }
+      if (job.state === 'failed' || job.state === 'cancelled') {
+        await this.ack(jobId,context);
+        throw new DocumentExtractionError('DOCUMENT_EXTRACTION_FAILED', 'settled', job.state === 'failed');
+      }
+      if (job.state === 'completed') {
+        if(job.result_state==='consumed')throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESULT_CONSUMED','settled',false,410);
+        let received:{status:number;body:unknown};
+        try{received=await this.request(this.url(context.baseUrl,`/jobs/${jobId}/result`),{method:'GET',headers:context.headers},signal,false,true);}
+        catch(error){
+          if(error instanceof DocumentExtractionError&&error.statusCode===410)throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESULT_CONSUMED','settled',false,410);
+          throw error;
+        }
+        const terminal=object(received.body);
+        if(terminal.job_id!==jobId)throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_MISMATCH','unknown');
+        if(received.status===200){
+          if(terminal.state!=='completed')throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN','unknown');
+          return validateExtractionResponse(terminal.result,contexts);
+        }
+        if(!['pending','running'].includes(String(terminal.state)))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN','unknown');
+      } else if (!['pending', 'running'].includes(String(job.state))) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN', 'unknown');
       try { await sleep(this.config.pollMs, undefined, { signal }); }
       catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN', 'unknown', true); }
     }
@@ -151,10 +171,15 @@ export class DocumentExtractionClient {
   async resources(parseRunId:string,sourceResourceId:string|undefined,context:ParserContext):Promise<unknown>{
     if(!validUuid(parseRunId)||(sourceResourceId!==undefined&&!validUuid(sourceResourceId)))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CONTEXT_INVALID','settled');
     const url=this.url(context.baseUrl,`/parse-runs/${parseRunId}/resources`);if(sourceResourceId)url.searchParams.set('source_resource_id',sourceResourceId);
-    return this.request(url,{method:'GET',headers:context.headers},AbortSignal.any([context.signal,AbortSignal.timeout(10000)]),false);
+    return (await this.request(url,{method:'GET',headers:context.headers},AbortSignal.any([context.signal,AbortSignal.timeout(10000)]),false)).body;
   }
   async cancel(jobId:string,context:ParserContext):Promise<unknown>{
     if(!/^[a-zA-Z0-9_-]{1,128}$/.test(jobId))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_ID_INVALID','unknown');
-    return this.request(this.url(context.baseUrl,`/jobs/${jobId}`),{method:'DELETE',headers:context.headers},AbortSignal.any([context.signal,AbortSignal.timeout(10000)]),false);
+    return (await this.request(this.url(context.baseUrl,`/jobs/${jobId}`),{method:'DELETE',headers:context.headers},AbortSignal.any([context.signal,AbortSignal.timeout(10000)]),false)).body;
+  }
+  /** Only for terminal work that was explicitly cancelled/failed; successful GET /result consumes itself. */
+  async ack(jobId:string,context:ParserContext):Promise<void>{
+    if(!/^[a-zA-Z0-9_-]{1,128}$/.test(jobId))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_ID_INVALID','unknown');
+    await this.request(this.url(context.baseUrl,`/jobs/${jobId}/ack`),{method:'POST',headers:context.headers},AbortSignal.any([context.signal,AbortSignal.timeout(10000)]),false);
   }
 }

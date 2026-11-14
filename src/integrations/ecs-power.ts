@@ -7,6 +7,7 @@ export interface EcsInstance {
   instanceId: string; regionId: string; instanceType: string; status: EcsStatus;
   stoppedMode?: 'StopCharging' | 'KeepCharging';
   chargeType: string; networkType: string; vpcId: string; privateIps: string[];
+  spotStrategy?: string;
   localStorageAmount: number; localStorageCapacity: number; operationLocked: boolean;
 }
 export interface EcsPowerPort {
@@ -75,6 +76,7 @@ export class AliyunEcsPower implements EcsPowerPort {
     return {
       instanceId: this.connection.instanceId, regionId: this.connection.regionId, instanceType: item.InstanceType,
       status: item.Status as EcsStatus, chargeType: item.InstanceChargeType, networkType: item.InstanceNetworkType,
+      spotStrategy: typeof item.SpotStrategy === 'string' ? item.SpotStrategy : undefined,
       vpcId: vpc.VpcId, privateIps: ips.filter((ip): ip is string => typeof ip === 'string'),
       stoppedMode: item.StoppedMode === 'StopCharging' || item.StoppedMode === 'KeepCharging' ? item.StoppedMode : undefined,
       localStorageAmount: storage('LocalStorageAmount'), localStorageCapacity: storage('LocalStorageCapacity'),
@@ -87,6 +89,11 @@ export class AliyunEcsPower implements EcsPowerPort {
   async stopEconomically(): Promise<void> {
     await this.call('StopInstance', { InstanceId: this.connection.instanceId, StoppedMode: 'StopCharging', ForceStop: false });
   }
+}
+
+/** StartInstance's explicit stock rejection only; transport, quota and billing failures are excluded. */
+export function isEcsCapacityRejection(error: unknown): error is EcsPowerError {
+  return error instanceof EcsPowerError && error.outcome === 'rejected' && error.providerCode === 'OperationDenied.NoStock';
 }
 
 /** Checks known exclusions; the final StoppedMode read remains mandatory. */

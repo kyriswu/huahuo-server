@@ -1,5 +1,25 @@
 # 契约兼容性（P01 历史与 P02 增量）
 
+## prod-callback提取协议（2026-11-14）
+
+跟随用户新镜像：GET /jobs/{id}仅状态，完成后GET /result完整领取并消费；202等待、410已消费不可自动重跑，失败/取消终态POST /ack。旧状态内嵌result不保留兼容分支，ECS/ECI服务须同步升级。既有App envelope/任务/KB Markdown/图片UUID不变；没有新增公开业务回调路由。仅隔离小TXT接收器验证保存后2xx，325页通过结果接口领取。见[验收](acceptance/xberg-a10-prod-callback.md)。
+
+## A10 ECS 缺货回退 ECI（2026-11-14）
+
+仅内部解析机配置增加可选 ECI 回退；既有请求身份、异步 job 恢复、取消、KB Markdown与图片 UUID 协议继续复用。没有新增 App DTO、路由或云管理接口。关闭回退时旧 Redis配置签名保持；开启/更换配置需排空并释放已追踪ECI后 configure-idle。状态 CLI 新增 activeProvider/eciTarget/只读ECI快照。见[验收](acceptance/document-parser-eci-fallback.md)。
+
+## 图片稳定身份与展示视图（2026-11-14）
+
+Note create/update/part PUT/import 归一实际图片目标为 asset://UUID，验证同用户／工作区／ready 图片后再 hash 和 diff；外部 HTTP(S) 图保持外链，data/file/本地路径须先上传。正文引用自动同步、显式附件 update 生效、历史 part 保留图片 pin。签名变化不增加 revision／cursor／任务。
+
+原 contentMarkdown/contentSha256 为规范正文；响应新增 displayMarkdown、imageLinks，服务端在幂等事务外生成，临时 URL 不写持久 receipt。既有公开／internal RAG 查询新增可选 assetMode（ids 默认、links 按需）；content/evidence/range 保持规范原文，图片 metadata 在最终权限复核与 topK 后填充。KBIMAGE uuid 不改成 URL。Note 与查询响应 no-store，服务 Key/JWT 校验保持。当前 Flutter 图片为 FileImage，未找到这些 DTO 的 HTTP 消费者，不能视为 App 接线通过。见[契约与验收](acceptance/markdown-images.md)。
+
+## Admin 基础用户信息查询（2026-11-14）
+
+新增 `GET /admin/api/v1/users`（仅 Admin Session），支持可选 search/status/page/pageSize，默认 20 条。返回 items/total/page/pageSize；单项仅 userId、displayName、phoneMasked、status、createdAt。普通用户 JWT/匿名返回 401，公开 API 的同路径返回 404；输入边界、参数绑定、稳定排序、脱敏和审计由新增 8 项隔离 PG 测试验证。
+
+不新增用户写操作、导出或 JWT 功能，不修改 App 的登录、上传及资料接口。当前 App 的实际认证客户端和双 Base URL 声明已只读核对，哈希前后一致。见[验收记录](acceptance/admin-users.md)。
+
 ## Xberg 文件结果与关键词索引（2026-11-14）
 
 USER：完整 config 替换默认，files/file_contexts 按输入索引绑定、非 nil UUID 同批次重试复用，kb-markdown-v1 仅保留 KBIMAGE/KBFORMULA、普通表格 Markdown/可靠合并 HTML，图片只返回已上传 UUID/元数据。CODE：同步 results[i].content、异步 completed.result.results[i].content 均接入现有文件 Task；最终 content 进入原有 document-keyword/BM25，原始 JSON/KB/图片信息另存，无 Embedding/Rerank 调用。

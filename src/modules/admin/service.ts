@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import { constantEqual, hashPassword, mac, token, verifyPassword } from '../identity/crypto.js';
 import { DomainError, lock, rateLimit, transaction } from '../identity/store.js';
+import type { AdminUserList, AdminUserQuery } from './user-schemas.js';
 export interface AdminScope { readonly adminId:string;readonly sessionId:string;readonly role:'operator'|'superadmin';readonly username:string; }
 export class AdminService {
  private dummy:Promise<string>;
@@ -44,6 +45,43 @@ export class AdminService {
   const r=await this.pool.query('SELECT resource_id,user_id,workspace_id,file_name,mime_type,size_bytes,status,processing_status,created_at FROM resources WHERE resource_id=$1',[id]);
   if(!r.rows[0])throw new DomainError(404,'RESOURCE_NOT_FOUND');await this.audit(scope.adminId,'resource.inspect',id,null,trace);
   const x=r.rows[0];return {resourceId:x.resource_id,userId:x.user_id,workspaceId:x.workspace_id,fileName:x.file_name,mimeType:x.mime_type,sizeBytes:Number(x.size_bytes),status:x.status,processingStatus:x.processing_status,createdAt:x.created_at.toISOString()};
+ }
+ async users(scope: AdminScope, input: AdminUserQuery, traceId: string): Promise<AdminUserList> {
+  const page = input.page ?? 1, pageSize = input.pageSize ?? 20;
+  const search = input.search?.trim();
+  const values: (string | number)[] = [];
+  const conditions: string[] = [];
+  if (search) {
+   values.push(search);
+   conditions.push(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search)
+    ? `u.id=$${values.length}::uuid`
+    : `strpos(lower(u.display_name),lower($${values.length}))>0`);
+  }
+  if (input.status) { values.push(input.status); conditions.push(`u.status=$${values.length}`); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  return transaction(this.pool, async tx => {
+   // Count and rows describe the same snapshot, even while users register.
+   await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+   const count = await tx.query<{ total: string }>(`SELECT count(*) AS total FROM users u ${where}`, values);
+   const result = await tx.query<{
+    id: string; display_name: string; phone_masked: string | null;
+    status: AdminUserList['items'][number]['status']; created_at: Date;
+   }>(`SELECT u.id,u.display_name,u.status,u.created_at,
+     (SELECT i.subject_masked FROM user_identities i
+      WHERE i.user_id=u.id AND i.provider='phone' AND i.verified_at IS NOT NULL
+      ORDER BY i.created_at,i.id LIMIT 1) AS phone_masked
+     FROM users u ${where} ORDER BY u.created_at DESC,u.id DESC
+     LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+   [...values, pageSize, (page - 1) * pageSize]);
+   await this.audit(scope.adminId, 'user.list', null, null, traceId, tx);
+   return {
+    items: result.rows.map(row => ({
+     userId: row.id, displayName: row.display_name, phoneMasked: row.phone_masked,
+     status: row.status, createdAt: row.created_at.toISOString(),
+    })),
+    total: Number(count.rows[0]!.total), page, pageSize,
+   };
+  });
  }
  async bootstrap(username:string,password:string){
   if(!/^[a-z][a-z0-9._-]{2,63}$/.test(username)||password.length<16||password.length>128)throw new DomainError(400,'ADMIN_CREDENTIALS_INVALID');

@@ -1,11 +1,32 @@
 # 当前容器与数据库状态
 
+## prod-callback独立云测试已释放（2026-11-14）
+
+独立ECI `eci-2zeg0m8zdkp9vfuhmk8s`（8核/30GiB/A10）已删除，ID与专属allocation标签双查为空；原首选ECS启动被NoStock拒绝，最终仍Stopped+StopCharging。753临时OSS对象逐项404、原PDF保留，共享镜像缓存未删除。只更新本地源码/构建和无密钥模板，主业务角色、真实.env、业务PG/已有卷不变；本机隔离PG/Redis测试容器已清理。见[验收](acceptance/xberg-a10-prod-callback.md)。
+
+## ECS 缺货回退代码验证，未部署（2026-11-14）
+
+同一 Compose 仅 worker/scheduler 增加默认关闭的 ECI 回退配置及一致的 OSS Bucket/前缀；没有新增服务或端口。隔离 PG/Redis integration 201通过、1个 Milvus用例跳过，脚本只清理本轮临时容器/凭据。实际 `.env`、主业务栈、RDS/OSS/云GPU及已有数据卷未操作。见[验收](acceptance/document-parser-eci-fallback.md)。
+
+## 图片规范化源码验证，主栈未更新（2026-11-14）
+
+本轮只更新后端源码／构建和文档，未重建主 Compose 业务角色，未变更 `.env`、RDS、Bucket、凭据、卷或现有 OSS 对象。先前 Admin 覆盖镜像和未部署的文档提取代码边界保持；当前运行容器不能当作图片优化已部署。
+
+使用本机 Colima Unix socket，`node scripts/integration.mjs --milvus` 创建本轮专属 tmpfs PG17.9/Redis7.4.8/Milvus2.6.26 和随机独立测试库；178 项通过后仅删除该轮容器／临时凭据，无开发库写入或数据卷删除。404 项 unit/contract、typecheck/lint/build 通过。唯一迁移哈希未改，隔离库业务外键为 0。见[验收](acceptance/markdown-images.md)。
+
+## Admin 基础用户页面已更新至本机（2026-11-14）
+
+当前运行镜像的窄范围覆盖仅包含 Admin 模块、管理网页产物和唯一基线，其他业务模块保留原运行代码。为统一新增列级授权后的基线 SHA256，主 Compose 的 api-server/admin/worker/scheduler 均使用覆盖镜像 `sha256:3cf371700533eb23dac7f33f6dbcfbe576de3c226f335f1e0ccabe8ce3a1fa6b`；四角色 healthy/readiness 200，迁移重放 applied=[]/current=1。API/Admin 仍只绑定回环 3000/3001，Worker/Scheduler 无宿主业务端口。Redis、现有文件卷及凭据未变。
+
+最终空结果文字对比度修正只重建 Admin，最终 Admin 镜像为 `sha256:5a32d2dc19e42a2bd50bc3d783d6842f56767f11be050be56827674ff8c2a79d`；其他三角色保留上述镜像，业务代码和基线一致。最终页面及 JS/CSS 均 200、逐字节等于当前构建，四角色再次 healthy/readiness 200。隔离浏览器测试服务和本轮 PG/Redis 容器已清理，不影响业务栈。
+
+开发 RDS 本轮仅两条列级 GRANT 与迁移记录校验同步，用户/身份/会话/管理员行数保持 1/1/2/1，业务外键为 0。公开 API 的用户管理路径 404；Admin 未登录 401、页面 200。认证后完整浏览器验证来自隔离测试库，不代登录真实管理员。见[验收记录](acceptance/admin-users.md)。
+
 ## 测试服务器及远端解析机已停止（2026-11-14）
 
 本项目 API、Admin、Worker、Scheduler、Redis 均已停止。远端解析 ECS `i-2zegwjwejyvpxoluhyx8` 在全文测试结束后手动节省停机，云端确认 `Stopped + StopCharging`；Redis 未知请求及临时测试数据已清理，原 PDF 保留。
 
 本次使用从 `8825986` 构建的 `huahuo-server:pdf-e2e-8825986` 和临时部署配置：2页 PDF 流程通过，325页全文未完成入库及查询，详见[文档提取验收](acceptance/document-extraction.md)。原 `.env`、数据库结构及现有卷未改。以下为历史部署证据，不表示服务当前运行。
-
 ## 文档提取链路代码完成，待测试环境部署（2026-11-14）
 
 同一 Compose 四角色/一次性 migrate 保持。API/worker 共用提取模式与完整配置文件，worker/scheduler 另用受控 ECS/Redis 运行配置；资源 JSON 已纳入现有 Docker resources 打包。未改业务 Schema/迁移、未执行 RDS 迁移、未重建运行容器或修改真实 `.env`，也没有请求当前内网 ECS。

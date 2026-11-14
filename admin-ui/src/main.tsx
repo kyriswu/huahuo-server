@@ -1,5 +1,5 @@
 import { Alert, Button, ConfigProvider, Form, Input, Spin } from 'antd';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AdminApiError, getSession, login, logout, type AdminSession, type Credentials } from './session';
 import { Brand, Workbench } from './workbench';
@@ -67,6 +67,8 @@ function AdminApp() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [error, setError] = useState<string>();
 
+  const sessionExpired = useCallback(() => setState({ kind: 'signed-out' }), []);
+
   useEffect(() => {
     const controller = new AbortController();
     getSession(controller.signal).then(
@@ -94,7 +96,7 @@ function AdminApp() {
   }
 
   if (state.kind === 'signed-in') {
-    return <Workbench admin={state.session.admin} onLogout={() => void signOut(state.session)} loggingOut={loggingOut} error={error} />;
+    return <Workbench admin={state.session.admin} onLogout={() => void signOut(state.session)} loggingOut={loggingOut} error={error} onSessionExpired={sessionExpired} />;
   }
   if (state.kind === 'signed-out') {
     return <SignIn onSignedIn={session => setState({ kind: 'signed-in', session })} />;
@@ -119,7 +121,7 @@ if (!root) throw new Error('Admin UI root is missing');
 
 createRoot(root).render(
   <ConfigProvider theme={{
-    token: { colorPrimary: '#5344ad', colorText: '#202038', colorBorder: '#e7e6ee', borderRadius: 9, fontFamily: 'inherit' },
+    token: { colorPrimary: '#5344ad', colorText: '#202038', colorTextPlaceholder: '#606378', colorBorder: '#e7e6ee', borderRadius: 9, fontFamily: 'inherit' },
   }}>
     {preview ? <Workbench /> : <AdminApp />}
   </ConfigProvider>,

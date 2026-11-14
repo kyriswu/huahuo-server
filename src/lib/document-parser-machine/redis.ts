@@ -1,12 +1,23 @@
 import { createHash } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import type { EnabledDocumentParserMachineConfig } from '../../config/document-parser-machine.js';
+import type { GpuAllocationCheckpoint } from '../../integrations/gpu-spot/types.js';
+
+export interface ParserEciTarget {
+  allocationId: string;
+  checkpoint?: GpuAllocationCheckpoint;
+  privateIp?: string;
+  retryAfterMs?: number;
+  rejected?: true;
+  deleteAccepted?: true;
+}
 
 export type MachinePhase = 'ready' | 'starting' | 'stopping' | 'unknown-start' | 'unknown-stop' | 'blocked';
 export interface MachineState {
   phase: MachinePhase; queued: number; active: number; uncertain: number;
   economicallyStopped: boolean;
   lastActivityMs: number; redisTimeMs: number; reason?: string;
+  eciTarget?: ParserEciTarget;
 }
 export class ParserMachineError extends Error {
   constructor(readonly code: string, readonly requestState?: string) { super(code); this.name = 'ParserMachineError'; }
@@ -30,7 +41,8 @@ if not exists then
   redis.call('HSET', meta, 'signature', signature, 'phase', 'ready', 'lastActivity', now, 'sequence', 0)
 elseif op == 'configure' then
   if redis.call('HLEN', jobs) > 0 or redis.call('ZCARD', waiting) > 0 or redis.call('ZCARD', active) > 0
-    or redis.call('EXISTS', lock) == 1 or redis.call('HGET', meta, 'phase') ~= 'ready' then return result('BUSY') end
+    or redis.call('EXISTS', lock) == 1 or redis.call('HEXISTS', meta, 'eciTarget') == 1
+    or redis.call('HGET', meta, 'phase') ~= 'ready' then return result('BUSY') end
   redis.call('HSET', meta, 'signature', signature, 'lastActivity', now)
   notify()
   return result('OK')
@@ -68,6 +80,7 @@ end
 if op == 'status' then
   return result('OK', {phase=phase, queued=redis.call('ZCARD', waiting), active=redis.call('ZCARD', active), uncertain=uncertain,
     economicallyStopped=redis.call('HGET', meta, 'economicallyStopped') == '1',
+    eciTarget=redis.call('HGET', meta, 'eciTarget') and cjson.decode(redis.call('HGET', meta, 'eciTarget')) or nil,
     lastActivityMs=tonumber(redis.call('HGET', meta, 'lastActivity')), redisTimeMs=now, reason=redis.call('HGET', meta, 'reason') or nil})
 elseif op == 'register' then
   touch()
@@ -134,9 +147,21 @@ elseif op == 'lock' then
 elseif op == 'unlock' then
   if redis.call('GET', lock) == token then redis.call('DEL', lock) end
   return result('OK')
+elseif op == 'eci-target' or op == 'begin-eci-stop' then
+  if redis.call('GET', lock) ~= token then return result('LOCK_LOST') end
+  if op == 'eci-target' then
+    if value == '' then redis.call('HDEL', meta, 'eciTarget')
+    else redis.call('HSET', meta, 'eciTarget', value, 'economicallyStopped', '0') end
+  else
+    if not idleEnough() then return result('NOT_IDLE') end
+    if redis.call('HEXISTS', meta, 'eciTarget') ~= 1 then return result('STATE_INCONSISTENT') end
+    redis.call('HSET', meta, 'phase', 'stopping', 'economicallyStopped', '0')
+  end
+  notify(); return result('OK')
 elseif op == 'phase' or op == 'confirm-stopped' then
   if redis.call('GET', lock) ~= token then return result('LOCK_LOST') end
   if op == 'confirm-stopped' then
+    if redis.call('HEXISTS', meta, 'eciTarget') == 1 then return result('STATE_INCONSISTENT') end
     redis.call('HSET', meta, 'phase', 'ready', 'economicallyStopped', '1'); notify(); return result('OK')
   end
   if value == 'starting' and (phase ~= 'ready' or not ownedActive()) then return result('WAIT') end
@@ -163,6 +188,7 @@ export class ParserMachineRedis {
       target: config.mode === 'ecs' ? { mode: config.mode, region: config.regionId, instance: config.instanceId, ip: config.privateIp } : { mode: config.mode },
       baseUrl: config.baseUrl, healthPath: config.healthPath,
       capacity: config.concurrency, idle: config.idleMs, lease: config.leaseMs, maxPending: config.maxPending,
+      ...(config.mode === 'ecs' && config.eciFallback ? { eciFallback: config.eciFallback } : {}),
     })).digest('hex');
   }
   private async run(op: string, input: Partial<{ id: string; owner: string; fingerprint: string; token: string; value: string }> = {}): Promise<Reply> {
@@ -209,7 +235,25 @@ export class ParserMachineRedis {
   }
   async status(): Promise<MachineState | undefined> {
     const r = await this.run('status');
-    return r.code === 'UNMANAGED' ? undefined : r.data as MachineState;
+    if (r.code === 'UNMANAGED') return undefined;
+    const state = r.data as MachineState;
+    if (state?.eciTarget) {
+      const target = state.eciTarget;
+      if (this.config.mode !== 'ecs' || !this.config.eciFallback || !/^[a-f0-9-]{36}$/.test(target.allocationId)
+        || (target.checkpoint && target.checkpoint.allocationId !== target.allocationId)) throw new ParserMachineError('DOCUMENT_PARSER_STATE_INCONSISTENT');
+    }
+    return state;
+  }
+  async setEciTarget(token: string, target: ParserEciTarget | undefined): Promise<void> {
+    const r = await this.run('eci-target', { token, value: target ? JSON.stringify(target) : '' });
+    if (r.code !== 'OK') throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
+  }
+  /** Cleanup of a failed/cancelled startup uses the same idle/admission fence as a running service. */
+  async beginEciStop(token: string): Promise<boolean> {
+    const r = await this.run('begin-eci-stop', { token });
+    if (r.code === 'NOT_IDLE') return false;
+    if (r.code !== 'OK') throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
+    return true;
   }
   /** Explicit rollout step after draining callers; never clears active/unknown work or receipts. */
   async configureWhenIdle(): Promise<void> {

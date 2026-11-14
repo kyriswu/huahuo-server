@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import { IncomingMessage } from 'node:http';
 import { Socket } from 'node:net';
-import { CreateContainerGroupResponse, CreateContainerGroupResponseBody, DeleteContainerGroupResponse, DeleteContainerGroupResponseBody, DescribeContainerGroupsResponse, DescribeContainerGroupsResponseBody, DescribeContainerGroupsResponseBodyContainerGroups } from '@alicloud/eci20180808';
+import { CreateContainerGroupResponse, CreateContainerGroupResponseBody, DeleteContainerGroupResponse, DeleteContainerGroupResponseBody, DescribeContainerGroupsResponse, DescribeContainerGroupsResponseBody, DescribeContainerGroupsResponseBodyContainerGroups, ListTagResourcesResponse, ListTagResourcesResponseBody, ListTagResourcesResponseBodyTagResources } from '@alicloud/eci20180808';
 import { AliyunEciGpuProvider, buildEciCreateRequest, classifyEciError } from '../../src/integrations/gpu-spot/aliyun-eci.js';
 import type { EciNetworkQuery, EciSdkPort } from '../../src/integrations/gpu-spot/aliyun-eci.js';
 import { prepareGpuSpotSpec } from '../../src/integrations/gpu-spot/spec.js';
@@ -38,6 +38,9 @@ function setup() {
     createContainerGroupWithOptions: vi.fn<EciSdkPort['createContainerGroupWithOptions']>().mockResolvedValue(new CreateContainerGroupResponse({ body: new CreateContainerGroupResponseBody({ containerGroupId: ref.containerGroupId, requestId: 'request-1' }) })),
     describeContainerGroupsWithOptions: vi.fn<EciSdkPort['describeContainerGroupsWithOptions']>().mockResolvedValue(describeResponse()),
     deleteContainerGroupWithOptions: vi.fn<EciSdkPort['deleteContainerGroupWithOptions']>().mockResolvedValue(new DeleteContainerGroupResponse({ body: new DeleteContainerGroupResponseBody({ requestId: 'request-2' }) })),
+    listTagResourcesWithOptions: vi.fn<EciSdkPort['listTagResourcesWithOptions']>().mockResolvedValue(new ListTagResourcesResponse({ body: new ListTagResourcesResponseBody({ tagResources: [new ListTagResourcesResponseBodyTagResources({
+      resourceId: ref.containerGroupId, resourceType: 'ContainerGroup', tagKey: 'huahuo-gpu-allocation', tagValue: allocationHash,
+    })] }) })),
   };
   const network = vi.fn<EciNetworkQuery>(networkResponse);
   const provider = new AliyunEciGpuProvider({ regionId: ref.regionId, credentials: async () => ({ accessKeyId: 'test-id', accessKeySecret: 'test-secret' }) }, sdk, network);
@@ -45,6 +48,58 @@ function setup() {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('managed ECI workload credentials and ambiguous-submit reconciliation (mock SDK)', () => {
+  it('injects the canonical RAM credentials only into the hidden SDK workload environment', async () => {
+    const s = setup(), credentials = async () => ({ accessKeyId: 'shared-ak', accessKeySecret: 'shared-secret', securityToken: 'shared-sts' });
+    const provider = new AliyunEciGpuProvider({ regionId: ref.regionId, credentials, workloadRamCredentials: true }, s.sdk, networkResponse);
+    await provider.create(spec, 'managed-token', allocationHash);
+    const request = s.sdk.createContainerGroupWithOptions.mock.calls[0]![0];
+    expect(request.container![0]!.environmentVarHide).toBe(true);
+    expect(Object.fromEntries(request.container![0]!.environmentVar!.map(item => [item.key, item.value]))).toMatchObject({
+      ALIYUN_RAM_ACCESS_KEY_ID: 'shared-ak', ALIYUN_RAM_ACCESS_KEY_SECRET: 'shared-secret', ALIYUN_RAM_SECURITY_TOKEN: 'shared-sts',
+    });
+    expect(JSON.stringify(spec)).not.toContain('shared-secret');
+    expect(spec.environment).toEqual({ PRIVATE_TOKEN: 'test-value' });
+  });
+  it('discovers only one exact allocation and verifies its VPC and ownership before adopting it', async () => {
+    const s = setup();
+    expect(await s.provider.findByAllocation(spec, allocationHash)).toEqual(ref);
+    expect(s.sdk.listTagResourcesWithOptions.mock.calls[0]![0]).toMatchObject({
+      regionId: ref.regionId, resourceType: 'ContainerGroup', limit: '20',
+      tag: [{ key: 'huahuo-gpu-allocation', value: allocationHash }],
+    });
+    expect(s.sdk.describeContainerGroupsWithOptions).toHaveBeenCalledTimes(1);
+    s.sdk.describeContainerGroupsWithOptions.mockResolvedValue(describeResponse({ vpcId: 'vpc-other' }));
+    await expect(s.provider.findByAllocation(spec, allocationHash)).rejects.toMatchObject({ kind: 'fatal', providerCode: 'InstanceVpcMismatch' });
+  });
+  it('rejects non-unique ownership and returns no identity for an empty reconciliation result', async () => {
+    const s = setup(), response = new ListTagResourcesResponse({ body: new ListTagResourcesResponseBody({tagResources:[]}) });
+    response.body!.nextToken = 'more-groups';
+    s.sdk.listTagResourcesWithOptions.mockResolvedValue(response);
+    await expect(s.provider.findByAllocation(spec, allocationHash)).rejects.toMatchObject({ kind: 'fatal', providerCode: 'AllocationNotUnique' });
+    response.body!.nextToken = undefined;
+    expect(await s.provider.findByAllocation(spec, allocationHash)).toBeNull();
+  });
+  it('ignores unrelated returned tags and never adopts another allocation', async () => {
+    const s = setup();
+    s.sdk.listTagResourcesWithOptions.mockResolvedValue(new ListTagResourcesResponse({body:new ListTagResourcesResponseBody({tagResources:[
+      new ListTagResourcesResponseBodyTagResources({resourceId:'eci-unrelated',resourceType:'ContainerGroup',tagKey:'managed-by',tagValue:'huahuo-server'}),
+      new ListTagResourcesResponseBodyTagResources({resourceId:'eci-unrelated',resourceType:'ContainerGroup',tagKey:'huahuo-gpu-allocation',tagValue:'b'.repeat(64)}),
+    ]})}));
+    expect(await s.provider.findByAllocation(spec,allocationHash)).toBeNull();
+    expect(s.sdk.describeContainerGroupsWithOptions).not.toHaveBeenCalled();
+    expect(s.sdk.deleteContainerGroupWithOptions).not.toHaveBeenCalled();
+  });
+  it('rejects two exact allocation identities before describing or deleting either',async()=>{
+    const s=setup();
+    s.sdk.listTagResourcesWithOptions.mockResolvedValue(new ListTagResourcesResponse({body:new ListTagResourcesResponseBody({tagResources:
+      ['eci-first','eci-second'].map(resourceId=>new ListTagResourcesResponseBodyTagResources({resourceId,resourceType:'ContainerGroup',tagKey:'huahuo-gpu-allocation',tagValue:allocationHash})),
+    })}));
+    await expect(s.provider.findByAllocation(spec,allocationHash)).rejects.toMatchObject({kind:'fatal',providerCode:'AllocationNotUnique'});
+    expect(s.sdk.describeContainerGroupsWithOptions).not.toHaveBeenCalled();
+  });
+});
 
 describe('official ECI request construction (no network)', () => {
   it('sets GPU count, multi-zone/multi-spec market policy and bounded workload settings', () => {

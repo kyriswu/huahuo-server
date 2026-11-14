@@ -1,6 +1,7 @@
 import { Alert, Button } from 'antd';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { AdminIdentity } from './session';
+import { UserManagement } from './users';
 
 type SampleRecord = {
   id: string;
@@ -49,15 +50,19 @@ export function Brand({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function WorkspaceNavigation({ collapsed }: { collapsed: boolean }) {
+type AdminPage = 'workbench' | 'users';
+const currentPage = (): AdminPage => window.location.hash === '#users' ? 'users' : 'workbench';
+
+function WorkspaceNavigation({ collapsed, page }: { collapsed: boolean; page: AdminPage }) {
+  const navigationStyle = (active: boolean) => `flex min-h-10 items-center gap-2.5 rounded-[10px] py-2 text-sm font-semibold whitespace-nowrap focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-console-accent ${active ? 'bg-console-accent-soft text-console-accent' : 'text-console-muted hover:bg-console-canvas hover:text-console-ink'} ${collapsed ? 'justify-center px-2.5' : 'px-3'}`;
   return (
     <aside id="workspace-sidebar" className="flex items-center justify-between gap-3 overflow-hidden border-b border-console-line bg-white px-4 py-3 md:sticky md:top-0 md:h-dvh md:flex-col md:items-stretch md:justify-start md:gap-0 md:border-r md:border-b-0 md:px-3 md:py-0">
       <div className={`md:flex md:h-16 md:items-center ${collapsed ? 'md:justify-center' : 'md:px-2'}`}>
         <Brand compact={collapsed} />
       </div>
-      <nav aria-label="管理后台导航" className="md:mt-6">
+      <nav aria-label="管理后台导航" className="flex gap-1 md:mt-6 md:flex-col">
         {!collapsed && <div aria-hidden="true" className="mb-2 hidden px-3 text-xs font-medium text-console-muted md:block">导航</div>}
-        <a href="#workbench" aria-current="page" title="工作台" className={`flex min-h-10 items-center gap-2.5 rounded-[10px] bg-console-accent-soft py-2 text-sm font-semibold whitespace-nowrap text-console-accent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-console-accent ${collapsed ? 'justify-center px-2.5' : 'px-3'}`}>
+        <a href="#workbench" aria-current={page === 'workbench' ? 'page' : undefined} title="工作台" className={navigationStyle(page === 'workbench')}>
           <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0">
             <rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.25" />
             <rect x="14" y="3.5" width="6.5" height="6.5" rx="1.25" />
@@ -65,6 +70,10 @@ function WorkspaceNavigation({ collapsed }: { collapsed: boolean }) {
             <rect x="14" y="14" width="6.5" height="6.5" rx="1.25" />
           </svg>
           <span className={collapsed ? 'sr-only' : undefined}>工作台</span>
+        </a>
+        <a href="#users" aria-current={page === 'users' ? 'page' : undefined} title="用户管理" className={navigationStyle(page === 'users')}>
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0"><circle cx="9" cy="8" r="3" /><path d="M3.5 20v-2a5.5 5.5 0 0 1 11 0v2M16 5.5a3 3 0 0 1 0 5.8M20.5 20v-2a5.5 5.5 0 0 0-3-4.9" /></svg>
+          <span className={collapsed ? 'sr-only' : undefined}>用户管理</span>
         </a>
       </nav>
     </aside>
@@ -135,10 +144,17 @@ interface WorkbenchProps {
   onLogout?: () => void;
   loggingOut?: boolean;
   error?: string;
+  onSessionExpired?: () => void;
 }
 
-export function Workbench({ admin, onLogout, loggingOut, error }: WorkbenchProps) {
+export function Workbench({ admin, onLogout, loggingOut, error, onSessionExpired }: WorkbenchProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarPreference);
+  const [page, setPage] = useState<AdminPage>(currentPage);
+  useEffect(() => {
+    const changed = () => setPage(currentPage());
+    window.addEventListener('hashchange', changed);
+    return () => window.removeEventListener('hashchange', changed);
+  }, []);
   const sidebarColumns = sidebarCollapsed ? 'md:grid-cols-[4.75rem_minmax(0,1fr)]' : 'md:grid-cols-[14rem_minmax(0,1fr)]';
 
   function toggleSidebar() {
@@ -153,7 +169,7 @@ export function Workbench({ admin, onLogout, loggingOut, error }: WorkbenchProps
 
   return (
     <div className={`min-h-dvh md:grid motion-safe:transition-[grid-template-columns] motion-safe:duration-200 ${sidebarColumns}`}>
-      <WorkspaceNavigation collapsed={sidebarCollapsed} />
+      <WorkspaceNavigation collapsed={sidebarCollapsed} page={page} />
 
       <div className="min-w-0">
         <header className="sticky top-0 z-10 flex min-h-16 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-console-line bg-white/95 px-3 py-2.5 backdrop-blur-sm sm:px-7 lg:px-9">
@@ -162,7 +178,7 @@ export function Workbench({ admin, onLogout, loggingOut, error }: WorkbenchProps
             <span aria-hidden="true" className="mr-1 h-5 w-px bg-console-line" />
             <span className="hidden text-console-muted sm:inline">管理后台</span>
             <span aria-hidden="true" className="hidden text-slate-400 sm:inline">/</span>
-            <span className="font-medium">工作台</span>
+            <span className="font-medium">{page === 'users' ? '用户管理' : '工作台'}</span>
           </div>
           <div className="flex min-w-0 items-center gap-2 sm:gap-4">
             {admin && (
@@ -178,10 +194,10 @@ export function Workbench({ admin, onLogout, loggingOut, error }: WorkbenchProps
           </div>
         </header>
 
-        <main id="workbench" className="mx-auto grid max-w-7xl scroll-mt-16 gap-5 px-4 pt-5 pb-10 sm:px-8 sm:pt-8 lg:px-10">
-          <WorkbenchHero />
+        <main id={page} className="mx-auto grid max-w-7xl scroll-mt-16 gap-5 px-4 pt-5 pb-10 sm:px-8 sm:pt-8 lg:px-10">
           {error && <Alert type="error" showIcon title={error} />}
-
+          {page === 'users' ? <UserManagement onSessionExpired={onSessionExpired} /> : <>
+          <WorkbenchHero />
           <Panel title="概况" titleId="overview-title">
             <dl aria-labelledby="overview-title" className="grid grid-cols-3 gap-2 p-3 sm:gap-4 sm:p-5">
               {stats.map(stat => (
@@ -224,6 +240,7 @@ export function Workbench({ admin, onLogout, loggingOut, error }: WorkbenchProps
               </tbody>
             </table>
           </Panel>
+          </>}
         </main>
       </div>
     </div>

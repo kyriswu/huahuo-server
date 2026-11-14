@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { CreateContainerGroupRequest, CreateContainerGroupRequestContainer, CreateContainerGroupRequestContainerEnvironmentVar, CreateContainerGroupRequestTag, DeleteContainerGroupRequest, DescribeContainerGroupsRequest } from '@alicloud/eci20180808';
+import { CreateContainerGroupRequest, CreateContainerGroupRequestContainer, CreateContainerGroupRequestContainerEnvironmentVar, CreateContainerGroupRequestTag, DeleteContainerGroupRequest, DescribeContainerGroupsRequest, ListTagResourcesRequest, ListTagResourcesRequestTag, CreateContainerGroupRequestContainerPort, CreateContainerGroupRequestContainerVolumeMount, CreateContainerGroupRequestVolume, CreateContainerGroupRequestVolumeEmptyDirVolume, CreateContainerGroupRequestAcrRegistryInfo } from '@alicloud/eci20180808';
 import { $OpenApiUtil } from '@alicloud/openapi-core';
 import { RetryOptions, RuntimeOptions } from '@darabonba/typescript';
 import { integer, invalid, prepareGpuSpotSpec, validateRef } from './spec.js';
@@ -12,6 +12,8 @@ export interface EciConnection {
   credentials: () => Promise<EciCredentials>;
   connectTimeoutMs?: number;
   readTimeoutMs?: number;
+  /** Inject only at the SDK boundary; credentials never enter allocation checkpoints/hashes. */
+  workloadRamCredentials?: boolean;
 }
 
 // Read the CommonJS export once, consistently in Node ESM and the test runner.
@@ -29,7 +31,7 @@ class EciFormDataClient extends EciClient {
     return super.callApi(params, request, runtime);
   }
 }
-export type EciSdkPort = Pick<EciSdkClient, 'createContainerGroupWithOptions' | 'describeContainerGroupsWithOptions' | 'deleteContainerGroupWithOptions'>;
+export type EciSdkPort = Pick<EciSdkClient, 'createContainerGroupWithOptions' | 'describeContainerGroupsWithOptions' | 'deleteContainerGroupWithOptions' | 'listTagResourcesWithOptions'>;
 export type EciNetworkQuery = (action: 'DescribeVSwitchAttributes' | 'DescribeSecurityGroupAttribute', query: Record<string, string>) => Promise<unknown>;
 
 function safeIdentifier(value: unknown): string | undefined {
@@ -64,14 +66,21 @@ export function buildEciCreateRequest(spec: PreparedGpuSpotSpec, clientToken: st
     clientToken,
     spotStrategy: spec.spot.strategy,
     ...(spec.spot.strategy === 'SpotWithPriceLimit' ? { spotPriceLimit: spec.spot.priceLimit } : {}),
-    spotDuration: spec.spotDuration,
+    spotDuration: spec.spot.strategy === 'NoSpot' ? undefined : spec.spotDuration,
     activeDeadlineSeconds: spec.activeDeadlineSeconds,
     gpuDriverVersion: spec.gpuDriverVersion,
     resourceGroupId: spec.resourceGroupId,
     scheduleStrategy: 'VSwitchRandom',
     restartPolicy: 'Never',
     autoCreateEip: false,
-    autoMatchImageCache: false,
+    autoMatchImageCache: spec.autoMatchImageCache ?? false,
+    ephemeralStorage: spec.extraStorageGiB,
+    acrRegistryInfo: spec.acrInstanceId ? [new CreateContainerGroupRequestAcrRegistryInfo({
+      instanceId: spec.acrInstanceId, regionId: spec.regionId, domain: [spec.image.split('/')[0]!],
+    })] : undefined,
+    volume: spec.sharedMemoryGiB ? [new CreateContainerGroupRequestVolume({ name: 'shm', type: 'EmptyDirVolume',
+      emptyDirVolume: new CreateContainerGroupRequestVolumeEmptyDirVolume({ medium: 'Memory', sizeLimit: `${spec.sharedMemoryGiB}Gi` }),
+    })] : undefined,
     tag: [
       new CreateContainerGroupRequestTag({ key: 'managed-by', value: 'huahuo-server' }),
       new CreateContainerGroupRequestTag({ key: 'huahuo-gpu-allocation', value: allocationHash }),
@@ -83,6 +92,8 @@ export function buildEciCreateRequest(spec: PreparedGpuSpotSpec, clientToken: st
       environmentVar: Object.entries(spec.environment).map(([key, value]) => new CreateContainerGroupRequestContainerEnvironmentVar({ key, value })),
       environmentVarHide: true,
       imagePullPolicy: 'IfNotPresent',
+      port: spec.port ? [new CreateContainerGroupRequestContainerPort({ port: spec.port, protocol: 'TCP' })] : undefined,
+      volumeMount: spec.sharedMemoryGiB ? [new CreateContainerGroupRequestContainerVolumeMount({ name: 'shm', mountPath: '/dev/shm', readOnly: false })] : undefined,
     })],
   });
 }
@@ -180,10 +191,47 @@ export class AliyunEciGpuProvider implements GpuSpotProvider {
     await this.preflight(prepared);
     const client = await this.sdk();
     try {
-      const response = await client.createContainerGroupWithOptions(buildEciCreateRequest(prepared, clientToken, allocationHash), this.runtime());
+      const request = buildEciCreateRequest(prepared, clientToken, allocationHash);
+      if (this.connection.workloadRamCredentials) {
+        const credentials = await this.connection.credentials();
+        if (!credentials.accessKeyId?.trim() || !credentials.accessKeySecret?.trim()) throw new EciProviderError('fatal', 'CredentialsUnavailable');
+        const values = { ALIYUN_RAM_ACCESS_KEY_ID: credentials.accessKeyId, ALIYUN_RAM_ACCESS_KEY_SECRET: credentials.accessKeySecret,
+          ...(credentials.securityToken ? { ALIYUN_RAM_SECURITY_TOKEN: credentials.securityToken } : {}) };
+        request.container![0]!.environmentVar = [
+          ...request.container![0]!.environmentVar!.filter(item => !['ALIYUN_RAM_ACCESS_KEY_ID', 'ALIYUN_RAM_ACCESS_KEY_SECRET', 'ALIYUN_RAM_SECURITY_TOKEN'].includes(item.key ?? '')),
+          ...Object.entries(values).map(([key, value]) => new CreateContainerGroupRequestContainerEnvironmentVar({ key, value })),
+        ];
+      }
+      const response = await client.createContainerGroupWithOptions(request, this.runtime());
       const body = response.body;
       if (!body?.containerGroupId || !/^eci-[a-zA-Z0-9]+$/.test(body.containerGroupId)) throw new EciProviderError('transient', 'InvalidResponse');
       return { containerGroupId: body.containerGroupId, requestId: safeIdentifier(body.requestId) };
+    } catch (error) { throw classifyEciError(error); }
+  }
+
+  /** Reconcile an ambiguous submission by its exact durable ownership tags; never by name. */
+  async findByAllocation(spec: Pick<GpuSpotSpec, 'regionId' | 'vpcId'>, ownerHash: string): Promise<GpuInstanceRef | null> {
+    this.assertRegion(spec.regionId);
+    if (!/^[a-f0-9]{64}$/.test(ownerHash)) invalid('allocationHash');
+    try {
+      const client = await this.sdk();
+      // DescribeContainerGroups.Tag was ignored in a real ECI response. Use the dedicated
+      // tag lookup, then still validate every returned tag, VPC and manager locally.
+      const response = await client.listTagResourcesWithOptions(new ListTagResourcesRequest({
+        regionId: spec.regionId, resourceType: 'ContainerGroup', limit: '20',
+        tag: [new ListTagResourcesRequestTag({ key: 'huahuo-gpu-allocation', value: ownerHash })],
+      }), this.runtime());
+      const tags = response.body?.tagResources;
+      if (!Array.isArray(tags)) throw new EciProviderError('transient', 'InvalidResponse');
+      const ids = [...new Set(tags.filter(tag => tag.resourceType === 'ContainerGroup'
+        && tag.tagKey === 'huahuo-gpu-allocation' && tag.tagValue === ownerHash).map(tag => tag.resourceId))];
+      if (ids.length > 1 || response.body?.nextToken) throw new EciProviderError('fatal', 'AllocationNotUnique');
+      if (!ids.length) return null;
+      if (!ids[0] || !/^eci-[a-zA-Z0-9]+$/.test(ids[0])) throw new EciProviderError('transient', 'InvalidResponse');
+      const ref = { regionId: spec.regionId, vpcId: spec.vpcId, containerGroupId: ids[0], allocationHash: ownerHash };
+      validateRef(ref);
+      if (!await this.describe(ref)) throw new EciProviderError('transient', 'InstanceMetadataPending');
+      return ref;
     } catch (error) { throw classifyEciError(error); }
   }
 

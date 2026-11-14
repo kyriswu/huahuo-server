@@ -18,7 +18,8 @@ import { NoteIndexService } from '../modules/ingestion/service.js';
 import { registerRagRoutes } from '../modules/rag/routes.js';
 import { RagIngestionRepository } from '../modules/rag/repository.js';
 import { RagQueryService, type RagQueryDependencies } from '../modules/rag/query-service.js';
-export async function buildApiServer(options: BuildOptions & IdentityOptions & { ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveAssets'> }) {
+import { RagImageLinks } from '../modules/rag/image-links.js';
+export async function buildApiServer(options: BuildOptions & IdentityOptions & { ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
  const pool=dependencies.pool??poolFor(options.config);
@@ -33,21 +34,13 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  registerIngestionRoutes(app,identity,new NoteIndexService(pool,options.config));
  const textIngestion=new TextIngestionService(pool,options.config);
  registerTextIngestionRoutes(app,identity,textIngestion);
+ const imageLinks=new RagImageLinks(pool,options.config,storageService);
  const ragQuery = new RagQueryService(pool,options.config,{
   ...options.ragQueryDependencies,
-  resolveTextAssets: (content,id,scope)=>textIngestion.renderAssets(scope,id,content,storageService.storage),
-  resolveAssets: async (content, versionId, scope) => {
-   const assets = await pool.query<{asset_ref:string;object_key:string}>('SELECT a.asset_ref,a.object_key FROM rag_document_assets a JOIN rag_ingestion_versions v ON v.id=a.version_id WHERE a.version_id=$1 AND v.user_id=$2 AND v.workspace_id=(SELECT id FROM workspaces WHERE user_id=$2 AND is_default AND state=\'ready\')',[versionId,scope.userId]);
-   let resolved = content;
-   for (const asset of assets.rows) {
-    const signed = storageService.storage.signUrl ? await storageService.storage.signUrl(asset.object_key, 900) : asset.asset_ref;
-    resolved = resolved.replaceAll(asset.asset_ref, signed);
-   }
-   return resolved;
-  },
+  resolveImages: (scope,images)=>imageLinks.resolve(scope,images),
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
- registerAssetRoutes(app,identity,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery));
+ registerAssetRoutes(app,identity,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery),storageService);
  registerRagRoutes(app,identity,new RagIngestionRepository(pool,options.config.rag,options.config.appEnv,options.config.kb.documentCollection,options.config),storageService.storage,ragQuery);
  registerTaskRoutes(app,identity,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
 }

@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { loadDocumentParserEciConfig, type DocumentParserEciConfig } from './document-parser-eci.js';
 
 type Env = Readonly<Record<string, string | undefined>>;
 interface ParserConfigBase {
@@ -20,6 +21,7 @@ export interface EcsDocumentParserConfig extends ParserConfigBase {
   regionId: string;
   instanceId: string;
   privateIp: string;
+  eciFallback?: DocumentParserEciConfig;
   credentials: () => Promise<{ accessKeyId: string; accessKeySecret: string; securityToken?: string }>;
 }
 export interface AlwaysOnDocumentParserConfig extends ParserConfigBase { mode: 'always-on' }
@@ -30,6 +32,7 @@ export function loadDocumentParserMachineConfig(env: Env = process.env): Documen
   const fail = (key: string): never => { throw new Error(`INVALID_CONFIG:${key}`); };
   const mode = env.DOCUMENT_PARSER_MODE ?? 'disabled';
   if (!['disabled', 'ecs', 'always-on'].includes(mode)) fail('DOCUMENT_PARSER_MODE');
+  if (mode !== 'ecs' && env.DOCUMENT_PARSER_ECI_FALLBACK_ENABLED === 'true') fail('DOCUMENT_PARSER_ECI_FALLBACK_ENABLED');
   if (mode === 'disabled') return { enabled: false };
   const required = (key: string) => env[key]?.trim() || fail(key);
   const integer = (key: string, fallback: number, min: number, max: number) => {
@@ -66,8 +69,10 @@ export function loadDocumentParserMachineConfig(env: Env = process.env): Documen
   if (!/^[a-z]{2,8}(?:-[a-z0-9]+)+$/.test(regionId)) fail('DOCUMENT_PARSER_ECS_REGION_ID');
   if (!/^i-[a-z0-9]{8,40}$/.test(instanceId)) fail('DOCUMENT_PARSER_ECS_INSTANCE_ID');
   required('ALIYUN_RAM_ACCESS_KEY_ID'); required('ALIYUN_RAM_ACCESS_KEY_SECRET');
+  const eciFallback = loadDocumentParserEciConfig(env, regionId);
   return {
     ...common, mode: 'ecs', regionId, instanceId, privateIp: privateIp!,
+    ...(eciFallback ? { eciFallback } : {}),
     // Resolve each time so the owning process can supply refreshable STS credentials.
     credentials: async () => ({
       accessKeyId: required('ALIYUN_RAM_ACCESS_KEY_ID'), accessKeySecret: required('ALIYUN_RAM_ACCESS_KEY_SECRET'),

@@ -21,7 +21,7 @@ export class AdminApiError extends Error {
   }
 }
 
-async function request<T>(path: 'me' | 'login' | 'logout', options?: RequestInit): Promise<T> {
+export async function adminRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`/admin/api/v1/${path}`, {
     credentials: 'same-origin',
     cache: 'no-store',
@@ -33,11 +33,11 @@ async function request<T>(path: 'me' | 'login' | 'logout', options?: RequestInit
 }
 
 export function getSession(signal: AbortSignal) {
-  return request<AdminSession>('me', { signal });
+  return adminRequest<AdminSession>('me', { signal });
 }
 
 export function login(credentials: Credentials) {
-  return request<AdminSession>('login', {
+  return adminRequest<AdminSession>('login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(credentials),
@@ -45,7 +45,7 @@ export function login(credentials: Credentials) {
 }
 
 export function logout(csrfToken: string) {
-  return request<{ revoked: boolean }>('logout', {
+  return adminRequest<{ revoked: boolean }>('logout', {
     method: 'POST',
     headers: { 'X-CSRF-Token': csrfToken },
   });

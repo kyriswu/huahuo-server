@@ -6,7 +6,6 @@ import { assertScope, DomainError, transaction, type Scope } from '../identity/s
 import { enqueueIntent, event } from '../tasks/model.js';
 import { fileProcessingSnapshot, type FileProcessingSnapshot } from '../rag/processing-profile.js';
 import { validateSourceUri, DocumentPreparationError } from '../rag/document-preparation.js';
-import type { StoragePort } from '../storage/port.js';
 import { assertCreateTextIngestionInput, assertManualTextEditable, assertUpdateTextIngestionInput } from './policy.js';
 import { TextIngestionSourceType, type TextIngestionJob, type TextIngestionStatus } from './types.js';
 
@@ -113,33 +112,6 @@ export class TextIngestionService {
         return textIngestionDto(updated);
       });
     });
-  }
-  async renderAssets(scope: Scope, id: string, content: string, storage: StoragePort): Promise<string> {
-    if (!content.includes('asset://')) return content;
-    const row = await transaction(this.pool, async tx => { await assertScope(tx, scope); return this.owned(tx, scope, id); });
-    const prefix = `text-ingestions/${id}/`;
-    if (!row.artifact_uri || !row.artifact_uri.startsWith(prefix) || !storage.signUrl) return content;
-    let manifest: unknown;
-    try {
-      const stream = await storage.read(row.artifact_uri), parts: Buffer[] = []; let size = 0;
-      try {
-        for await (const part of stream) {
-          const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part); size += bytes.byteLength;
-          if (size > this.config.rag.maxSourceBytes) return content;
-          parts.push(bytes);
-        }
-      } finally { stream.destroy(); }
-      manifest = JSON.parse(Buffer.concat(parts).toString('utf8')) as unknown;
-    } catch { return content; }
-    if (!manifest || typeof manifest !== 'object' || !('assets' in manifest) || !Array.isArray(manifest.assets)) return content;
-    let rendered = content;
-    for (const item of manifest.assets as unknown[]) {
-      if (!item || typeof item !== 'object') continue;
-      const asset = item as { assetRef?: unknown; objectKey?: unknown };
-      if (typeof asset.assetRef !== 'string' || !asset.assetRef.startsWith('asset://') || typeof asset.objectKey !== 'string' || !asset.objectKey.startsWith(prefix) || !rendered.includes(asset.assetRef)) continue;
-      try { rendered = rendered.replaceAll(asset.assetRef, await storage.signUrl(asset.objectKey, 900)); } catch { /* Keep the stable reference if the asset is missing. */ }
-    }
-    return rendered;
   }
   async retry(scope: Scope, id: string, key: string): Promise<TextIngestionJob> {
     return transaction(this.pool, async tx => {

@@ -1,5 +1,27 @@
 # 当前开发进度
 
+## 新prod-callback镜像 / 8核A10全文实测（2026-11-14）
+
+ECS真实启动NoStock后取得最低档8核/30GiB A10 ECI，新digest `152b65be…31a6c7`；325页核心353.849秒，完整请求361.897秒，325页/97表/768图引用，751对象SHA/解码全通过。UUID规范化后与旧48核A10全文一致，已知漏字及表格问题仍在；GPU均值4.16%、CPU1.709核，完整原始日志/时序/报告导出。
+
+调用侧切换新状态/结果分离协议，补202/410与终态ack；真实标签查询误报修为专用ListTagResources并严核归属。430项unit/contract、201项隔离PG/Redis通过（1跳过），静态检查/构建通过。ECI及753临时对象已清理，原PDF/ECS节省停机保留；业务回调路由/主栈未部署，App只读，不推进Pxx。见[验收](acceptance/xberg-a10-prod-callback.md)。
+
+## A10 按量 ECS 缺货回退 ECI（2026-11-14）
+
+既有解析机运行库增加可选回退：指定 A10 ECS 启动明确 NoStock 才创建 A10 NoSpot ECI，原队列/信号量共用；Redis 持久归属与意图，模糊提交/删除不重复申请，未知任务不释放，空闲删除确认后下周期优先 ECS。配置示例包含四交换机、8/16/32/48核单A10优先级与内网 r4 镜像。默认关闭，实际 `.env`、云资源和业务容器未操作，不推进 Pxx。验证和限制见[验收](acceptance/document-parser-eci-fallback.md)。
+
+## 图片 UUID 规范化与按需展示（2026-11-14）
+
+Note 保存先将已验证自有图片地址归一为稳定 UUID，再计算幂等摘要／SHA／差分；签名刷新不产生新 revision 或索引。当前正文引用与历史 part pin 分开，update 附件同步生效。编辑响应以独立 displayMarkdown／imageLinks 展示临时链接，规范正文保持不变。既有查询默认图片 ID，仅 links 模式为最终复核后的 topK 收集并解析图片，不读取原图或批量签全文图片。
+
+404 项 unit/contract、178 项真实隔离 PG/Redis/Milvus integration 和 typecheck/lint/build 通过；模型／解析／OSS 签名使用替身，不冒称真实供应商通过。App 只读且相关哈希一致，唯一迁移未改、外键 0；未部署主 Compose 或写开发 RDS/OSS。用户确认套餐／存储额度含义，已记录目录、计量和缩容方案，尚未实施迁移／套餐联动。不推进 Pxx。见[图片验收](acceptance/markdown-images.md)与[资源方案](runbooks/user-storage-layout.md)。
+
+## Admin 基础只读用户页面（2026-11-14）
+
+既有后台新增“用户管理”，展示昵称、用户 ID、已验证的脱敏手机号、状态和注册时间；支持昵称/完整 UUID 查询、状态筛选、20 条分页、刷新及复制 ID。只读管理 Session 路由与访问审计已接线，JWT、导出和用户写操作均不在本轮。
+
+394 项 unit/contract 与 167 项隔离真实 PG/Redis integration 通过（另 1 项无关 Milvus 用例跳过），typecheck/lint/build 通过。Safari 使用独立测试库验证实际登录、列表、筛选/分页、空结果、复制及桌面/390px 布局。开发 RDS 仅同步列级授权与基线校验，用户数据不变；本机四角色已更新窄范围覆盖镜像并全部 healthy/readiness 200。App 前后哈希一致，未修改。本轮不推进 Pxx，也不宣称整个 P14 完成。见[验收记录](acceptance/admin-users.md)。
+
 ## 服务器运维职责移出仓库（2026-11-14）
 
 域名入口、TLS 与证书续期的配置、脚本和运维文档已移出仓库，由宿主机独立管理；项目只维护应用监听、公开 URL 与可信代理设置。应用代码、Compose 和运行参数未改，本项目及远端解析服务保持停止。
@@ -9,7 +31,6 @@
 2页原生文本与扫描 PDF 通过真实 Xberg、OSS、PostgreSQL、Redis 和内网 Milvus 完成解析、关键词入库、查询及删除，权限隔离与产物完整性通过。随后325页完整 PDF 复测未通过：先遇 Worker 128MiB 临时磁盘 `ENOSPC`，重试解析后远端异步任务返回404，未完成全文入库及查询。详细结果和证据统一保留在[文档提取验收](acceptance/document-extraction.md)。
 
 两轮临时数据均已清理，原 PDF 保留；远端解析机已确认 `Stopped + StopCharging`，本项目容器恢复停止。原 `.env`、Schema 和凭据未改，未实施同步复测、任务保留时间或临时磁盘调整。测试服务器缺少 App 源码，App 验收为 `UNVERIFIED_APP`。
-
 ## Xberg 接入现有文件与关键词流水线（2026-11-14）
 
 现有 `/api/v1/rag/ingestions` PDF/Office 任务和 `FILE_UPLOAD` 已接到同一提取器/ECS-Redis 运行库，后续复用 document-keyword/BM25，不调用 Embedding/Rerank。完整 config 与母文件/解析批次 UUID 在受理时持久化；同步/异步、已知 job 恢复只 GET、模糊提交阻断、取消/删除晚到结果 fencing 已接通。规范正文原样保存，完整 JSON 无损 gzip、图片上传回执/资产关联另存；provider 转换前字节位置不冒充规范正文坐标。

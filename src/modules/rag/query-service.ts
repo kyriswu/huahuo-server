@@ -8,9 +8,13 @@ import {digest} from '../kb/split.js';
 import type {EmbeddingClient} from './adapters/embedding.js';
 import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,type RerankAdapter,type RagSearchCandidate} from './search.js';
 import {NoteQueryTiming} from './query-timing.js';
+import {imageResourceId,markdownImages,rewriteImageUrls,type MarkdownImage} from '../../lib/markdown-images.js';
 export type RagQueryMode='keyword'|'dense'|'hybrid';
-export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:KbSourceType;topK?:number;documentKey?:string;workspaceId?:string;filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
-export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveAssets?:(content:string,id:string,scope:Scope)=>Promise<string>;resolveTextAssets?:(content:string,id:string,scope:Scope)=>Promise<string>;}
+export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:KbSourceType;topK?:number;documentKey?:string;workspaceId?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
+export interface RagImageRequest{sourceType:KbSourceType;sourceId:string;workspaceId:string;sourceRevision:string;resourceId:string;}
+export interface RagImageLink{url:string;expiresAt:string;}
+export const ragImageKey=(image:RagImageRequest)=>JSON.stringify([image.sourceType,image.sourceId,image.workspaceId,image.sourceRevision,image.resourceId]);
+export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveImages?:(scope:Scope,images:RagImageRequest[])=>Promise<ReadonlyMap<string,RagImageLink>>;}
 interface ChunkRow{build_id:string;point_id:string;ordinal:number;source_start:number;source_end:number;content_hash:string;chunk_count:number;}
 export class RagQueryService {
  private indexes=new Map<string,HybridIndex>();private fallbackTotal=0;
@@ -41,6 +45,7 @@ export class RagQueryService {
  }
  async query(scope:Scope,input:RagQueryInput,timing=new NoteQueryTiming()):Promise<{mode:RagQueryMode;query:string;results:Array<Record<string,unknown>>}>{
   const query=input.query?.trim();if(!query||query.length>2000)throw new DomainError(400,'RAG_QUERY_INVALID');
+  if(input.assetMode&&!['ids','links'].includes(input.assetMode))throw new DomainError(400,'RAG_ASSET_MODE_INVALID');
   const sourceType=input.sourceType??'note';if(!['note','file','text'].includes(sourceType))throw new DomainError(400,'RAG_SOURCE_TYPE_INVALID');
   const note=sourceType==='note';const mode=note?input.mode??'hybrid':'keyword';
   if(note&&!['dense','keyword','hybrid'].includes(mode))throw new DomainError(400,'RAG_QUERY_MODE_INVALID');
@@ -86,12 +91,28 @@ export class RagQueryService {
    let ranked=candidates;
    if(note&&mode!=='keyword'&&this.rerank&&candidates.length){const result=await timing.measure('rerank',()=>rerankWithinBudget(this.rerank!,query,candidates,this.config.rag.noteRerankBudgetMs));ranked=result.candidates;if(result.fallback){timing.fallback=result.fallback;this.fallbackTotal++;}timing.fallbackTotal=this.fallbackTotal;}
    const current=new Map((await timing.measure('pg_recheck',()=>this.eligible(scope,input,sourceType))).map(b=>[b.id,b]));
-   const results=[];
-   for(const c of ranked.filter(c=>current.has(String(c.metadata!.buildId))).slice(0,topK)){
-    const renderer=sourceType==='text'?this.dependencies.resolveTextAssets:sourceType==='file'?this.dependencies.resolveAssets:undefined;
-    const content=renderer?await renderer(c.content,c.parentId!,scope):c.content;
-    results.push({...c,chunkId:c.chunkKey,sourceType,sourceRevision:c.metadata!.sourceRevision,sourceStart:c.metadata!.sourceStart,sourceEnd:c.metadata!.sourceEnd,part:note?'raw':null,revisionId:note?current.get(String(c.metadata!.buildId))!.note_revision_id:c.metadata!.sourceRevision,...(note?{partRevisionId:c.metadata!.sourceRevision}:{}),content,evidence:{child:content},context:null});
-   }
+   // Only final, rechecked topK chunks can request images. UUIDs stay in the
+   // evidence; expiring URLs are a separate view, never rerank input or offsets.
+   const parsed=new Map<string,MarkdownImage[]>(),requests=new Map<string,RagImageRequest>();
+   const selectedChunks=ranked.filter(c=>current.has(String(c.metadata!.buildId))).slice(0,topK).map(c=>{
+    const build=current.get(String(c.metadata!.buildId))!;
+    let all=parsed.get(build.id);
+    if(!all){try{all=markdownImages(loaded.get(build.id)!.content);}catch{all=[];}parsed.set(build.id,all);}
+    const start=Number(c.metadata!.sourceStart),end=Number(c.metadata!.sourceEnd);
+    const images=all.filter(image=>image.nodeStart<end&&image.nodeEnd>start&&imageResourceId(image.url)).map(image=>{
+     const request={sourceType,sourceId:build.source_id,workspaceId:build.workspace_id,sourceRevision:build.source_revision,resourceId:imageResourceId(image.url)!};
+     requests.set(ragImageKey(request),request);return {image,request};
+    });
+    return {c,build,start,end,images};
+   });
+   const links=input.assetMode==='links'&&requests.size&&this.dependencies.resolveImages?await this.dependencies.resolveImages(scope,[...requests.values()]):new Map<string,RagImageLink>();
+   const results=selectedChunks.map(({c,build,start,end,images})=>{
+    const replacements=new Map(images.flatMap(({image,request})=>{const link=links.get(ragImageKey(request));return link?[[image.url,link.url] as const]:[];}));
+    const localImages=images.map(({image})=>image).filter(image=>image.start>=start&&image.end<=end).map(image=>({...image,start:image.start-start,end:image.end-start}));
+    return {...c,chunkId:c.chunkKey,sourceType,sourceRevision:c.metadata!.sourceRevision,sourceStart:start,sourceEnd:end,part:note?'raw':null,revisionId:note?build.note_revision_id:c.metadata!.sourceRevision,...(note?{partRevisionId:c.metadata!.sourceRevision}:{}),
+     images:images.map(({image,request})=>({resourceId:request.resourceId,alt:image.alt,sourceStart:image.nodeStart,sourceEnd:image.nodeEnd,...links.get(ragImageKey(request))})),
+     ...(input.assetMode==='links'?{displayMarkdown:rewriteImageUrls(c.content,localImages,replacements)}:{}),evidence:{child:c.content},context:null};
+   });
    return {mode,query,results};
   }catch(e){if(e instanceof DomainError)throw e;throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE');}
  }

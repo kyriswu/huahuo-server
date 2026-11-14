@@ -35,7 +35,25 @@ export class StorageService {
   await tx.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,source_scene,file_name,mime_type,size_bytes,duration_seconds,sha256,object_key,object_version,storage_driver,storage_bucket,status,processing_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$1,$11,$12,$13,'ready','inspection_pending')`,[s.resource_id,s.user_id,s.workspace_id,s.upload_id,s.source_scene,s.file_name,s.mime_type,st.bytes,st.durationSeconds,st.sha256,st.version,s.storage_driver,s.storage_bucket]);
   await tx.query("UPDATE upload_sessions SET status='completed',received_bytes=$2,received_sha256=$3,verified_duration=$4,object_version=$5,updated_at=now() WHERE upload_id=$1",[uploadId,st.bytes,st.sha256,st.durationSeconds,st.version]);await tx.query("UPDATE storage_reservations SET status='confirmed',confirmed_bytes=$2,updated_at=now() WHERE reservation_id=$1 AND status='reserved'",[s.reservation_id,st.bytes]);
   await storageJob(tx,s.user_id,s.workspace_id,'inspect',s.resource_id);const q=await tx.query('SELECT * FROM resources WHERE resource_id=$1',[s.resource_id]);return {uploadId,status:'completed',resource:dto(q.rows[0])};});});}
- async playback(scope:Scope,id:string){if(!uuid(id))throw new DomainError(404,'RESOURCE_NOT_FOUND');const r=await transaction(this.pool,async tx=>{await assertScope(tx,scope);return tx.query("SELECT r.* FROM resources r JOIN workspaces w ON w.id=r.workspace_id WHERE resource_id=$1 AND r.user_id=$2 AND r.status='ready' AND w.state='ready'",[id,scope.userId]);});if(!r.rows[0])throw new DomainError(404,'RESOURCE_NOT_FOUND');const exp=Date.now()+15*60_000;const token=this.cap(id,exp);return {resourceId:id,url:`${this.config.appPublicBaseUrl}/api/v1/media/resources/${id}/object?playbackToken=${encodeURIComponent(token)}`,mimeType:r.rows[0].mime_type,fileName:r.rows[0].file_name,expiresAt:new Date(exp).toISOString()};}
+ async playbacks(scope:Scope,ids:string[],workspaceId?:string){
+  const unique=[...new Set(ids)];
+  if(unique.some(id=>!uuid(id))||unique.length>1000)throw new DomainError(400,'RESOURCE_IDS_INVALID');
+  if(!unique.length)return [];
+  const rows=await transaction(this.pool,async tx=>{
+   await assertScope(tx,scope);
+   return (await tx.query<{resource_id:string;mime_type:string;file_name:string}>(`SELECT r.resource_id,r.mime_type,r.file_name FROM resources r
+    JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready'
+    WHERE r.resource_id=ANY($1::uuid[]) AND r.user_id=$2 AND r.status='ready' AND ($3::uuid IS NULL OR r.workspace_id=$3)`,[unique,scope.userId,workspaceId??null])).rows;
+  });
+  const exp=Date.now()+15*60_000;
+  return rows.map(row=>({resourceId:row.resource_id,url:`${this.config.appPublicBaseUrl}/api/v1/media/resources/${row.resource_id}/object?playbackToken=${encodeURIComponent(this.cap(row.resource_id,exp))}`,mimeType:row.mime_type,fileName:row.file_name,expiresAt:new Date(exp).toISOString()}));
+ }
+ async playback(scope:Scope,id:string){
+  if(!uuid(id))throw new DomainError(404,'RESOURCE_NOT_FOUND');
+  const result=(await this.playbacks(scope,[id]))[0];
+  if(!result)throw new DomainError(404,'RESOURCE_NOT_FOUND');
+  return result;
+ }
  async download(id:string,token:string,range?:string){if(!uuid(id)||!this.verifyCap(id,token))throw new DomainError(401,'PLAYBACK_TOKEN_INVALID');const r=await this.pool.query("SELECT * FROM resources WHERE resource_id=$1 AND status='ready'",[id]);if(!r.rows[0])throw new DomainError(404,'RESOURCE_NOT_FOUND');const x=r.rows[0],size=Number(x.size_bytes);let start=0,end=size-1;if(range){const m=/^bytes=(\d*)-(\d*)$/.exec(range);if(!m||(!m[1]&&!m[2]))throw Object.assign(new DomainError(416,'RANGE_INVALID'),{size});if(m[1])start=Number(m[1]);if(m[2])end=Number(m[2]);else if(m[1])end=size-1;if(!m[1]){const suffix=Number(m[2]);if(!suffix)throw Object.assign(new DomainError(416,'RANGE_INVALID'),{size});start=Math.max(0,size-suffix);end=size-1;}if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||start>=size||start>end){throw Object.assign(new DomainError(416,'RANGE_INVALID'),{size});}end=Math.min(end,size-1);}return {stream:await this.storage.read(x.object_key,{start,end},x.object_version),mime:x.mime_type,size,start,end,fileName:x.file_name};}
  async remove(scope:Scope,workspaceId:string,id:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return idempotent(tx,this.config.appTokenSecret!,scope.userId,'media.delete',key,{workspaceId,id},async()=>{const r=await tx.query("SELECT * FROM resources WHERE resource_id=$1 AND user_id=$2 AND workspace_id=$3 FOR UPDATE",[id,scope.userId,workspaceId]);if(!r.rows[0])throw new DomainError(404,'RESOURCE_NOT_FOUND');if(['deleting','deleted'].includes(r.rows[0].status))return {resourceId:id,workspaceId,status:r.rows[0].status==='deleted'?'deleted':'delete_pending'};if((await tx.query('SELECT 1 FROM resource_refs WHERE resource_id=$1 LIMIT 1',[id])).rowCount)throw new DomainError(409,'RESOURCE_REFERENCED');await tx.query("UPDATE resources SET status='deleting' WHERE resource_id=$1",[id]);await storageJob(tx,scope.userId,workspaceId,'delete',id);return {resourceId:id,workspaceId,status:'delete_pending'};});});}
 }

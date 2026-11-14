@@ -75,7 +75,7 @@ curl --fail-with-body "$SERVER_BASE_URL/api/v1/rag/ingestions/$JOB_ID/extraction
 
 - `files` 和 JSON `file_contexts` 从同一有序文件数组生成，`config` 为完整 JSON 文本。文档必须有非 nil UUID；独立图片可为 null 上下文，低层客户端保留其原有响应语义。
 - 成功项按 `input_index` 回绑上下文，错误项按 `index` 保留。中间文件失败不会让后续文件的上下文前移。低层客户端保留部分成功和错误；业务每个母文件独立任务，失败项不发布成功索引。
-- 同步读取 `results[i].content`；异步只 POST 一次 `/extract-async`，先持久化 job_id 再 GET `/jobs/{job_id}`，completed 后解包 `result`。拿到可查询 job_id 的恢复只发 GET，不重新提交，也不重新下载母文件。
+- 同步读取 `results[i].content`；异步只 POST 一次 `/extract-async`，先持久化 job_id 再 GET `/jobs/{job_id}`。当前 prod-callback 镜像此端点只返回进度，completed 后 GET `/jobs/{job_id}/result` 领取 `result.results[i].content`，202继续等待、200完整输出会消费，410表示已消费。恢复只GET既有job，不重新提交或下载母文件；明确已消费但本地未保存时报不可自动重试的 `DOCUMENT_EXTRACTION_RESULT_CONSUMED`，不能假装成功或重新跑OCR。旧镜像的状态中内嵌result协议不再作为兼容分支。
 - `content_format=kb-markdown-v1`、普通 Markdown 表格、已有合并 HTML、KBIMAGE/KBFORMULA、pages/metadata/tables/counts/kb/source_nodes 等完整保存在原始产物。图片引用须有匹配的 `kb.uploaded_resources` 回执；UUID、上下文、hash、大小和 MIME 必须一致。拒绝图片 Base64、字节数组及容器路径字段。
 - `source_content_byte_range` 和 provider 的页边界属于转换前 core 内容，不能拿来截取返回的 `content`。原始定位数据保留在产物；Server TOC/片段位置重新基于已保存的规范正文生成，沿用现有 UTF-16 契约，资产 char_start/char_end 不填错误偏移。
 
@@ -88,6 +88,10 @@ curl --fail-with-body "$SERVER_BASE_URL/api/v1/rag/ingestions/$JOB_ID/extraction
 PG 的外部提交意图先于 POST 持久化。返回 job_id 时只允许关联同一已持久意图；即使取消或 lease 变化恰好赶上返回，也不丢弃已接受 job_id，但旧 Worker 不能发布业务结果。保存正文/产物引用/资产关联与外部完成状态在同一 Task lease 事务中提交，失联恢复只查询既有任务；没有 job_id 的模糊提交保持待核实，不盲目重发。恢复继续遵循原有最大尝试预算，耗尽或上游 job 过期时需要人工对账。
 
 现有 Task 取消意图驱动 DELETE；先持久记录取消已发出，再查询任务终态，DELETE 结果不明时只 GET、不重复 DELETE。远端已经 completed 的取消竞态也不发布被取消的正文/索引，不把本地取消当远端停止证明。删除正在解析的文档会同时取消原任务，晚到结果不能发布。
+
+终态取消/失败会 POST `/jobs/{id}/ack` 释放服务的未消费记录；成功领取已由GET结果接口消费，不再发送额外ack。完整执行配置仍是 [kbxml-request.json](../../resources/document-extraction/kbxml-request.json)，与用户本次JSON一致；服务端环境另见[无凭据模板](../../resources/document-extraction/a10-fast-callback-runtime.env.example)。当前样本镜像固定 `152b65be…31a6c7` digest，ECS与ECI必须一起更新到新异步协议，再启用这版客户端，不能只换调用端。
+
+服务的HTTP完整输出仅确认发送完成，无法保证客户端已持久保存；下载中断后若服务已经消费，当前调用侧会明确失败并保留诊断，不声称无损恢复。业务需要更强的交付保证时，应接独立鉴权/幂等的回调接收事务：保存后才2xx。本轮仅在隔离接收端验证回调，没有新增公开业务回调路由，也不把回调自动并入现有入库接口。
 
 Worker lease 变化会通知排队/启动等待及时退出；已经提交的解析不使用该本地取消信号冒充远端停止，而由持久取消意图和终态查询收尾。同步请求无法按 job_id 取消时，继续等待其响应再确认终态；不因为前端取消就提前释放已提交请求的 Redis 名额。
 

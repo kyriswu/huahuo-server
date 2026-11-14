@@ -29,10 +29,11 @@ export function prepareGpuSpotSpec(spec: GpuSpotSpec): PreparedGpuSpotSpec {
   const instanceTypes = list(spec.instanceTypes, 'instanceTypes', 5, /^ecs\.(?:s|v)?gn[0-9][a-z0-9-]*\.[a-z0-9]+$/);
   const image = string(spec.image, 'image', /^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,1023}$/);
   const gpuCount = integer(spec.gpuCount, 'gpuCount', 1, 16);
-  const activeDeadlineSeconds = integer(spec.activeDeadlineSeconds, 'activeDeadlineSeconds', 60, 604800);
   const spot = spec.spot ?? { strategy: 'SpotAsPriceGo' as const };
-  if (!['SpotAsPriceGo', 'SpotWithPriceLimit'].includes(spot.strategy)) invalid('spot.strategy');
-  let policy: PreparedGpuSpotSpec['spot'] = { strategy: 'SpotAsPriceGo' };
+  if (!['NoSpot', 'SpotAsPriceGo', 'SpotWithPriceLimit'].includes(spot.strategy)) invalid('spot.strategy');
+  const activeDeadlineSeconds = spec.activeDeadlineSeconds === undefined && spot.strategy === 'NoSpot'
+    ? undefined : integer(spec.activeDeadlineSeconds!, 'activeDeadlineSeconds', 60, 604800);
+  let policy: PreparedGpuSpotSpec['spot'] = { strategy: spot.strategy === 'NoSpot' ? 'NoSpot' : 'SpotAsPriceGo' };
   if (spot.strategy === 'SpotWithPriceLimit') {
     const price = spot.priceLimit;
     if (!Number.isFinite(price) || price <= 0 || Math.abs(price * 1000 - Math.round(price * 1000)) > 1e-7) invalid('spot.priceLimit');
@@ -40,6 +41,7 @@ export function prepareGpuSpotSpec(spec: GpuSpotSpec): PreparedGpuSpotSpec {
   } else if ('priceLimit' in spot) invalid('spot.priceLimit');
   const spotDuration = spec.spotDuration ?? 1;
   if (spotDuration !== 0 && spotDuration !== 1) invalid('spotDuration');
+  if (spec.autoMatchImageCache !== undefined && typeof spec.autoMatchImageCache !== 'boolean') invalid('autoMatchImageCache');
   const commands = (values: string[] | undefined, field: string, max: number) => {
     if (values !== undefined && (!Array.isArray(values) || values.length > max)) invalid(field);
     return (values ?? []).map(value => string(value, field, /^[\s\S]{1,256}$/));
@@ -57,6 +59,11 @@ export function prepareGpuSpotSpec(spec: GpuSpotSpec): PreparedGpuSpotSpec {
     spot: policy, spotDuration, command: commands(spec.command, 'command', 20), args: commands(spec.args, 'args', 10), environment,
     ...(spec.gpuDriverVersion === undefined ? {} : { gpuDriverVersion: string(spec.gpuDriverVersion, 'gpuDriverVersion', /^(?:tesla|grid)=\d{3}$/) }),
     ...(spec.resourceGroupId === undefined ? {} : { resourceGroupId: string(spec.resourceGroupId, 'resourceGroupId', /^rg-[a-zA-Z0-9]+$/) }),
+    ...(spec.port === undefined ? {} : { port: integer(spec.port, 'port', 1, 65535) }),
+    ...(spec.sharedMemoryGiB === undefined ? {} : { sharedMemoryGiB: integer(spec.sharedMemoryGiB, 'sharedMemoryGiB', 1, 16) }),
+    ...(spec.extraStorageGiB === undefined ? {} : { extraStorageGiB: integer(spec.extraStorageGiB, 'extraStorageGiB', 20, 2048) }),
+    ...(spec.autoMatchImageCache === undefined ? {} : { autoMatchImageCache: spec.autoMatchImageCache }),
+    ...(spec.acrInstanceId === undefined ? {} : { acrInstanceId: string(spec.acrInstanceId, 'acrInstanceId', /^cri-[a-zA-Z0-9]+$/) }),
   };
 }
 

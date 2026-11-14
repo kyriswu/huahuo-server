@@ -7,7 +7,7 @@ import { enqueueIntent, event } from '../tasks/model.js';
 import type { AppConfig } from '../../config/config.js';
 import { RagQueryService } from '../rag/query-service.js';
 import { NoteIndexService } from '../ingestion/service.js';
-import { attachResource } from '../storage/references.js';
+import { normalizeNoteParts, syncNoteRefs, pinPartImages, type NoteResourceRef } from './note-images.js';
 const sha=(v:string)=>createHash('sha256').update(v).digest('hex');
 const normalize=(v:string)=>v.trim().normalize('NFKC').toLocaleLowerCase();
 const etag=(id:string,version:number)=>`"note-${id}-${version}"`;
@@ -130,22 +130,59 @@ export class AssetService {
   const note=await this.createNote(scope,wid,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:reason?'needs-processing':'ready',parts:{raw:content,outline:'',germination:''}},key);
   return {status:reason?'needs-processing':'ready',supported:!reason,reason,note};
  }
- async createNote(scope:Scope,wid:string,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:Array<{resourceId:string;usage:string;anchor?:string;alt?:string}>;sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
+ async createNote(scope:Scope,wid:string,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:NoteResourceRef[];sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
   await assertScope(tx,scope);await this.workspace(tx,scope,wid);
-  return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'note.create',key,input,async()=>{
+  for(const part of Object.keys(input.parts))checkPart(part);
+  const normalized={...input,parts:await normalizeNoteParts(tx,scope,wid,input.parts,this.config)};
+  return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'note.create',key,normalized,async()=>{
    if(input.folderId){const f=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active' FOR SHARE",[input.folderId,wid]);if(!f.rowCount)throw new DomainError(404,'FOLDER_NOT_FOUND');}
    const id=randomUUID(),rid=randomUUID();
    await tx.query('INSERT INTO notes(note_id,workspace_id,folder_id,title,source_kind,source_id,note_revision_id,etag) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[id,wid,input.folderId??null,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1)]);
    await tx.query('UPDATE notes SET processing_status=$2 WHERE note_id=$1',[id,input.processingStatus??(input.parts.raw?.trim()?'ready':'needs-processing')]);
-   for(const part of parts){const text=input.parts[part]??'';checkPart(part);await tx.query('INSERT INTO note_part_revisions(part_revision_id,note_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,1,$4,$5)',[randomUUID(),id,part,text,sha(text)]);}
-   // Use the same resource lock as deletion before either relationship is saved.
-   for(const resourceId of [...new Set((input.resourceRefs??[]).map(ref=>ref.resourceId))].sort())await attachResource(tx,scope.userId,resourceId,'note',id,wid);
-   for(const [i,ref] of (input.resourceRefs??[]).entries())await tx.query('INSERT INTO note_resource_refs(note_id,resource_id,ref_order,usage,anchor,alt) VALUES($1,$2,$3,$4,$5,$6)',[id,ref.resourceId,i,ref.usage,ref.anchor??null,ref.alt??null]);
+   await syncNoteRefs(tx,scope,wid,id,normalized.parts,input.resourceRefs);
+   for(const part of parts){
+    const text=normalized.parts[part]??'',partRevisionId=randomUUID();
+    await tx.query('INSERT INTO note_part_revisions(part_revision_id,note_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,1,$4,$5)',[partRevisionId,id,part,text,sha(text)]);
+    await pinPartImages(tx,scope,wid,partRevisionId,text);
+   }
    await this.cursor(tx,wid,'note',id,'created',false,rid,1,null,null);await this.task(tx,scope,wid,id,rid);await this.indexNote(tx,scope,wid,id);
    return this.noteDto(tx,wid,id);
   });
  });}
- async updateNote(scope:Scope,wid:string,id:string,input:{title?:string;folderId?:string|null;parts?:Record<string,string>;resourceRefs?:Array<{resourceId:string;usage:string;anchor?:string;alt?:string}>},ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'note.update',key,{id,input,ifMatch},async()=>{const n=(await tx.query('SELECT * FROM notes WHERE note_id=$1 AND workspace_id=$2 FOR UPDATE',[id,wid])).rows[0];if(!n||n.state!=='active')throw new DomainError(404,'NOTE_NOT_FOUND');if(n.etag!==ifMatch)throw new DomainError(412,'NOTE_REVISION_MISMATCH');if(input.folderId!==undefined){if(input.folderId){const f=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active'",[input.folderId,wid]);if(!f.rowCount)throw new DomainError(404,'FOLDER_NOT_FOUND');}await tx.query('UPDATE notes SET folder_id=$2 WHERE note_id=$1',[id,input.folderId]);}if(input.title!==undefined)await tx.query('UPDATE notes SET title=$2 WHERE note_id=$1',[id,input.title.trim()]);const v=Number(n.note_revision)+1,rid=randomUUID();await tx.query('UPDATE notes SET note_revision=$2,note_revision_id=$3,etag=$4,updated_at=now() WHERE note_id=$1',[id,v,rid,etag(id,v)]);for(const part of Object.keys(input.parts??{})){checkPart(part);const text=input.parts![part]!;const latest=Number((await tx.query('SELECT coalesce(max(revision),0) v FROM note_part_revisions WHERE note_id=$1 AND part=$2',[id,part])).rows[0].v)+1;await tx.query('INSERT INTO note_part_revisions(part_revision_id,note_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),id,part,latest,text,sha(text)]);}if(input.parts?.raw!==undefined){await tx.query('UPDATE notes SET processing_status=$2 WHERE note_id=$1',[id,input.parts.raw.trim()?'ready':'needs-processing']);}await this.cursor(tx,wid,'note',id,'updated',false,rid,v,n.note_revision_id,Number(n.note_revision));await this.task(tx,scope,wid,id,rid);if(input.parts?.raw!==undefined)await this.indexNote(tx,scope,wid,id);return this.noteDto(tx,wid,id);});});}
+ async updateNote(scope:Scope,wid:string,id:string,input:{title?:string;folderId?:string|null;parts?:Record<string,string>;resourceRefs?:NoteResourceRef[]},ifMatch:string,key:string){
+  return transaction(this.pool,async tx=>{
+   await assertScope(tx,scope);await this.workspace(tx,scope,wid);
+   for(const part of Object.keys(input.parts??{}))checkPart(part);
+   // Normalize before the idempotency digest and before comparing revisions.
+   const normalized={...input,...(input.parts?{parts:await normalizeNoteParts(tx,scope,wid,input.parts,this.config)}:{})};
+   return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'note.update',key,{id,input:normalized,ifMatch},async()=>{
+    const n=(await tx.query('SELECT * FROM notes WHERE note_id=$1 AND workspace_id=$2 FOR UPDATE',[id,wid])).rows[0];
+    if(!n||n.state!=='active')throw new DomainError(404,'NOTE_NOT_FOUND');
+    if(n.etag!==ifMatch)throw new DomainError(412,'NOTE_REVISION_MISMATCH');
+    if(input.folderId){const f=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active' FOR SHARE",[input.folderId,wid]);if(!f.rowCount)throw new DomainError(404,'FOLDER_NOT_FOUND');}
+    const previous=(await tx.query<{part:string;revision:number;content_markdown:string}>('SELECT DISTINCT ON(part) part,revision,content_markdown FROM note_part_revisions WHERE note_id=$1 ORDER BY part,revision DESC',[id])).rows;
+    const complete=Object.fromEntries(previous.map(p=>[p.part,p.content_markdown]));
+    const changed=Object.entries(normalized.parts??{}).filter(([part,text])=>complete[part]!==text);
+    Object.assign(complete,normalized.parts??{});
+    const refsChanged=await syncNoteRefs(tx,scope,wid,id,complete,input.resourceRefs);
+    const title=input.title?.trim()??n.title,folderId=input.folderId===undefined?n.folder_id:input.folderId;
+    if(!changed.length&&!refsChanged&&title===n.title&&folderId===n.folder_id)return this.noteDto(tx,wid,id);
+    const v=Number(n.note_revision)+1,rid=randomUUID();
+    await tx.query('UPDATE notes SET title=$2,folder_id=$3,note_revision=$4,note_revision_id=$5,etag=$6,updated_at=now() WHERE note_id=$1',[id,title,folderId,v,rid,etag(id,v)]);
+    for(const [part,text] of changed){
+     const revision=Number(previous.find(p=>p.part===part)?.revision??0)+1,partRevisionId=randomUUID();
+     await tx.query('INSERT INTO note_part_revisions(part_revision_id,note_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,$4,$5,$6)',[partRevisionId,id,part,revision,text,sha(text)]);
+     await pinPartImages(tx,scope,wid,partRevisionId,text);
+    }
+    const rawChanged=changed.some(([part])=>part==='raw');
+    if(rawChanged)await tx.query('UPDATE notes SET processing_status=$2 WHERE note_id=$1',[id,complete.raw?.trim()?'ready':'needs-processing']);
+    await this.cursor(tx,wid,'note',id,'updated',false,rid,v,n.note_revision_id,Number(n.note_revision));
+    await this.task(tx,scope,wid,id,rid);
+    if(rawChanged)await this.indexNote(tx,scope,wid,id);
+    return this.noteDto(tx,wid,id);
+   });
+  });
+ }
  async putNotePart(scope:Scope,wid:string,id:string,part:string,markdown:string,basePartRevisionId:string,ifMatch:string,key:string){checkPart(part);return this.updateNote(scope,wid,id,{parts:{[part]:markdown}},ifMatch,key);}
  async batchMove(scope:Scope,wid:string,folderId:string|null,notes:Array<{noteId:string;etag:string}>,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return idempotent(tx,this.secret,scope.userId,'note.batch-move',key,{folderId,notes},async()=>{if(folderId){const f=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active'",[folderId,wid]);if(!f.rowCount)throw new DomainError(404,'FOLDER_NOT_FOUND');}const receipts=[];for(const item of notes){const n=(await tx.query('SELECT * FROM notes WHERE note_id=$1 AND workspace_id=$2 FOR UPDATE',[item.noteId,wid])).rows[0];if(!n) {receipts.push({noteId:item.noteId,status:'not_found'});continue;}if(n.etag!==item.etag){receipts.push({noteId:item.noteId,status:'conflict'});continue;}const v=Number(n.note_revision)+1,rid=randomUUID();await tx.query('UPDATE notes SET folder_id=$2,note_revision=$3,note_revision_id=$4,etag=$5,updated_at=now() WHERE note_id=$1',[item.noteId,folderId,v,rid,etag(item.noteId,v)]);await this.cursor(tx,wid,'note',item.noteId,'moved',false,rid,v,n.note_revision_id,Number(n.note_revision));receipts.push({noteId:item.noteId,status:'moved',etag:etag(item.noteId,v)});}return {notes:receipts};});});}
  async notePart(scope:Scope,wid:string,id:string,part:string,partRevisionId?:string){checkPart(part);return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);

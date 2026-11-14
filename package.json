@@ -76,6 +76,7 @@
     "jose": "6.1.0",
     "mammoth": "1.13.0",
     "markdown-it": "15.0.3",
+    "mdast-util-from-markdown": "2.0.3",
     "music-metadata": "12.1.0",
     "pdf-parse": "1.1.1",
     "pg": "8.16.3"

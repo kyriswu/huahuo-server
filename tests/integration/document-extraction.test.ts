@@ -39,17 +39,28 @@ let hold=false,lastResponse:ExtractionResponse|undefined;
 let onGet:(()=>Promise<void>)|undefined;
 let beforeAsyncReply:(()=>Promise<void>)|undefined;
 const requests:Array<{contexts:Array<FileContext|null>;config:unknown}> = [];
-const remoteJobs=new Map<string,{response:ExtractionResponse;cancelled:boolean}>();
+const remoteJobs=new Map<string,{response:ExtractionResponse;cancelled:boolean;consumed?:boolean}>();
 const errors:unknown[]=[];
 const server=createServer((req,res)=>{void(async()=>{
  if(req.url==='/source.pdf'){sourceReads++;res.writeHead(200,{'content-type':'application/pdf'});res.end(pdf);return;}
- const jobMatch=/^\/jobs\/([A-Za-z0-9_-]+)$/.exec(req.url??'');
+ const jobMatch=/^\/jobs\/([A-Za-z0-9_-]+)(?:\/(result|ack))?$/.exec(req.url??'');
  if(jobMatch){
   const job=remoteJobs.get(jobMatch[1]!);if(!job){res.writeHead(404);res.end('{}');return;}
   if(req.method==='DELETE'){deleteCount++;job.cancelled=true;if(scenario==='cancel-error'){scenario='success';res.writeHead(503);res.end('{}');return;}}
   await onGet?.();
   if(failGet&&req.method==='GET'){failGet=false;res.writeHead(503);res.end('{}');return;}
-  res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({job_id:jobMatch[1],state:job.cancelled?'cancelled':hold?'running':'completed',result:job.cancelled||hold?null:job.response}));return;
+  const state=job.cancelled?'cancelled':hold?'running':'completed';
+  if(jobMatch[2]==='ack'){
+   if(state==='running'){res.writeHead(409);res.end('{}');return;}
+   job.consumed=true;res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({job_id:jobMatch[1],state,result_state:'consumed'}));return;
+  }
+  if(jobMatch[2]==='result'){
+   if(job.consumed){res.writeHead(410);res.end('{}');return;}
+   res.writeHead(state==='running'?202:200,{'content-type':'application/json'});
+   res.end(JSON.stringify({job_id:jobMatch[1],state,...(state==='completed'?{result:job.response}:{})}));
+   if(state!=='running')job.consumed=true;return;
+  }
+  res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({job_id:jobMatch[1],state,result_state:job.consumed?'consumed':state==='running'?'pending':'available'}));return;
  }
  if(req.method==='POST'&&['/extract','/extract-async'].includes(req.url??'')){
   postCount++;const parts:Buffer[]=[];for await(const b of req)parts.push(Buffer.from(b));
