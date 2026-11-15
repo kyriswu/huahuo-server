@@ -226,7 +226,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     httpRequestTimeoutMs, httpConnectionTimeoutMs,
     shutdownTimeoutMs: integer('SHUTDOWN_TIMEOUT_MS', role === 'scheduler' ? 30000 : 300000, 1000, 3600000),
     ssl: sslMode === 'verify-full' ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false,
-    statementTimeout: integer('DATABASE_STATEMENT_TIMEOUT_MS', 5000, 100, 60000),
+    statementTimeout: integer('DATABASE_STATEMENT_TIMEOUT_MS', role === 'migrate' ? 30000 : 5000, 100, 60000),
     redisCacheUrl: role === 'migrate' ? '' : url('REDIS_CACHE_URL', ['redis:', 'rediss:']),
     redisQueueUrl: role === 'migrate' ? '' : url('REDIS_QUEUE_URL', ['redis:', 'rediss:']),
     schemaMinVersion: integer('DB_SCHEMA_MIN_VERSION', 1, 1, 99999), instanceId: randomUUID(), logLevel,

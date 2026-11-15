@@ -16,6 +16,8 @@
 !scripts/healthcheck.mjs
 
 !scripts/rag-consistency.mjs
+!scripts/release/
+!scripts/release/**
 
 !resources/
 !resources/**

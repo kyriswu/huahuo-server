@@ -1,5 +1,7 @@
 # 测试服务器自动发布接口
 
+以下记录首次接通时的接口与准备情况。其真实自动化后来在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过；迁移、候选配置与验收的可复用规范见[标准发布](standard-release.md)，后续启用状态见[标准发布验收](../acceptance/standard-release.md)。
+
 本流程用于已确认的北京 ECS 测试机，不等同于生产完整发布验收。`Server CI` 已在 [PR #1](https://github.com/kyriswu/huahuo-server/pull/1) 与合并后的 main 上真实通过。main 的活动规则要求 PR、同名检查通过及分支更新到最新，并禁止强推/删除，无绕过名单。个人维护允许审批人数为 0。
 
 ## 触发与身份

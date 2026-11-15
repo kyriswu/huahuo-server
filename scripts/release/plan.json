@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "20261115-standard-release",
+  "baseRevision": "1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da",
+  "services": ["api-server", "admin", "worker", "scheduler"],
+  "database": {
+    "migrations": [],
+    "verifySql": "scripts/release/changes/20261115-standard-release/verify-db.sql",
+    "dataChange": { "mode": "none", "reason": "本期改进发布执行与校验，不改变业务数据库结构或数据。" }
+  },
+  "configuration": {
+    "mode": "reuse",
+    "changes": [
+      { "key": "MIGRATION_STATEMENT_TIMEOUT_MS", "operation": "add", "roles": ["migrate"], "required": false, "hasDefault": true },
+      { "key": "MIGRATION_LOCK_TIMEOUT_MS", "operation": "add", "roles": ["migrate"], "required": false, "hasDefault": true }
+    ],
+    "reviewedFiles": [".env.example", "compose.yaml", "src/config/config.ts"]
+  },
+  "dependencies": [],
+  "backfill": { "required": false, "reference": null },
+  "compatibility": { "database": true, "api": true, "tasks": true, "configuration": true },
+  "smoke": "health"
+}

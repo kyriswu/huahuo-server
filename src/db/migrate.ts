@@ -1,10 +1,15 @@
-import { readFile, readdir } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import type pg from 'pg';
 import type { AppConfig } from '../config/config.js';
 import { poolFor } from '../plugins/dependencies.js';
+import { loadMigrationFiles, pendingMigrations, type MigrationHistory } from './migration-files.js';
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+export class MigrationExecutionError extends Error {
+  readonly applied: number[];
+  constructor(readonly code: string, readonly failedVersion: number, applied: readonly number[], cause: unknown) {
+    super(code, { cause }); this.name = 'MigrationExecutionError'; this.applied = [...applied];
+  }
+}
 async function assertNoPhysicalForeignKeys(client: pg.PoolClient, code: string): Promise<void> {
   const result = await client.query<{ present: boolean }>(`SELECT EXISTS (
     SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace
@@ -12,14 +17,41 @@ async function assertNoPhysicalForeignKeys(client: pg.PoolClient, code: string):
       AND n.nspname<>'information_schema') AS present`);
   if (result.rows[0]?.present) throw new Error(code);
 }
-export async function migrate(config: AppConfig, directory = resolve('migrations')) {
-  const pool = poolFor(config); pool.on('error', () => undefined);
+async function readHistory(client: pg.PoolClient): Promise<{ exists: boolean; rows: MigrationHistory[] }> {
+  const found = await client.query<{ name: string | null }>("SELECT to_regclass('public.schema_migrations')::text AS name");
+  if (!found.rows[0]?.name) return { exists: false, rows: [] };
+  return { exists: true, rows: (await client.query<MigrationHistory>('SELECT version,checksum FROM public.schema_migrations ORDER BY version')).rows };
+}
+async function waitForDatabase(pool: pg.Pool, config: AppConfig) {
   const deadline = Date.now() + config.connectDeadlineMs;
+  while (true) {
+    try { await pool.query('SELECT 1'); return; }
+    catch { if (Date.now() >= deadline) throw new Error('DATABASE_CONNECT_DEADLINE'); await pause(500); }
+  }
+}
+export async function preflightMigrations(config: AppConfig, directory = resolve('migrations')) {
+  const files = loadMigrationFiles(directory);
+  const pool = poolFor(config); pool.on('error', () => undefined);
   try {
-    while (true) {
-      try { await pool.query('SELECT 1'); break; }
-      catch { if (Date.now() >= deadline) throw new Error('DATABASE_CONNECT_DEADLINE'); await pause(500); }
-    }
+    await waitForDatabase(pool, config);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN READ ONLY');
+      const history = await readHistory(client);
+      const pending = pendingMigrations(files, history.rows);
+      await assertNoPhysicalForeignKeys(client, 'DATABASE_FOREIGN_KEYS_FORBIDDEN');
+      await client.query('COMMIT');
+      return { applied: history.rows.map(row => row.version), pending: pending.map(file => file.version),
+        current: history.rows.at(-1)?.version ?? 0, target: files.at(-1)!.version };
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  } finally { await pool.end(); }
+}
+export async function migrate(config: AppConfig, directory = resolve('migrations')) {
+  const files = loadMigrationFiles(directory);
+  const pool = poolFor(config); pool.on('error', () => undefined);
+  try {
+    await waitForDatabase(pool, config);
     const client = await pool.connect();
     let locked = false;
     try {
@@ -29,36 +61,33 @@ export async function migrate(config: AppConfig, directory = resolve('migrations
         locked = result.rows[0]?.locked === true;
         if (!locked) { if (Date.now() >= lockDeadline) throw new Error('MIGRATION_LOCK_TIMEOUT'); await pause(100); }
       }
-      await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      const history = await readHistory(client);
+      const pending = pendingMigrations(files, history.rows);
+      await assertNoPhysicalForeignKeys(client, 'DATABASE_FOREIGN_KEYS_FORBIDDEN');
+      // No DDL precedes validation of every historical checksum and version.
+      if (!history.exists) await client.query(`CREATE TABLE public.schema_migrations (
         version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
-      const files = (await readdir(directory)).filter(f => /^\d{4}_[a-z0-9_]+\.sql$/.test(f)).sort();
       const applied: number[] = [];
-      for (const name of files) {
-        const version = Number(name.slice(0, 4));
-        const content = await readFile(resolve(directory, name), 'utf8');
-        const checksum = createHash('sha256').update(content).digest('hex');
-        const existing = await client.query<{ checksum: string }>('SELECT checksum FROM schema_migrations WHERE version=$1', [version]);
-        if (existing.rows[0]) {
-          if (existing.rows[0].checksum !== checksum) throw new Error('MIGRATION_CHECKSUM_MISMATCH');
-          continue;
-        }
+      for (const { version, sql, checksum } of pending) {
         await client.query('BEGIN');
         try {
-          await client.query(content);
+          await client.query("SELECT set_config('lock_timeout',$1,true)", [`${config.migrationLockTimeoutMs}ms`]);
+          await client.query(sql);
           await assertNoPhysicalForeignKeys(client, 'MIGRATION_FOREIGN_KEYS_FORBIDDEN');
-          await client.query('INSERT INTO schema_migrations(version,checksum) VALUES ($1,$2)', [version, checksum]);
+          await client.query('INSERT INTO public.schema_migrations(version,checksum) VALUES ($1,$2)', [version, checksum]);
           await client.query('COMMIT'); applied.push(version);
         } catch (error) {
           await client.query('ROLLBACK');
-          if (error instanceof Error && error.message === 'MIGRATION_FOREIGN_KEYS_FORBIDDEN') throw error;
-          throw new Error('MIGRATION_SQL_FAILED', { cause: error });
+          const code = error instanceof Error && error.message === 'MIGRATION_FOREIGN_KEYS_FORBIDDEN'
+            ? 'MIGRATION_FOREIGN_KEYS_FORBIDDEN' : 'MIGRATION_SQL_FAILED';
+          throw new MigrationExecutionError(code, version, applied, error);
         }
       }
       await assertNoPhysicalForeignKeys(client, 'DATABASE_FOREIGN_KEYS_FORBIDDEN');
-      return { applied, current: files.length ? Number(files.at(-1)?.slice(0, 4)) : 0 };
+      return { applied, current: files.at(-1)!.version };
     } finally {
-      if (locked) await client.query('SELECT pg_advisory_unlock(72701, 1)');
-      client.release();
+      try { if (locked) await client.query('SELECT pg_advisory_unlock(72701, 1)'); }
+      finally { client.release(); }
     }
   } finally { await pool.end(); }
 }
