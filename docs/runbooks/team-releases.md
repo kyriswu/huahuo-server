@@ -51,7 +51,7 @@ node scripts/release/test-publish.mjs --pr <test目标PR编号>
 node scripts/release/test-publish.mjs --pr <编号> --resume
 ```
 
-运行环境提供 `GH_TOKEN`，需要该仓库读取、PR/Contents 合并与 Actions 触发权限；不在命令参数、仓库或日志中放令牌，脚本不绕过 GitHub 的分支/负责人规则。它只接受本仓库目标为 test 的 PR，锁定 head、检查 CI、调用合并 API、等待合并后的 test push CI，再从 main 触发固定测试 workflow 并按返回的 run ID 等待终态。main 保护、test Skill 负责人审核、云端固定实例及五阶段门禁不变。
+运行环境提供 `GH_TOKEN`（已有 GitHub App／用户授权身份），需要该仓库读取、PR/Contents 合并与 Actions 触发权限。不要用内置 GITHUB_TOKEN 完成合并：GitHub 会抑制它触发的 push CI，脚本会停在等待 CI 而不能发布；脚本不因此改用未经约定的 CI 事件或绕过检查。不在命令参数、仓库或日志中放令牌，脚本不绕过 GitHub 的分支/负责人规则。它只接受本仓库目标为 test 的 PR，锁定 head、检查 CI、调用合并 API、等待合并后的 test push CI，再从 main 触发固定测试 workflow 并按返回的 run ID 等待终态。main 保护、test Skill 负责人审核、云端固定实例及五阶段门禁不变。
 
 发布 Skill/CODEOWNERS 只能自动同步 owner 已合入 main 的相同内容。纯文档/归属变更跳过应用部署；owner 已审 main 同步若仅额外包含这份发布控制器及其单测，也不重建应用。其他脚本、SQL、ENV 或业务变更不会进入此例外。程序保存 `.local/test-publish/pr-<编号>.json`，锁文件拒绝并发执行，状态原子更新；合并响应丢失可只读确认并续查。dispatch 响应不明确时保留 `dispatching` 并拒绝再次触发，须先核对已有 GitHub run；不删除状态盲目重跑。进程异常留下的锁也须确认无在途进程/发布后再处理。
 
