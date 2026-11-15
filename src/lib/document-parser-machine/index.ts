@@ -11,6 +11,8 @@ import { ParserMachineIdleMonitor, type MonitorEvents } from './monitor.js';
 export { ParserMachineError, ParserMachineRedis } from './redis.js';
 export type { MachineState, MachinePhase } from './redis.js';
 export interface ParserRequest {
+  /** Durable callers yield instead of holding a Worker slot while queueing/booting. */
+  step?:boolean;
   /** Cancels queue/startup waiting only. Submitted durable work uses its remote cancellation protocol. */
   admissionSignal?:AbortSignal;
   /** Internal recovery only: take over the existing slot and QUERY a persisted remote job; never resubmit. */
@@ -30,6 +32,9 @@ export class ParserExecutionError extends Error {
     super(/^[A-Z][A-Z0-9_]{0,95}$/.test(code) ? code : 'DOCUMENT_PARSER_EXECUTION_FAILED');
     this.name = 'ParserExecutionError';
   }
+}
+export class ParserExecutionDeferred extends Error {
+  constructor(readonly phase:'admitting'|'external',readonly delayMs=60000){super('DOCUMENT_PARSER_DEFERRED');this.name='ParserExecutionDeferred';}
 }
 function identity(input: ParserRequest): string {
   if (!input.requestId.trim() || input.requestId.length > 256 || !/^[a-f0-9]{64}$/.test(input.fingerprint)) throw new ParserMachineError('DOCUMENT_PARSER_REQUEST_INVALID');
@@ -142,12 +147,14 @@ export class DocumentParserMachine {
       while(true){
         const result=await this.state.recoverAdmission(id,owner,input.fingerprint);
         if(result!=='wait'){admissionResumed=result==='resumed';break;}
+        if(input.step)throw new ParserExecutionDeferred('admitting',3000);
         if(Date.now()>=deadline)throw new ParserMachineError('DOCUMENT_PARSER_RESUME_TIMEOUT');
         await pause(this.config.pollMs,admissionSignal);
       }
     }else if(input.resume){
       const deadline=Date.now()+this.config.startupTimeoutMs;
       while(!await this.state.resume(id,owner,input.fingerprint)){
+        if(input.step)throw new ParserExecutionDeferred('external',60000);
         if(Date.now()>=deadline)throw new ParserMachineError('DOCUMENT_PARSER_RESUME_TIMEOUT');
         await pause(this.config.pollMs,admissionSignal);
       }
@@ -159,17 +166,21 @@ export class DocumentParserMachine {
       });
     };
     timer = setTimeout(pulse, Math.floor(this.config.leaseMs / 3)); timer.unref();
-    let submitted = Boolean(input.resume), outcome: 'succeeded' | 'failed' | 'cancelled' | 'unknown' = input.resume?'unknown':'cancelled', value: T | undefined, failure: unknown;
+    let submitted = Boolean(input.resume), outcome: 'succeeded' | 'failed' | 'cancelled' | 'unknown'|'admitting'|'external' = input.resume?'unknown':'cancelled', value: T | undefined, failure: unknown;
     try {
       const queueDeadline = Date.now() + this.config.queueTimeoutMs;
       while (!input.resume&&!admissionResumed&&!await this.state.claim(id, owner)) {
+        if(input.step)throw new ParserExecutionDeferred('admitting',3000);
         assertNotAborted(admissionSignal);
         if (Date.now() >= queueDeadline) throw new ParserMachineError('DOCUMENT_PARSER_QUEUE_TIMEOUT');
         // Also reconcile a stop already underway, so a caller can work without a local timer.
         await this.tick();
         await pause(this.config.pollMs, admissionSignal);
       }
-      await this.ready(id, owner, admissionSignal);
+      if(input.step&&input.resume){/* A persisted job is queried on its original service; never restart it to resume. */}
+      else if(input.step){
+        if(!await this.online(id,owner)||!await this.healthy(await this.context(admissionSignal)))throw new ParserExecutionDeferred('admitting',3000);
+      }else await this.ready(id, owner, admissionSignal);
       assertNotAborted(admissionSignal);
       await this.state.renew(id, owner);
       assertNotAborted(admissionSignal);
@@ -179,9 +190,12 @@ export class DocumentParserMachine {
       value = await execute(context);
       outcome = 'succeeded';
     } catch (error) {
+      if(error instanceof ParserExecutionDeferred){outcome=error.phase;failure=error;}
+      else{
       outcome = !submitted ? 'cancelled' : error instanceof ParserExecutionError && error.outcome === 'settled' ? 'failed' : 'unknown';
       failure = !submitted && (error instanceof ParserMachineError || error instanceof EcsPowerError) ? error
         : new ParserMachineError(outcome === 'unknown' ? 'DOCUMENT_PARSER_EXECUTION_UNKNOWN' : 'DOCUMENT_PARSER_EXECUTION_FAILED');
+      }
     } finally {
       closed = true; if (timer) clearTimeout(timer); await heartbeat;
       try { await this.state.finish(id, owner, input.fingerprint, outcome); }

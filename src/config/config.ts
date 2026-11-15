@@ -1,14 +1,15 @@
 import type { QueueName } from '../modules/tasks/model.js';
+import { loadMetricsConfig, type MetricsConfig } from './metrics.js';
+import { loadApiServiceBaseUrl } from './service-addresses.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
 import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
-import type { DocumentExtractionConfig } from './document-extraction.js';
 import { scopedConfig } from '../modules/runtime-settings/service.js';
 export type Role = 'api-server' | 'admin' | 'worker' | 'scheduler' | 'migrate';
 export type Env = Record<string, string | undefined>;
 export interface AppConfig {
-  documentExtraction: DocumentExtractionConfig;
+  metrics: MetricsConfig;
   processingNodes: ProcessingNodesConfig;
   runtimeRevision: number;
   uploadHardMaxBytes: number;
@@ -16,6 +17,7 @@ export interface AppConfig {
   queuePrefix:string; workerQueues:QueueName[]; taskLeaseMs:number; taskRedeliveryMs:number; schedulerIntervalMs:number; demoTasks:boolean; testTaskDelayMs:number;
   role: Role; host: string; port: number; databaseUrl: string; poolMax: number;
   httpRequestTimeoutMs: number; httpConnectionTimeoutMs: number;
+  shutdownTimeoutMs: number;
   ssl: false | { rejectUnauthorized: true; ca?: string };
   statementTimeout: number; redisCacheUrl: string; redisQueueUrl: string;
   schemaMinVersion: number; instanceId: string; logLevel: string;
@@ -29,6 +31,7 @@ export interface AppConfig {
   billingMode: 'disabled' | 'development' | 'live'; billingPolicyVersion: string;
   storageDriver: 'local' | 's3' | 'aliyun-oss'; storageLocalRoot: string; maxUploadBytes: number;
   appPublicBaseUrl: string;
+  apiServiceBaseUrl?: string;
   storageQuotaBytes:number;
   tagExtractorProvider: 'deterministic' | 'disabled' | 'llm' | 'dify';
   storageS3?: { endpoint:string; region:string; bucket:string; accessKeyId:string; secretAccessKey:string; maxBytes:number };
@@ -210,9 +213,10 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if(!workerQueues.length||new Set(workerQueues).size!==workerQueues.length||workerQueues.some(q=>!['content','ai','commercial','maintenance'].includes(q)))fail('WORKER_QUEUES');
   if(env.ENABLE_DEMO_TASKS==='true'&&appEnv==='production')fail('ENABLE_DEMO_TASKS');
   if(env.TEST_TASK_DELAY_MS&&appEnv!=='test')fail('TEST_TASK_DELAY_MS');
-  const documentExtraction:DocumentExtractionConfig={enabled:false};
   return scopedConfig({
-    documentExtraction,processingNodes:loadProcessingNodesConfig(env),runtimeRevision:0,uploadHardMaxBytes,
+    apiServiceBaseUrl: loadApiServiceBaseUrl(env),
+    metrics: loadMetricsConfig(role, env),
+    processingNodes:loadProcessingNodesConfig(env),runtimeRevision:0,uploadHardMaxBytes,
     taskPolicy:{maxAttempts:3,retryBaseMs:1000,retryMaxMs:60000,concurrency:{content:2,ai:1,commercial:1,maintenance:1}},
     queuePrefix,workerQueues,taskLeaseMs:integer('TASK_LEASE_MS',15000,1000,60000),taskRedeliveryMs:integer('TASK_REDELIVERY_MS',30000,1000,300000),schedulerIntervalMs:integer('SCHEDULER_INTERVAL_MS',1000,100,10000),
     demoTasks:env.ENABLE_DEMO_TASKS==='true',testTaskDelayMs:integer('TEST_TASK_DELAY_MS',0,0,5000),
@@ -220,6 +224,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     port: integer('PORT', ['worker','scheduler'].includes(role) ? 3100 : 3000, 1, 65535),
     databaseUrl, poolMax: integer('DATABASE_POOL_MAX', role === 'migrate' ? 1 : 5, 1, 30),
     httpRequestTimeoutMs, httpConnectionTimeoutMs,
+    shutdownTimeoutMs: integer('SHUTDOWN_TIMEOUT_MS', role === 'scheduler' ? 30000 : 300000, 1000, 3600000),
     ssl: sslMode === 'verify-full' ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false,
     statementTimeout: integer('DATABASE_STATEMENT_TIMEOUT_MS', 5000, 100, 60000),
     redisCacheUrl: role === 'migrate' ? '' : url('REDIS_CACHE_URL', ['redis:', 'rediss:']),

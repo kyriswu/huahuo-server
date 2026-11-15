@@ -4,6 +4,14 @@ import { loadGpuSpotConfig } from '../../src/integrations/gpu-spot/config.js';
 import { env } from '../helpers.js';
 import {applyValues,validateValues} from '../../src/modules/runtime-settings/registry.js';
 describe('role configuration',()=>{
+ it('bounds role-specific shutdown budgets independently of request receive timeouts',()=>{
+  expect(loadConfig('api-server',env).shutdownTimeoutMs).toBe(300000);
+  expect(loadConfig('worker',env).shutdownTimeoutMs).toBe(300000);
+  expect(loadConfig('admin',env).shutdownTimeoutMs).toBe(300000);
+  expect(loadConfig('scheduler',env).shutdownTimeoutMs).toBe(30000);
+  expect(loadConfig('worker',{...env,SHUTDOWN_TIMEOUT_MS:'450000'}).shutdownTimeoutMs).toBe(450000);
+  for(const value of ['0','999','3600001','NaN','1.5'])expect(()=>loadConfig('worker',{...env,SHUTDOWN_TIMEOUT_MS:value})).toThrow('INVALID_CONFIG:SHUTDOWN_TIMEOUT_MS');
+ });
  it.each(['api-server','worker'] as const)('%s uses the same RAM identity for OSS and ECI',async role=>{
   const shared={...env,ALIYUN_RAM_ACCESS_KEY_ID:'shared-test-id',ALIYUN_RAM_ACCESS_KEY_SECRET:'shared-test-secret',
    STORAGE_DRIVER:'aliyun-oss',STORAGE_ALIYUN_OSS_ENDPOINT:'https://oss-cn-beijing.aliyuncs.com',STORAGE_ALIYUN_OSS_BUCKET:'test-bucket',

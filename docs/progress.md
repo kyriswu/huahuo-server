@@ -1,5 +1,57 @@
 # 当前开发进度
 
+## 默认发布冒烟与 Actions 接口（2026-11-15）
+
+新增固定六次 GET 冒烟、AI 编写约束、可复用生产调用接口和 PR/main/手动触发的 Server CI。完整 513 项 unit/contract、247 项真实隔离 PG/Redis（1 项 Milvus 跳过）、类型/Lint/构建通过。用户确认先留凭据接口，并授权全部工作区改动参与下一步真实 GitHub 演练；本机结果不代表线上部署。见[验收](acceptance/release-smoke.md)。
+
+## 上线前真实服务验证待办（2026-11-15）
+
+用户要求真实链路稍后再测，先登记[上线前待办](acceptance/pending-live-verification.md)。真实 PDF → Xberg → 正文/OSS 图片 → 资料 BM25，以及笔记真实 Embedding/Milvus/Rerank、按需开停机/并发/文件限额和实际 Prometheus 抓取均待云上执行。此前 481 项 unit/contract、244 项集成通过属于隔离回归，不能称为完整真实链路验收通过；本轮只读核查连接配置、运行参数与 ECS 状态，没有调用模型、解析器或启停云机，不推进 Pxx。
+
+## 16核32GiB目标的任务与容量策略（2026-11-15）
+
+通过真实Admin保存内容并发8、维护2、AI/商业各1、下载300秒、上传/源文件各200MiB、用户额度10GiB；自动执行3次与重试间隔保留，运行配置revision3→5，节点revision7/名额16/不在线不变。调用端总文件预算改为读现有源文件配置，补齐远端200MiB字段/201MiB请求部署片段；Admin试用保持32MiB有界内存。486项unit/contract、243项真实独立PG/Redis通过（1项Milvus跳过），静态检查/构建通过。现有四角色同镜像healthy/readiness200，Chrome重载及数据库值核对通过；未改Schema、主ENV或凭据，未开云机。真实200MiB解析须内网应用远端限额后验收，见[验收](acceptance/runtime-capacity-16c32g.md)，不推进Pxx。
+
+## 云端 Milvus 与隔离回归通过（2026-11-15）
+
+按用户要求连接已有云端 Milvus，使用随机独立测试 database/collection，PG/Redis 仍为本机隔离 tmpfs 依赖。修复标签任务查询误将无关纯文本 cast 为 JSON；统一测试快照和连接目标，新增清理归属保护。最终 481 项 unit/contract、244 项集成回归全部通过、零跳过，typecheck/lint/build 与 development/test Compose 校验通过；Worker 排空及共享队列交接通过。三轮云端测试库均已清理，实际 ENV 和只读 App 参照哈希未变；模型、解析器仍为替身，未执行应用部署，不推进 Pxx。见[隔离回归验收](acceptance/cloud-milvus.md)。
+
+## 共享队列、Worker 优先的轻量发布（2026-11-15）
+
+用户选择保留共享持久队列，API/Worker/Scheduler 同机成组放置、更新时按 Worker → Scheduler → API 交接；Admin 可独立。复用已有暂停、租约及Outbox，不增加组归属/组内队列/版本路由或发布控制器。新增回归验证两个旧Worker停领后，新Worker完成旧API积压、旧API排空期间仍到达的请求及新API任务，均一次attempt；首次fixture缺少Scheduler补偿导致的失败已留证并修正。243项真实隔离PG/Redis通过（1项Milvus跳过），类型检查/Lint通过；本轮只改测试与文档，未改业务代码、Schema或执行部署，不推进Pxx。见[轻量发布验收](acceptance/worker-first-release.md)。
+
+## 手动启动与正式文档异步回调已本地验证（2026-11-15）
+
+恢复前重新核对同期代码，保留指标、排空、服务地址及纯内存 Admin 试跑边界。手动启动经维护队列短步骤执行并用 SSE 推送；正式解析提交后让出 Worker，认证回调持久保存再唤醒，约60秒单次查询仅作补偿。473项unit/contract、241项真实独立PG/Redis通过（1项Milvus跳过），静态检查和完整构建通过。现有开发库无损同步，节点revision7/async、运行配置revision3、物理外键0；四角色同镜像healthy/readiness200，Chrome核对实际后台。云节点仍关闭，未真实开机或调用解析；实机回调网络待内网验收。见[验收](acceptance/document-async-events.md)，不推进Pxx。
+
+## Admin 试跑只读配置、零业务写入（2026-11-15）
+
+现有单一试用弹窗改为直接调用已可访问的解析API，状态/结果仅内存；移除试跑审计、节点分配、回调入库/恢复、机器调度和sessionStorage。唯一未上线基线删除试跑专用字段/索引及Admin回调表权限，用户正式任务的持久链路保留。473项unit/contract与239项真实隔离PG/Redis通过（1项Milvus跳过），静态检查/构建通过，零写入及中断不恢复已验证；未同步现有库或部署，停在专项验收点。见[试跑简化验收](acceptance/admin-document-trial.md)。
+
+## 用户侧稳定优先，Admin 试跑允许中断（2026-11-15）
+
+用户明确 Admin 仅用于验证功能，试跑可在发布/重启时中断并重新发起；不为试跑新增状态/结果持久化、跨副本接续或强制实例亲和，不作为发布或扩容阻塞项。最高优先级仍是用户侧 API、上传、已受理任务和回调一致性；管理配置校验及必要的共享节点占用核对/资源回收保持。已同步部署契约和验收边界，仅文档调整，无应用/Schema/环境改动，不推进 Pxx。
+
+## Admin 独立部署服务地址（2026-11-15）
+
+按最新范围保留 API/Worker/Scheduler 部署组，优先 Admin 独立。新增 API_SERVICE_BASE_URL，认证解析回调使用可配置的 API 域名/IP；留空继承显式 APP_PUBLIC_BASE_URL，不再猜测当前进程的 localhost。Compose 向调用角色注入地址，后台自身 URL 与业务公开 URL 保持独立。473项unit/contract、25项Admin相关隔离集成通过，类型检查/Lint/构建通过；完整回归另有1项Worker排空用例失败，见[验收](acceptance/service-addresses.md)。数据库/OSS/缓存共享方案不在本轮，见[服务地址手册](runbooks/service-addresses.md)。
+
+## 容器演练与可组合部署边界（2026-11-15）
+
+按用户要求保持统一仓库/镜像，角色可任意组合放在同机，也可跨机独立扩容，不要求一角色独占一台服务器。真实历史镜像→当前镜像因唯一基线校验和不匹配被拒绝，未更改真实数据库。当前镜像分角色切换与回切通过：322个鉴权请求零错误、27秒上传完整、两任务各一次attempt、管理会话及未知可选配置保留、双Scheduler时间窗去重/存活副本继续工作。整套角色同时重叠出现测试OOM，真实多机及跨版本回滚仍未验收；主栈未更新，不推进Pxx。见[演练](acceptance/release-rehearsal.md)与[部署契约](runbooks/role-deployment.md)。
+
+## 应用发布基础加固（2026-11-15）
+
+完成 SIGUSR2 readiness 排空、按角色有限退出、Worker 暂停续租与新实例接手、Scheduler 停扫描及监控、共享配置兼容读取/严格写入/版本门禁、认证回调收敛解析 intent 和取消交接。465 项 unit/contract、237 项真实独立 PG/Redis 集成通过（1 项 Milvus 跳过），typecheck/lint/build、两套 Compose 静态校验通过。未部署主栈、迁移实际数据库或调用付费服务，不推进 Pxx；真实入口切流/跨版本回滚等边界见[验收](acceptance/release-hardening.md)。
+
+## Prometheus 指标接入（2026-11-15）
+
+新增共享 Registry、HTTP 完成计数/耗时、数据库提交后的异步任务结果计数与四角色独立抓取端口。环境标签来自现有 APP_ENV：本地 development、测试 test、生产 prod。真实 loopback HTTP 与隔离 PG/Redis/BullMQ 专项通过；初期工作区解析/任务失败已保留原始日志，最终全量465项unit/contract、237项隔离集成通过（1项Milvus跳过），静态检查/构建通过；总数包含工作区其他改动。现有开发环境及云环境未部署本轮指标。见[监控手册](runbooks/prometheus.md)和[验收](acceptance/prometheus.md)，不推进 Pxx。
+
+## 已部署 ECS 按节点调用与配置简化（2026-11-15）
+
+当前CPU ECS无需镜像名或提取JSON，按需唤醒后直接调用已有Xberg API，默认省略config沿用服务端配置。全局四项解析设置移除，同步/异步与可选覆盖随节点快照；核心页面仅名称/实例ID/地址/并发/空闲停机/在线状态，其余折叠，试用仍位于解析与模型Modal。436项unit/contract、223项真实隔离PG/Redis通过（1跳过），静态检查/构建和Chrome桌面/移动验证通过。现有开发库无损调整，四角色已更新且healthy/readiness200；不开云机，内网PDF/Office仍待部署后实测。见[配置验收](acceptance/runtime-configuration.md)。
+
 ## ENV清理与RAG后台参数（2026-11-15）
 
 清理主ENV、旧本地ENV和6份示例的已迁DB/失效项，删除重复解析机模板；现用凭据与其他设置保留。后台新增“RAG 与检索”12项参数，Note开关归功能分类；先将当前值导入原JSON记录再删ENV，配置revision2、节点与业务数据不变。执行快照、构建时限和检索客户端换参已接线，无ENV回退。435项unit/contract、222项真实隔离PG/Redis通过（1项Milvus跳过），静态检查/构建及Compose展开通过。未调用云资源或付费模型，见[验收](acceptance/runtime-configuration.md)。

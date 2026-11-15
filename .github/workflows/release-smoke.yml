@@ -1,0 +1,64 @@
+name: Release smoke
+
+# Called only after the deployment job has made the candidate serve traffic.
+# The caller's cleanup job must depend on this job succeeding.
+on:
+  workflow_call:
+    inputs:
+      revision:
+        description: Full SHA of the commit deployed by the caller
+        required: true
+        type: string
+      base-url:
+        description: HTTPS origin of the deployed public API
+        required: true
+        type: string
+      user-id:
+        description: Dedicated smoke account UUID
+        required: true
+        type: string
+      workspace-id:
+        description: Existing ready default workspace owned by the smoke account
+        required: true
+        type: string
+    secrets:
+      access-token:
+        description: Fresh valid access JWT for the dedicated smoke account
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Deployed API smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Require an immutable revision
+        env:
+          RELEASE_REVISION: ${{ inputs.revision }}
+        run: |
+          if [[ ! "$RELEASE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::A full commit SHA is required.'
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+      - name: Verify checked-out revision
+        env:
+          RELEASE_REVISION: ${{ inputs.revision }}
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_REVISION"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.11.0'
+          package-manager-cache: false
+      - name: Run bounded smoke checks
+        env:
+          SMOKE_BASE_URL: ${{ inputs.base-url }}
+          SMOKE_USER_ID: ${{ inputs.user-id }}
+          SMOKE_WORKSPACE_ID: ${{ inputs.workspace-id }}
+          SMOKE_ACCESS_TOKEN: ${{ secrets.access-token }}
+        run: node scripts/release/smoke.mjs

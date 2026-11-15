@@ -1,5 +1,41 @@
 # 契约兼容性（P01 历史与 P02 增量）
 
+## 发布冒烟沿用现有 API（2026-11-15）
+
+固定读取 live/ready、me/status、workspaces、tasks/running，验证现有 Envelope、身份归属和非终态任务；匿名访问仍应 401。专用会话正常更新 last_seen_at，不新增业务写接口、永久 JWT 或鉴权旁路。4 项真实 API 集成与 27 项 HTTP 替身测试分别记录，见[验收](acceptance/release-smoke.md)。
+
+## Worker 优先交接，无新增业务协议（2026-11-15）
+
+发布方案采用共享队列和消费端先行，保留现有Task载荷、JWT、幂等、结果读取及App DTO；不新增按API实例/宿主/版本的任务归属。新增真实PG/Redis回归验证两个旧Worker停领后，由新Worker执行旧/新API受理的任务，各一次attempt，旧JWT与跨实例重放保持。证据为同代码多实例和Fastify inject，不冒充历史镜像或宿主入口验收；见[验收](acceptance/worker-first-release.md)。
+
+## 手动启动与正式异步任务接续（2026-11-15）
+
+Admin新增节点start/start-status/start-events，启动202入队、状态SSE推送；节点调用只接受async，空config仍省略。正式用户解析经每提交独立认证回调、Outbox和原Task接续，App路由/envelope/KB Markdown及图片UUID不变；阶段接续不占业务失败次数。Admin试跑保留直接API与纯内存结果，不新增持久协议。473项unit/contract、241项隔离PG/Redis通过（1项跳过），真实云机和内网回调未验收；现有开发角色继承与测试最小权限的区别见[验收](acceptance/document-async-events.md)。
+
+## Admin 试跑零持久化（2026-11-15）
+
+试跑只保留当前“运行配置 → 解析与模型”入口，原有Admin认证/CSRF/归属与上传限制保留，状态/结果仍用临时接口回传；不创建试跑审计、节点分配、任务或持久回调。刷新或重启丢失后重新发起，前端不保存试跑ID、不自动恢复。正式用户任务的持久回调只允许API/Worker访问，Schema不再接受trial_id；App业务接口不变。473项unit/contract、239项隔离集成通过（1项跳过），见[验收](acceptance/admin-document-trial.md)。
+
+## 独立 Admin 的 API 服务地址（2026-11-15）
+
+增加部署字段 API_SERVICE_BASE_URL 供认证解析回调使用；不更改 App 公共 API、Admin 路由或 Session 协议。服务地址可与 APP_PUBLIC_BASE_URL/ADMIN_PUBLIC_BASE_URL 分离，已有公开 API 地址可作为默认值；缺失时显式拒绝回调准备，不生成猜测的本机地址。
+
+## 独立角色可组合部署与实际演练（2026-11-15）
+
+用户明确统一代码、按角色独立进程，可同机任意组合或跨机增副本。当前镜像的普通用户JWT、任务幂等结果、上传文件和Admin会话在真实容器交接/回切中保留；未知可选配置仍受严格输入与版本约束。历史镜像因不同基线不能直接升级，未推导跨版本回滚成立。跨机文件共享和云节点副作用仍待验收；用户已接受Admin试跑进程内状态丢失后重新发起，不要求持久化或跨副本恢复。App源码只读，未运行Flutter。见[演练](acceptance/release-rehearsal.md)。
+
+## 应用发布基础契约（2026-11-15）
+
+新增运维信号 SIGUSR2（不新增公共控制路由），draining时ready503/live200；ready同时校验运行配置。配置存储缺省v1，未知可选字段在同契约版本下保留但不应用/回显，Admin写入仍严格；不兼容版本返回503。解析回调保持现有HTTP结构，增加匹配身份/指纹后收敛intent，取消标记及结果提交fencing保留。App接口/envelope不改，未运行Flutter；同版实例交接/未来字段模拟不代表真实旧镜像回滚。见[验收](acceptance/release-hardening.md)。
+
+## Prometheus 监控增量（2026-11-15）
+
+HTTP 全局钩子只观测最终响应，不改变业务路由/Envelope/鉴权。抓取口为独立 9464–9467 端口的 /metrics，使用客户端库格式和 Content-Type，不向业务/Admin 端口增加重复指标路径。labels 无用户/任务 ID 或 URL 查询值；APP_ENV 决定环境，App 仍沿用现有契约。见[监控手册](runbooks/prometheus.md)。
+
+## 按节点调用既有 ECS（2026-11-15）
+
+App文档入口、FILE_UPLOAD、Markdown/KB标签、图片UUID和关键词入库协议不变；内部调用配置由全局快照移到实际节点分配快照，CPU默认省略Xberg config并使用现有服务参数。Admin退役全局四项document设置，改用节点documentApi高级配置；当前节点/API/UI同步。App请求与认证两份参照文件只读哈希保持一致，未修改App。
+
 ## RAG后台分类与ENV退役（2026-11-15）
 
 独立Admin配置分类增加rag，沿用Session/superadmin/Origin/CSRF/revision及同事务审计；App DTO/路径不变。原RAG调参ENV不再读取或注入，后台修改影响后续请求，构建保留持久快照，服务及固定模型/集合身份仍是部署配置。435项unit/contract、222项隔离集成通过，模型/Milvus为替身，见[验收](acceptance/runtime-configuration.md)。

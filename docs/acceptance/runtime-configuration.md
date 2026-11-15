@@ -1,5 +1,28 @@
 # 分类运行配置与 Admin 验收（2026-11-15）
 
+## 16核32GiB目标策略
+
+现有Admin已保存任务/容量新值，运行配置revision5；当前本地四角色已更新并验证。预设是数据库配置的核对副本，不自动覆盖后续管理员修改。内容并发8指每Worker的执行阶段，不限制远端等待中文档总数；200MiB文件还需内网解析服务应用配套HTTP限额。486项unit/contract、243项真实独立PG/Redis通过（1项跳过），见[本轮验收](runtime-capacity-16c32g.md)。
+
+## 手动启动与正式异步回调补充
+
+当前节点默认 async，新增手动启动与事件推送；现有本地库无损同步、四角色更新，473项unit/contract、241项隔离PG/Redis通过（1项跳过）。Admin试跑继续纯内存直连，不参与业务调度。下方同步默认及旧镜像记录属于此前验收，最新行为和真实环境权限边界见[本轮验收](document-async-events.md)。
+
+## 按节点调用与 ECS 简化配置（2026-11-15）
+
+当前 CPU ECS 直接走既有 API，不要求镜像或完整提取 JSON。删除全局四项 document 设置和重复开关，调用参数归各节点 config JSON；默认 /extract 同步调用且不发送 config，提取器沿用服务端默认模型/设备。节点分配快照覆盖调用参数，已知 job 恢复只 GET，安全文件重试仍用原分配参数。CPU 页面默认仅核心字段，其他选项折叠，GPU ECI 镜像配置对 CPU 隐藏；试用仍在解析与模型 Modal，关闭原因区分部署开关与无在线节点。
+
+本轮仅验证本地后端及 Admin，不请求 ECS/ECI 控制面、内网解析或付费模型。真实依赖测试使用独立临时 PostgreSQL/Redis，提取服务由 loopback/fetch 替身提供；不能作为 CPU 实机解析验收。未修改识别核心、App、Schema 或唯一基线。最终检查与主环境同步证据见 `.local/node-api/`。
+
+436项unit/contract、223项真实隔离PG/Redis集成通过（1项Milvus跳过），typecheck/lint/build、Compose展开及UI检测通过。与镜像构建并行的一轮集成出现PG连接中断和既有5秒用例超时；构建结束后原样重跑通过，未放宽时限。新增覆盖CPU省略config、显式GPU覆盖、两节点不同同步/异步参数、已知job在节点编辑后仍只GET、文件重试保留原调用参数，以及业务FILE_UPLOAD/试用共用客户端。
+
+现有开发库先回滚演练再单事务调整：移除四项旧全局键，CPU节点增加server-defaults调用配置，保留实例/地址/16并发/文档音频能力/不在线状态；运行配置revision2→3，节点3→4。Chrome用原账号完成两次原值保存验证后节点revision6，仍只有一条记录。用户/管理员/工作区各1条，笔记/资源/入库表0，原132条维护任务与结果保留，物理外键0；Schema和基线checksum未改，无凭据或ENV变动。
+
+主Compose四角色使用同一完整镜像huahuo-server:node-api-20261115（2f171262…2e798e），healthy/readiness200；HTML/JS200，匿名管理401，App同路径404。Chrome确认默认六项核心字段、CPU无镜像项、高级配置可折叠、空提取覆盖直接保存及成功反馈、试用入口与新关闭原因；1512px/390px无横向溢出。云开机和节点在线开关保持关闭，不发出云控制面、内网解析或付费请求，真实PDF/Office待用户部署内网后验证。
+
+证据：.local/node-api/ 的 db-rehearsal.json、db-result.json、runtime-result.json、测试/构建日志与node-config.jpg / node-config-390.jpg。App两份只读参照哈希一致，不改App、不推进Pxx，当前代码未提交/推送。
+
+
 ## ENV清理与RAG参数后台管理（2026-11-15）
 
 按用户要求新增“RAG 与检索”：12项候选数量/RRF/客户端并发/索引批次与并发/Embedding时限和索引重试/重排时限与等待预算/原生文本上限由现有runtime_configuration的同一个values JSON管理，Note索引开关放在“功能开关”。没有新增表、版本表或ENV兼容读取。地址、凭据、库/集合绑定、固定模型规格、tokenizer部署路径和源文件域名白名单仍属于服务部署配置。

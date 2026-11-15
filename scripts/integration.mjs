@@ -5,13 +5,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { cloudMilvusConfig, IsolatedCloudMilvus, TestMilvusError } from './integration-milvus.mjs';
 
 // Separate ephemeral dependencies; never read .env or touch the business stack.
+// --milvus-cloud explicitly accepts only Milvus connection parameters from ENV.
 // Pins match the project's existing PostgreSQL/Redis images. No implicit pull.
 const PG_IMAGE = 'postgres:17.9-bookworm';
 const REDIS_IMAGE = 'redis:7.4.8-bookworm';
 const MILVUS_IMAGE = 'milvusdb/milvus:v2.6.26';
 const withMilvus = process.argv.includes('--milvus');
+const withCloudMilvus = process.argv.includes('--milvus-cloud');
 const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
 const runId = randomBytes(16).toString('hex');
 const database = `huahuo_test_${runId}`;
@@ -19,6 +22,7 @@ const resources = [];
 let tempDirectory;
 let child;
 let interrupted = false;
+let cloudMilvus;
 
 class IntegrationError extends Error {
   constructor(code) { super(code); this.name = 'IntegrationError'; }
@@ -56,6 +60,7 @@ process.once('SIGINT', signalHandler);
 process.once('SIGTERM', signalHandler);
 
 try {
+  if (withMilvus && withCloudMilvus) throw new IntegrationError('TEST_MILVUS_MODES_CONFLICT');
   if (realpathSync(process.cwd()) !== root) throw new IntegrationError('SERVER_ROOT_REQUIRED');
   const endpoint = docker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], 'LOCAL_DOCKER_REQUIRED');
   if (!endpoint.startsWith('unix://') || (process.env.DOCKER_HOST && !process.env.DOCKER_HOST.startsWith('unix://'))) throw new IntegrationError('LOCAL_DOCKER_REQUIRED');
@@ -78,7 +83,10 @@ try {
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'TERM', 'CI', 'VOLTA_HOME', 'VOLTA_FEATURE_PNPM']) if (process.env[key] !== undefined) testEnv[key] = process.env[key];
   Object.assign(testEnv, { APP_ENV: 'test', DATABASE_SSL_MODE: 'disable', PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled', SMS_PROVIDER: 'disabled', ALLOW_MOCK_PROVIDERS: 'false', LOG_LEVEL: 'silent', REDIS_CACHE_URL: `redis://127.0.0.1:${redisPort}/14`, REDIS_QUEUE_URL: `redis://127.0.0.1:${redisPort}/15` });
   for (const role of ['MIGRATOR', 'API', 'ADMIN', 'WORKER', 'SCHEDULER']) testEnv[`TEST_DATABASE_${role === 'MIGRATOR' ? 'MIGRATION' : role}_URL`] = `postgresql://huahuo_${role.toLowerCase()}:${variables[`POSTGRES_${role}_PASSWORD`]}@127.0.0.1:${pgPort}/${database}`;
-  if (milvus) testEnv.TEST_MILVUS_ADDRESS = `127.0.0.1:${boundPort(milvus, 19530)}`;
+  if (milvus) Object.assign(testEnv, {
+    TEST_MILVUS_MODE: 'local', TEST_MILVUS_ADDRESS: `127.0.0.1:${boundPort(milvus, 19530)}`,
+    TEST_MILVUS_USERNAME: 'root', TEST_MILVUS_PASSWORD: 'Milvus', TEST_MILVUS_TLS: 'false', TEST_MILVUS_DATABASE: 'default',
+  });
   const milvusHealthUrl = milvus ? `http://127.0.0.1:${boundPort(milvus, 9091)}/healthz` : undefined;
 
   const deadline = Date.now() + 60_000;
@@ -96,20 +104,41 @@ try {
   }
   if (!ready) throw new IntegrationError('TEST_DEPENDENCIES_NOT_READY');
   checkInterrupted();
-  console.log(`Ephemeral PostgreSQL/Redis${milvus ? '/Milvus' : ''} ready on loopback; no business database, volume or live provider configuration used.`);
+  if (withCloudMilvus) {
+    const connection = cloudMilvusConfig(process.env);
+    // Proxy usage must be explicit; a Docker-only host.docker.internal proxy
+    // cannot be assumed to work when this runner executes on the host.
+    if (connection.proxy) process.env.grpc_proxy = connection.proxy;
+    cloudMilvus = new IsolatedCloudMilvus(connection, runId);
+    console.log(`Provisioning isolated cloud Milvus database: ${cloudMilvus.database}`);
+    Object.assign(testEnv, await cloudMilvus.create());
+    checkInterrupted();
+    console.log('Cloud Milvus isolated database ready; business databases/collections are not used.');
+  }
+  console.log(`Ephemeral PostgreSQL/Redis${milvus ? '/Milvus' : ''} ready on loopback; no business SQL database, volume, model or OSS configuration used.`);
   const exit = await new Promise((resolve, reject) => {
-    child = spawn('pnpm', ['test:integration:inner', '--maxWorkers=1', '--no-file-parallelism'], { cwd: root, env: testEnv, stdio: 'inherit' });
+    child = spawn('pnpm', ['test:integration:inner', '--maxWorkers=1', '--no-file-parallelism',
+      ...(withCloudMilvus ? ['--testTimeout=30000', '--reporter=verbose'] : [])], { cwd: root, env: testEnv, stdio: 'inherit' });
     child.once('error', () => reject(new IntegrationError('TEST_PROCESS_START_FAILED')));
     child.once('exit', code => resolve(code));
   });
   checkInterrupted();
   if (exit !== 0) throw new IntegrationError('INTEGRATION_TESTS_FAILED');
-  console.log(`Real isolated PostgreSQL/Redis${milvus ? '/Milvus' : ''} integration suite passed.`);
+  console.log(`Real isolated PostgreSQL/Redis${milvus || withCloudMilvus ? '/Milvus' : ''} integration suite passed.`);
 } catch (error) {
-  console.error(JSON.stringify({ code: error instanceof IntegrationError ? error.message : 'INTEGRATION_RUNNER_FAILED' }));
+  console.error(JSON.stringify({ code: error instanceof IntegrationError || error instanceof TestMilvusError ? error.message : 'INTEGRATION_RUNNER_FAILED' }));
   process.exitCode = interrupted ? 130 : 1;
 } finally {
   let cleanupFailed = false;
+  if (cloudMilvus) {
+    try {
+      await cloudMilvus.cleanup();
+      console.log('Cloud Milvus cleanup completed; only this run\'s temporary database/collections were eligible.');
+    } catch (error) {
+      cleanupFailed = true;
+      console.error(JSON.stringify({ code: error instanceof TestMilvusError ? error.message : 'TEST_CLOUD_MILVUS_CLEANUP_FAILED', database: cloudMilvus.database }));
+    }
+  }
   for (const resource of resources.reverse()) {
     try {
       inspectOwned(resource);

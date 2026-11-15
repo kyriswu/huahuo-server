@@ -46,8 +46,10 @@ export class TaskService {
    await enqueueIntent(tx,t.id);
   } else {
    if(terminal(t.state))return;
-   const next=t.external_state!=='none'||t.state==='running'?'cancel_requested':'cancelled';
+   const managedWaiting=t.state==='waiting_external'&&['rag.document-ingest','text.ingest'].includes(t.kind);
+   const next=t.external_state!=='none'||t.state==='running'||managedWaiting?'cancel_requested':'cancelled';
    await tx.query('UPDATE tasks SET state=$2,cancel_requested_at=now(),version=version+1,retryable=false WHERE id=$1',[t.id,next]);
+   if(managedWaiting){await tx.query('UPDATE tasks SET available_at=now() WHERE id=$1',[t.id]);await enqueueIntent(tx,t.id);}
   }
   await event(tx,t.id);
  }

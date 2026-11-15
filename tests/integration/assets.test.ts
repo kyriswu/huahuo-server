@@ -9,6 +9,7 @@ import {migrate} from '../../src/db/migrate.js';
 import {AssetService} from '../../src/modules/assets/service.js';
 import {DeterministicTagExtractor} from '../../src/modules/assets/tag-extractor.js';
 import {TaskEngine} from '../../src/modules/tasks/engine.js';
+import {TaskService} from '../../src/modules/tasks/service.js';
 type GraphEdge={source:string;target:string;relationType:string;evidence?:{sharedTags?:Array<{tagName:string}>}};const edgeList=(graph:{edges:readonly unknown[]})=>graph.edges as GraphEdge[];
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;if(!migrationUrl)throw new Error('TEST_DB_REQUIRED');
 const root=poolFor(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl}));const cfg=loadConfig('api-server',{...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'asset-test-'.repeat(8),APP_PUBLIC_BASE_URL:'http://assets.test',DATABASE_URL:process.env.TEST_DATABASE_API_URL});const pool=poolFor(cfg),worker=poolFor({...cfg,role:'worker',databaseUrl:process.env.TEST_DATABASE_WORKER_URL!});const assets=new AssetService(pool,cfg.appTokenSecret!);const engine=new TaskEngine(worker,15000,undefined,undefined,new DeterministicTagExtractor());
@@ -21,6 +22,19 @@ async function fixture(){
 async function makeNote(u:Awaited<ReturnType<typeof fixture>>){return assets.createNote(u.scope,u.workspaceId,{title:'素材',parts:{raw:'正文 alpha'}},randomUUID());}
 async function jobFor(noteId:string){return String((await root.query('SELECT task_id FROM content_jobs WHERE note_id=$1',[noteId])).rows[0].task_id);}
 describe('P06 personal assets, revisions and search',()=>{beforeAll(()=>migrate(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl})));afterAll(async()=>{await Promise.all([pool.end(),root.end(),worker.end()]);});
+it('creates Note tag jobs alongside plain-text task inputs under hash-join query plans',async()=>{
+ const f=await fixture(),isolated=poolFor({...cfg,poolMax:1});
+ try{
+  // One connection keeps these planner settings local to this test's service.
+  await isolated.query("SELECT set_config('enable_nestloop','off',false),set_config('enable_mergejoin','off',false)");
+  const text='plain task input is not JSON';
+  const plain=await new TaskService(isolated,cfg.appTokenSecret!).create(f.scope,{workspaceId:f.workspaceId,text},randomUUID());
+  const note=await new AssetService(isolated,cfg.appTokenSecret!).createNote(f.scope,f.workspaceId,{title:'mixed task inputs',parts:{raw:'readable Note body'}},randomUUID());
+  expect(note.parts.raw!.contentMarkdown).toBe('readable Note body');
+  expect((await root.query('SELECT count(*)::int n FROM content_jobs WHERE note_id=$1',[note.noteId])).rows[0].n).toBe(1);
+  expect((await root.query('SELECT i.body FROM task_inputs i JOIN tasks t ON t.input_id=i.id WHERE t.id=$1',[plain.task.taskId])).rows[0].body).toBe(text);
+ }finally{await isolated.end();}
+});
 it('validates folder, Note and tag relationship targets within the owning workspace',async()=>{
  const a=await fixture(),b=await fixture(),noteA=await makeNote(a),noteB=await makeNote(b);
  const foreignFolder=await assets.createFolder(b.scope,b.workspaceId,{displayName:'foreign'},randomUUID());

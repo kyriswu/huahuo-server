@@ -2,10 +2,16 @@ import { canonical, digest } from '../lib/crypto.js';
 
 export type ExtractionParameters = Record<string, unknown>;
 export interface EnabledDocumentExtractionConfig {
-  enabled: true; mode: 'sync' | 'async'; parameters: ExtractionParameters;
+  enabled: true; mode: 'sync' | 'async'; parameters: ExtractionParameters | null;
   configHash: string; timeoutMs: number; pollMs: number; maxResponseBytes: number;
 }
-export type DocumentExtractionConfig = { enabled: false } | EnabledDocumentExtractionConfig;
+export interface DocumentApiSettings {
+  mode: 'async'; parameters: ExtractionParameters | null;
+  timeoutSeconds: number; pollMs: number; maxResponseBytes: number;
+}
+export const defaultDocumentApi = (): DocumentApiSettings => ({
+  mode: 'async', parameters: null, timeoutSeconds: 3120, pollMs: 2000, maxResponseBytes: 64 * 1024 * 1024,
+});
 // A supplied override replaces the whole configuration, never a shallow/deep merge.
 export function assertCompleteExtractionConfig(value: unknown): asserts value is ExtractionParameters {
   const required: Record<string, unknown> = {
@@ -32,9 +38,10 @@ export function assertCompleteExtractionConfig(value: unknown): asserts value is
   if (config.output_format !== 'markdown' || images.include_data_base64 !== false
     || typeof config.extraction_timeout_secs !== 'number' || config.extraction_timeout_secs < 1 || config.extraction_timeout_secs > 86400) fail();
 }
-export function createDocumentExtractionConfig(mode:'sync'|'async',parameters:ExtractionParameters,pollMs=2000,maxResponseBytes=64*1024*1024):EnabledDocumentExtractionConfig {
+export function createDocumentExtractionConfig(mode:'sync'|'async',parameters:ExtractionParameters|null,pollMs=2000,maxResponseBytes=64*1024*1024,timeoutMs=parameters?Number(parameters.extraction_timeout_secs)*1000+120000:3120000):EnabledDocumentExtractionConfig {
   if(!['sync','async'].includes(mode))throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_MODE');
-  assertCompleteExtractionConfig(parameters);
-  if(!Number.isSafeInteger(pollMs)||pollMs<100||pollMs>60000||!Number.isSafeInteger(maxResponseBytes)||maxResponseBytes<1024||maxResponseBytes>64*1024*1024)throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_LIMITS');
-  return {enabled:true,mode,parameters,configHash:digest(canonical(parameters)),timeoutMs:Number(parameters.extraction_timeout_secs)*1000+120000,pollMs,maxResponseBytes};
+  if(parameters!==null)assertCompleteExtractionConfig(parameters);
+  if(!Number.isSafeInteger(pollMs)||pollMs<100||pollMs>60000||!Number.isSafeInteger(maxResponseBytes)||maxResponseBytes<1024||maxResponseBytes>64*1024*1024||!Number.isSafeInteger(timeoutMs)||timeoutMs<1000||timeoutMs>86520000)throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_LIMITS');
+  // A null override identifies service defaults, not the service's current model/config contents.
+  return {enabled:true,mode,parameters,configHash:digest(canonical(parameters)),timeoutMs,pollMs,maxResponseBytes};
 }

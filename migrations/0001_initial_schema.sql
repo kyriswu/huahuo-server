@@ -781,6 +781,7 @@ CREATE TABLE public.tasks (
     state text NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     attempt_no integer DEFAULT 0 NOT NULL,
+    resume_count integer DEFAULT 0 NOT NULL CONSTRAINT tasks_resume_count_check CHECK(resume_count>=0 AND resume_count<=attempt_no),
     max_attempts integer DEFAULT 3 NOT NULL,
     lease_owner uuid,
     lease_until timestamp with time zone,
@@ -795,7 +796,7 @@ CREATE TABLE public.tasks (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     reservation_id uuid,
-    CONSTRAINT tasks_check CHECK ((((user_id IS NULL) AND (workspace_id IS NULL) AND (kind = 'maintenance.check'::text)) OR ((user_id IS NOT NULL) AND (workspace_id IS NOT NULL)))),
+    CONSTRAINT tasks_check CHECK ((((user_id IS NULL) AND (workspace_id IS NULL) AND (kind IN ('maintenance.check','processing.node-start'))) OR ((user_id IS NOT NULL) AND (workspace_id IS NOT NULL)))),
     CONSTRAINT tasks_check1 CHECK (((state <> 'succeeded'::text) OR (result_id IS NOT NULL))),
     CONSTRAINT tasks_external_state_check CHECK ((external_state = ANY (ARRAY['none'::text, 'submitted'::text, 'unknown'::text]))),
     CONSTRAINT tasks_max_attempts_check CHECK (((max_attempts >= 1) AND (max_attempts <= 9))),
@@ -1620,6 +1621,8 @@ GRANT SELECT ON account_memberships,asset_folders,asset_tags,billing_policies,co
 GRANT SELECT,INSERT ON admin_audit_events,api_idempotency,task_events,task_outbox TO huahuo_admin;
 GRANT SELECT,INSERT,UPDATE ON admin_login_limits,admin_sessions,admin_users TO huahuo_admin;
 GRANT SELECT,UPDATE ON tasks TO huahuo_admin;
+GRANT INSERT ON tasks TO huahuo_admin;
+GRANT UPDATE(available_at) ON task_outbox TO huahuo_admin,huahuo_worker;
 GRANT SELECT ON task_results TO huahuo_api;
 GRANT SELECT,INSERT ON task_events,task_inputs,user_agreement_acceptances,user_audit_events TO huahuo_api;
 GRANT SELECT,INSERT,DELETE ON resource_refs TO huahuo_api;
@@ -1738,7 +1741,21 @@ GRANT SELECT ON public.processing_nodes TO huahuo_api,huahuo_worker,huahuo_sched
 GRANT SELECT,INSERT,UPDATE ON public.processing_nodes TO huahuo_admin;
 GRANT SELECT,INSERT,UPDATE ON public.processing_node_assignments TO huahuo_worker;
 GRANT SELECT,INSERT,UPDATE ON public.processing_node_assignments TO huahuo_admin;
-GRANT SELECT ON public.processing_node_assignments TO huahuo_scheduler;
+GRANT SELECT,UPDATE ON public.processing_node_assignments TO huahuo_scheduler,huahuo_api;
+
+-- Durable callback inbox for user document tasks; Admin probes stay in memory.
+CREATE TABLE public.document_parse_callbacks (
+ id uuid PRIMARY KEY, request_id text NOT NULL UNIQUE, task_id uuid NOT NULL,
+ token_hash text NOT NULL, token_sealed text NOT NULL, contexts jsonb NOT NULL, fingerprint text NOT NULL,
+ job_id text, event_id text, terminal_state text, result jsonb, result_hash text,
+ max_response_bytes integer NOT NULL CHECK(max_response_bytes BETWEEN 1024 AND 67108864),
+ consumed boolean NOT NULL DEFAULT false, deadline_at timestamptz NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(), received_at timestamptz,
+ CHECK(terminal_state IS NULL OR terminal_state IN ('completed','failed','cancelled'))
+);
+CREATE INDEX document_parse_callbacks_task ON public.document_parse_callbacks(task_id);
+GRANT SELECT,INSERT,UPDATE ON public.document_parse_callbacks TO huahuo_api,huahuo_worker;
+GRANT SELECT ON public.document_parse_callbacks TO huahuo_scheduler;
 
 CREATE TABLE public.runtime_configuration (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), revision integer NOT NULL DEFAULT 1 CHECK(revision>0),

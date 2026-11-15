@@ -1,0 +1,17 @@
+{
+  "tasks": {
+    "tasks.maxAttempts": 3,
+    "tasks.retryBaseMs": 1000,
+    "tasks.retryMaxMs": 60000,
+    "tasks.concurrency.content": 8,
+    "tasks.concurrency.ai": 1,
+    "tasks.concurrency.commercial": 1,
+    "tasks.concurrency.maintenance": 2,
+    "tasks.downloadTimeoutMs": 300000
+  },
+  "storage": {
+    "storage.maxUploadBytes": 209715200,
+    "storage.quotaBytes": 10737418240,
+    "storage.maxSourceBytes": 209715200
+  }
+}

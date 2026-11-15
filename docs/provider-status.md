@@ -1,5 +1,45 @@
 # Provider 与业务存储状态
 
+## 默认冒烟不调用供应商（2026-11-15）
+
+27 项 HTTP 替身与 4 项真实 API 冒烟已通过，真实依赖仅本机独立 PG/Redis。默认六个 GET 不触发短信、模型、解析、上传、计费或云操作；凭据自动提供尚未接入。全量隔离集成 247 通过、真实 Milvus 1 项跳过，不代替云或线上验收，见[验收](acceptance/release-smoke.md)。
+
+## 云端 Milvus 真实依赖验收（2026-11-15）
+
+按用户授权使用已有云端 Milvus；随机测试 database 和两种 collection 与业务目标隔离，三轮运行的临时目标已全部清理。文档 BM25 与笔记关键词/向量/混合检索、权限及恢复路径通过，最终全量 244 项集成零跳过；PG/Redis 为本机真实临时依赖，Embedding/Rerank、解析器和云控制面仍为替身。未验证真实模型、Xberg/OSS 或线上部署，实际 ENV 未修改。见[隔离回归验收](acceptance/cloud-milvus.md)；用户要求真实服务稍后验证，已登记[上线前待办](acceptance/pending-live-verification.md)。
+
+## 轻量发布验证沿用隔离依赖（2026-11-15）
+
+Worker优先交接仅使用随机本机PG/Redis/BullMQ、测试JWT与Fastify业务路由；不调用模型、解析器、云控制面、OSS或短信。复用原持久任务和补偿路径，未增加供应商或组内存储。243项隔离集成通过（1项真实Milvus跳过），不计作云或跨机发布验收；见[验收](acceptance/worker-first-release.md)。
+
+## 正式解析回调与手动启动（2026-11-15）
+
+正式文档任务异步提交、认证回调事务接收后唤醒；约60秒单次查询作补偿，等待不占Worker执行槽。手动启动经既有维护队列分步骤执行并推送状态。云控制面和解析器均使用替身验证，真实PG/Redis独立测试；现有本地主栈已更新，但云开关/节点仍关闭，未实际开机、解析或调用OSS。Admin试跑仍为纯内存直接探测，见[验收](acceptance/document-async-events.md)。
+
+## Admin 直接试用解析API（2026-11-15）
+
+Admin试跑不再参与处理节点开停、任务队列、持久回调或恢复；仅用原提取客户端直接提交并读取结果。PDF端点在测试中为fetch替身，PG/Redis为真实独立依赖，证明试跑不落库及用户业务回调保留，不代表云解析/OSS实测通过。没有调用生产付费服务，节点必须已启动且可访问。见[验收](acceptance/admin-document-trial.md)。
+
+## 服务地址与 Admin 部署边界（2026-11-15）
+
+当前仅优先支持 Admin 分机；API/Worker/Scheduler 仍同组。HTTP 解析节点继续走后台配置地址，回调目标新增 API_SERVICE_BASE_URL，可由域名/IP解析；未发真实 ECS/ECI/OSS 请求。真实 loopback HTTP 和隔离 PG/Redis 验证与云端双机部署区分。见[手册](runbooks/service-addresses.md)。
+
+## 容器发布演练供应商边界（2026-11-15）
+
+本轮使用真实临时PG/Redis/BullMQ、容器HTTP及local文件驱动；测试凭据随机生成，处理节点、短信、计费与外部模型关闭，无真实OSS/解析/云电源请求。双Scheduler仅验证持久扫描/时间窗去重及存活副本，不证明多副本云操作安全；本地共享测试卷不证明跨机对象存储通过。见[演练](acceptance/release-rehearsal.md)。
+
+## 发布恢复验证的供应商边界（2026-11-15）
+
+解析 intent 恢复、早到/重复/冲突回调及取消竞态使用 loopback 解析替身，持久事务/锁/队列使用真实独立 PG/Redis。没有调用真实解析服务、OSS、云电源或模型。237项集成通过，真实Milvus检索1项跳过；不把回调替身结果当作供应商部署验收。见[发布基础验收](acceptance/release-hardening.md)。
+
+## Prometheus 客户端（2026-11-15）
+
+采用 @prometheus-io/client 0.16.1，兼容本地 Node 26.11.0 和 Docker 26.12.1。无指标库外部运行时调用；Prometheus 主动抓取四角色的独立私网 /metrics。中心 test 节点 IP/主机名未提供，手册保留明确占位。专项验证仅真实本机 HTTP/隔离 PG/Redis，无生产付费供应商调用。见[验收](acceptance/prometheus.md)。
+
+## 已部署 ECS 按节点调用与配置简化（2026-11-15）
+
+当前CPU ECS无需镜像名或提取JSON，按需唤醒后直接调用已有Xberg API，默认省略config沿用服务端配置。全局四项解析设置移除，同步/异步与可选覆盖随节点快照；核心页面仅名称/实例ID/地址/并发/空闲停机/在线状态，其余折叠，试用仍位于解析与模型Modal。436项unit/contract、223项真实隔离PG/Redis通过（1跳过），静态检查/构建和Chrome桌面/移动验证通过。现有开发库无损调整，四角色已更新且healthy/readiness200；不开云机，内网PDF/Office仍待部署后实测。见[配置验收](acceptance/runtime-configuration.md)。
+
 ## RAG参数后台管理与ENV清理（2026-11-15）
 
 本轮仅配置/接口/界面及真实隔离PG/Redis验证，未执行模型、OSS上传、内网解析或云开停机。新增检索与Embedding测试用显式替身；服务地址、凭据、模型规格、源域名白名单仍在ENV，运行参数由后台DB管理。当前值无损导入原配置行，未改业务数据/索引，见[验收](acceptance/runtime-configuration.md)。

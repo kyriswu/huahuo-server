@@ -24,18 +24,21 @@ import {MilvusRepository,createMilvusClient} from '../../src/modules/rag/adapter
 import {buildApiServer} from '../../src/apps/api-server.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
 import {RuntimeSettings} from '../../src/modules/runtime-settings/service.js';
+import {configureTestMilvus} from '../support/milvus.js';
 const url=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!url||!/^huahuo_test_/.test(new URL(url).pathname.slice(1)))throw new Error('ISOLATED_TEST_DB_REQUIRED');
 const temp=await mkdtemp(join(tmpdir(),'kb-integration-'));
 const env={...process.env,APP_ENV:'test',APP_PUBLIC_BASE_URL:'http://kb.test',ADMIN_PUBLIC_BASE_URL:'http://admin.kb.test',HUAHUO_AGENT_TO_SERVER_API_KEY:'a'.repeat(43),HUAHUO_SERVER_TO_AGENT_API_KEY:'b'.repeat(43),LOG_LEVEL:'silent',DATABASE_URL:process.env.TEST_DATABASE_API_URL,APP_TOKEN_SECRET:'kb-test-secret-'.repeat(4),ALLOW_MOCK_PROVIDERS:'true',RAG_PROVIDER_MODE:'mock',RAG_RERANK_PROVIDER:'disabled',STORAGE_DRIVER:'local',STORAGE_LOCAL_ROOT:temp,RAG_SOURCE_ALLOWED_HOSTS:'fixture.test',...testJwtEnv};
 const config=loadConfig('api-server',env),workerConfig=loadConfig('worker',{...env,DATABASE_URL:process.env.TEST_DATABASE_WORKER_URL});
+// Snapshots, jobs, queries and direct schema checks share the isolated target.
+for(const cfg of [config,workerConfig])configureTestMilvus(cfg);
 for(const cfg of [config,workerConfig]){cfg.kb.noteEnabled=true;Object.assign(cfg.rag,{embeddingBatchSize:2,embeddingMaxRetries:0});}
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:url})),pool=poolFor(config),wp=poolFor(workerConfig);
 const memory=mockKnowledgeIndex();
 const targets:string[]=[];
 const factory=(snapshot:KbSnapshot):HybridIndex=>{
  targets.push(snapshot.target.collection);
- return process.env.TEST_MILVUS_ADDRESS?new MilvusRepository({...config.milvus,address:process.env.TEST_MILVUS_ADDRESS,username:'root',password:'Milvus',tls:false,createIfMissing:true,database:'default',collection:snapshot.target.collection,mode:snapshot.mode}):memory;
+ return process.env.TEST_MILVUS_ADDRESS?new MilvusRepository({...config.milvus,database:snapshot.target.database,collection:snapshot.target.collection,mode:snapshot.mode}):memory;
 };
 const embeddings=vi.fn(async(s:KbSnapshot)=>kbEmbedding(config,s));
 const deps={index:factory,embedding:(s:KbSnapshot)=>{const e=kbEmbedding(config,s);return {...e,model:s.embedding!.model,dimensions:1024,embed:vi.fn(async(texts:string[])=>{await embeddings(s);return e.embed(texts);})};}};
@@ -44,13 +47,15 @@ const assets=new AssetService(pool,config.appTokenSecret!,config,queries);
 const notes=new NoteIndexService(pool,config),jobs=new NoteIndexJobs(wp,workerConfig,deps),engine=new TaskEngine(wp,120000);
 async function fixture(){const userId=await insertFixtureUser(root),sessionId=randomUUID(),workspaceId=randomUUID();const bearer=await insertFixtureSession(root,userId,sessionId);await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'KB',true,$3)",[workspaceId,userId,randomUUID()]);return {bearer,workspaceId,scope:{userId,sessionId,traceId:randomUUID()}};}
 async function latest(id:string){return (await root.query<KbBuild>(`SELECT * FROM kb_note_hybrid_builds WHERE source_id=$1 AND source_revision=(SELECT part_revision_id::text FROM note_part_revisions WHERE note_id=$1 AND part='raw' ORDER BY revision DESC LIMIT 1) ORDER BY created_at DESC LIMIT 1`,[id])).rows[0]!;}
-async function runNote(id:string){const b=await latest(id);const a=await vi.waitFor(async()=>{const claim=await engine.claim(b.task_id,randomUUID());expect(claim).toBeTruthy();return claim!;},{interval:20,timeout:3000});const r=await jobs.execute(a);expect(await engine.finish(a,r.digest,r.bytes)).toBe(true);return b;}
+async function runNote(id:string,indexer=jobs){const b=await latest(id);const a=await vi.waitFor(async()=>{const claim=await engine.claim(b.task_id,randomUUID());expect(claim).toBeTruthy();return claim!;},{interval:20,timeout:3000});const r=await indexer.execute(a);expect(await engine.finish(a,r.digest,r.bytes)).toBe(true);return b;}
 async function create(body='PostgreSQL 数据库支持 MVCC 和 B-tree 索引。'){const f=await fixture();const note=await assets.createNote(f.scope,f.workspaceId,{title:'KB fixture',parts:{raw:body}},randomUUID());return {...f,note};}
 beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:url}));await root.query(`UPDATE runtime_configuration SET "values"="values"||'{"features.noteIndexing":true,"rag.embeddingBatchSize":2,"rag.embeddingMaxRetries":0}'::jsonb,revision=revision+1`);});
 afterAll(async()=>{await queries.close();await root.query(`UPDATE runtime_configuration SET "values"="values"-'features.noteIndexing'-'rag.embeddingBatchSize'-'rag.embeddingMaxRetries',revision=revision+1`);await Promise.all([pool.end(),wp.end(),root.end()]);await rm(temp,{recursive:true,force:true});});
 describe('two-mode knowledge indexing with real dependencies and deterministic model',()=>{
  it('refreshes cached recall parameters without closing a client still used by an earlier query',async()=>{
-  const f=await create('runtimecache fixture body');await runNote(f.note.noteId);
+  // This cache-lifetime probe wraps the deterministic index; populate that same
+  // index even when the rest of the suite uses the real ephemeral Milvus.
+  const f=await create('runtimecache fixture body');await runNote(f.note.noteId,new NoteIndexJobs(wp,workerConfig,{...deps,index:()=>memory}));
   const original=(await root.query('SELECT "values" FROM runtime_configuration')).rows[0].values;
   const settings=new RuntimeSettings(pool,config),seen:{rrfK:number;closed:ReturnType<typeof vi.fn>}[]=[];
   let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>release=r),start=new Promise<void>(r=>entered=r);
@@ -246,7 +251,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('real Milvus schema contains no dense field in document collection, while note uses 1024',async()=>{
   if(!process.env.TEST_MILVUS_ADDRESS)return;
-  const c=createMilvusClient({...config.milvus,address:process.env.TEST_MILVUS_ADDRESS,username:'root',password:'Milvus',tls:false});
+  const c=createMilvusClient(config.milvus);
   try{await c.connectPromise;const doc=await c.describeCollection({collection_name:config.kb.documentCollection});expect(doc.schema.fields.some(f=>f.name==='dense_vector')).toBe(false);const note=await c.describeCollection({collection_name:config.kb.noteCollection});expect(note.schema.fields.find(f=>f.name==='dense_vector')!.type_params.find(p=>p.key==='dim')!.value).toBe('1024');}finally{await c.closeConnection();}
  });
 });

@@ -31,6 +31,12 @@ x-app-env: &app-env
   PROCESSING_NODE_MAX_PENDING: ${PROCESSING_NODE_MAX_PENDING:-128}
   NODE_ENV: production
   APP_ENV: ${APP_ENV:-development}
+  # Shared callers use a configured API address; never infer it from a container name.
+  API_SERVICE_BASE_URL: ${API_SERVICE_BASE_URL:-${APP_PUBLIC_BASE_URL:-}}
+  METRICS_ENABLED: ${METRICS_ENABLED:-true}
+  METRICS_HOST: 0.0.0.0
+  METRICS_PORT: '9464'
+  METRICS_SERVICE: ${METRICS_SERVICE:-huahuo-server}
   LOG_LEVEL: ${LOG_LEVEL:-info}
   PROVIDER_MODE: ${PROVIDER_MODE:-disabled}
   ALLOW_MOCK_PROVIDERS: ${ALLOW_MOCK_PROVIDERS:-false}
@@ -109,6 +115,7 @@ services:
     environment:
       <<: *app-env
       SERVICE_ROLE: api-server
+      SHUTDOWN_TIMEOUT_MS: ${API_SHUTDOWN_TIMEOUT_MS:-300000}
       HOST: 0.0.0.0
       PORT: '3000'
       HEALTHCHECK_URL: http://127.0.0.1:3000/health/ready
@@ -144,12 +151,13 @@ services:
       STORAGE_ALIYUN_OSS_KEY_PREFIX: ${STORAGE_ALIYUN_OSS_KEY_PREFIX:-huahuo}
     ports:
       - '${API_BIND_HOST:-127.0.0.1}:${API_HOST_PORT:-3000}:3000'
+      - '${METRICS_BIND_HOST:-127.0.0.1}:${METRICS_API_HOST_PORT:-9464}:9464'
     volumes:
       - user_files:/app/var/storage
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: 30s
+    stop_grace_period: ${API_STOP_GRACE_PERIOD:-330s}
     mem_limit: ${API_MEMORY_LIMIT:-512m}
     cpus: ${API_CPU_LIMIT:-1.0}
 
@@ -159,6 +167,7 @@ services:
     environment:
       <<: [*app-env, *processing-nodes-env]
       SERVICE_ROLE: admin
+      SHUTDOWN_TIMEOUT_MS: ${ADMIN_SHUTDOWN_TIMEOUT_MS:-300000}
       HOST: 0.0.0.0
       PORT: '3000'
       HEALTHCHECK_URL: http://127.0.0.1:3000/health/ready
@@ -170,11 +179,12 @@ services:
       PROCESSING_NODE_TOKEN_AUDIO: ${PROCESSING_NODE_TOKEN_AUDIO:-}
     ports:
       - '${ADMIN_BIND_HOST:-127.0.0.1}:${ADMIN_HOST_PORT:-3001}:3000'
+      - '${METRICS_BIND_HOST:-127.0.0.1}:${METRICS_ADMIN_HOST_PORT:-9465}:9464'
     volumes:
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: 30s
+    stop_grace_period: ${ADMIN_STOP_GRACE_PERIOD:-330s}
     mem_limit: ${ADMIN_MEMORY_LIMIT:-512m}
     cpus: ${ADMIN_CPU_LIMIT:-1.0}
 
@@ -185,6 +195,7 @@ services:
       <<: [*app-env, *processing-nodes-env]
       WORKER_QUEUES: ${WORKER_QUEUES:-content,ai,commercial,maintenance}
       SERVICE_ROLE: worker
+      SHUTDOWN_TIMEOUT_MS: ${WORKER_SHUTDOWN_TIMEOUT_MS:-300000}
       HOST: 127.0.0.1
       PORT: '3100'
       HEALTHCHECK_URL: http://127.0.0.1:3100/health/ready
@@ -205,12 +216,14 @@ services:
       MILVUS_ADDRESS: ${MILVUS_ADDRESS:-}
       MILVUS_USERNAME: ${MILVUS_USERNAME:-}
       MILVUS_PASSWORD: ${MILVUS_PASSWORD:-}
+    ports:
+      - '${METRICS_BIND_HOST:-127.0.0.1}:${METRICS_WORKER_HOST_PORT:-9466}:9464'
     volumes:
       - user_files:/app/var/storage
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: 120s
+    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:-330s}
     mem_limit: ${WORKER_MEMORY_LIMIT:-1g}
     cpus: ${WORKER_CPU_LIMIT:-2.0}
 
@@ -220,16 +233,19 @@ services:
     environment:
       <<: [*app-env, *processing-nodes-env]
       SERVICE_ROLE: scheduler
+      SHUTDOWN_TIMEOUT_MS: ${SCHEDULER_SHUTDOWN_TIMEOUT_MS:-30000}
       HOST: 127.0.0.1
       PORT: '3100'
       HEALTHCHECK_URL: http://127.0.0.1:3100/health/ready
       DATABASE_URL: ${DATABASE_SCHEDULER_URL:-${DATABASE_URL:?Set runtime database URL}}
       DATABASE_POOL_MAX: ${DATABASE_POOL_MAX_SCHEDULER:-3}
+    ports:
+      - '${METRICS_BIND_HOST:-127.0.0.1}:${METRICS_SCHEDULER_HOST_PORT:-9467}:9464'
     volumes:
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: 30s
+    stop_grace_period: ${SCHEDULER_STOP_GRACE_PERIOD:-60s}
     mem_limit: ${SCHEDULER_MEMORY_LIMIT:-256m}
     cpus: ${SCHEDULER_CPU_LIMIT:-0.5}
 

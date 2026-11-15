@@ -1,6 +1,8 @@
 import {createDocumentParserConfig,type EnabledDocumentParserMachineConfig} from '../../config/document-parser-machine.js';
 import type {ProcessingNodesConfig} from '../../config/processing-nodes.js';
 import {DomainError} from '../identity/store.js';
+import {createDocumentExtractionConfig,defaultDocumentApi,type DocumentApiSettings} from '../../config/document-extraction.js';
+import {rejectSecrets} from '../runtime-settings/registry.js';
 export type {EciFallbackSettings as EciFallback} from '../../config/document-parser-eci.js';
 import {createDocumentParserEciConfig,type EciFallbackSettings as EciFallback} from '../../config/document-parser-eci.js';
 export type Capability='document'|'audio';
@@ -9,6 +11,13 @@ export interface ProcessingNode {
  regionId:string|null;instanceId:string|null;privateIp:string|null;baseUrl:string;healthPath:string;tokenEnv:string|null;
  concurrency:number;idleSeconds:number;startupSeconds:number;queueSeconds:number;enabled:boolean;revision:number;
  eciFallback?:EciFallback|null;
+ documentApi?:DocumentApiSettings;
+}
+export function nodeDocumentConfig(node:ProcessingNode){
+ const api=node.documentApi??defaultDocumentApi();
+ if(api.mode!=='async')throw new DomainError(400,'PROCESSING_NODE_ASYNC_REQUIRED');
+ rejectSecrets(api);
+ return createDocumentExtractionConfig(api.mode,api.parameters,api.pollMs,api.maxResponseBytes,api.timeoutSeconds*1000);
 }
 export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig):EnabledDocumentParserMachineConfig{
  try{
@@ -18,6 +27,8 @@ export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig):
   if(node.tokenEnv&&!/^PROCESSING_NODE_TOKEN_[A-Z0-9_]{1,64}$/.test(node.tokenEnv))throw Error();
   if(node.mode==='always-on'&&(node.instanceId||node.regionId||node.privateIp))throw Error();
   const fallback=node.eciFallback;
+  if(node.documentApi&&!node.capabilities.includes('document'))throw Error();
+  if(node.capabilities.includes('document'))nodeDocumentConfig(node);
   if(fallback&&(node.mode!=='ecs'||node.resourceClass!=='gpu'||node.capabilities.length!==1||node.capabilities[0]!=='document'))throw Error();
   const config=createDocumentParserConfig({mode:node.mode,baseUrl:node.baseUrl,healthPath:node.healthPath,
    regionId:node.regionId??undefined,instanceId:node.instanceId??undefined,privateIp:node.privateIp??undefined,
@@ -32,5 +43,6 @@ export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig):
  }catch(error){if(error instanceof DomainError)throw error;throw new DomainError(400,'PROCESSING_NODE_INVALID');}
 }
 export function nodeFromRow(row:Record<string,unknown>):ProcessingNode{
- return {...row.config as Omit<ProcessingNode,'id'|'revision'>,id:row.id as string,revision:Number(row.revision)};
+ const node={...row.config as Omit<ProcessingNode,'id'|'revision'>,id:row.id as string,revision:Number(row.revision)};
+ return {...node,...(node.capabilities.includes('document')?{documentApi:node.documentApi??defaultDocumentApi()}:{} )};
 }
