@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261115-main-update",
-  "baseRevision": "0771fd501fc3d4b7d257979032ed753492625b8b",
+  "id": "20261115-native-flow",
+  "baseRevision": "5b844ba89e28032d4d47435d8727f9a4a0b143bc",
   "services": [
     "api-server",
     "admin",
@@ -10,37 +10,16 @@
   ],
   "database": {
     "migrations": [],
-    "verifySql": "scripts/release/changes/20261115-main-update/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261115-native-flow/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": "处理节点云控制、状态及日志诊断改动；没有结构迁移或历史数据回填。"
+      "reason": "原生自动触发发布与 main 准备升级；本次以空迁移在既有测试机真实验证自动链路，不接正式生产。"
     }
   },
   "configuration": {
     "mode": "reuse",
-    "changes": [
-      {
-        "key": "PROCESSING_NODES_CLOUD_CONTROL_ENABLED",
-        "operation": "add",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": true
-      }
-    ],
-    "reviewedFiles": [
-      ".env.example",
-      "compose.yaml",
-      "src/config/processing-nodes.ts",
-      "src/config/document-parser-machine.ts",
-      "Dockerfile",
-      "package.json",
-      "tsconfig.build.json"
-    ]
+    "changes": [],
+    "reviewedFiles": []
   },
   "dependencies": [],
   "backfill": {
