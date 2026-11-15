@@ -41,6 +41,22 @@ test/production 两个 environment 均只允许 main 分支、0 个标签，管�
 
 正式生产尚未接入，成功部署基准为“未初始化”（null），不拿 main Git HEAD 或测试成功记录冒充生产部署。测试成功记录仍保留实际 SHA、配置及迁移历史；分支同步不会重置环境或数据库。
 
+## 固定测试发布脚本
+
+在已审 main 控制代码上运行：
+
+```bash
+node scripts/release/test-publish.mjs --pr <test目标PR编号>
+# 进程中断后读取原状态续查，不重新触发
+node scripts/release/test-publish.mjs --pr <编号> --resume
+```
+
+运行环境提供 `GH_TOKEN`，需要该仓库读取、PR/Contents 合并与 Actions 触发权限；不在命令参数、仓库或日志中放令牌，脚本不绕过 GitHub 的分支/负责人规则。它只接受本仓库目标为 test 的 PR，锁定 head、检查 CI、调用合并 API、等待合并后的 test push CI，再从 main 触发固定测试 workflow 并按返回的 run ID 等待终态。main 保护、test Skill 负责人审核、云端固定实例及五阶段门禁不变。
+
+发布 Skill/CODEOWNERS 只能自动同步 owner 已合入 main 的相同内容。纯文档/归属变更跳过应用部署；owner 已审 main 同步若仅额外包含这份发布控制器及其单测，也不重建应用。其他脚本、SQL、ENV 或业务变更不会进入此例外。程序保存 `.local/test-publish/pr-<编号>.json`，锁文件拒绝并发执行，状态原子更新；合并响应丢失可只读确认并续查。dispatch 响应不明确时保留 `dispatching` 并拒绝再次触发，须先核对已有 GitHub run；不删除状态盲目重跑。进程异常留下的锁也须确认无在途进程/发布后再处理。
+
+脚本复用 workflow 的完整预检、迁移、验收、切流和冒烟。`deployment:passed` 表示该固定 workflow 终态成功，独立实机验收仍按 Skill 执行；本期脚本验证是本地 API fixture 与真实 Node 子进程验证，不能冒称脚本已经真实触发过线上发布。
+
 ## 共享资源与进度
 
 本地开发与测试服务共用数据库及云资源，本地结构变更会立即影响测试旧服务，须先确认兼容。迁移阶段始终保留：核对编号和 checksum 后，无 pending 显示“无需执行”，有 pending 执行已审 SQL，差异则停止。不得改历史 checksum 或清空共享库来消除冲突。CI 使用独立临时 PG/Redis，不调用真实付费业务。
