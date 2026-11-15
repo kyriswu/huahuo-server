@@ -1,5 +1,9 @@
 # App 只读参照基线
 
+## 节点默认可用与试用就绪检查（2026-11-16）
+
+只读复核api_endpoints.dart与http_auth_repository.dart，哈希仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1与d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。仅Admin删除节点开关并明确试用未就绪错误，App协议不变；未写App或运行Flutter。
+
 ## README 与环境规则（2026-11-16）
 
 只读复核真实 App 的 api_endpoints.dart 与 http_auth_repository.dart；客户端仍从 HUAHUO_SERVER/HUAHUO_AGENT 获取地址，认证沿用既有路径。本期仅文档和服务端部署权限默认值，不改 App HTTP 契约。app:reference:diff 仍报告旧基线已有的认证源码/测试差异与工作树状态变化，未覆盖基线或 App；快照保存在 `.local/readme-test-cloud/app-reference.json`，未运行 Flutter。

@@ -1,5 +1,9 @@
 # 契约兼容性（P01 历史与 P02 增量）
 
+## 节点启用字段退役（2026-11-16）
+
+App路径和用户任务协议不变；仅Admin节点API删除enabled输入/输出，旧管理页面需刷新后编辑，传退役字段返回400。配置健康路径不可达的试用返回ADMIN_TRIAL_SERVICE_UNREACHABLE且不POST文件；真实提交未知仍不重发。
+
 ## 线上环境云控制默认值（2026-11-16）
 
 仅调整部署权限：APP_ENV=test/production 默认允许云端开停机，显式false继续禁用，RAM、管理员鉴权与CSRF要求保持。私网解析调用开关、App路由、认证/envelope、任务载荷、数据库结构均不改。已有测试/生产私密ENV仍需独立准备；不把本地配置与隔离依赖通过声称为线上开机或解析验收，见[验收](acceptance/cloud-control-environments.md)。

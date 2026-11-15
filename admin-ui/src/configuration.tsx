@@ -10,7 +10,7 @@ interface Definition {key:string;category:Category;label:string;description:stri
 interface Configuration {revision:number;values:Values;updatedAt:string;definitions:Definition[];bootstrap:{processingNodesEnabled:boolean;cloudControlEnabled:boolean;billingMode:string;uploadHardMaxBytes:number;environmentKeys:string[]};billingPolicies:{policy_version:string;mode:string;monthly_credit_limit:string;currency:string}[];}
 interface DocumentApi {mode:'async';parameters:Record<string,unknown>|null;timeoutSeconds:number;pollMs:number;maxResponseBytes:number;}
 const defaultDocumentApi=():DocumentApi=>({mode:'async',parameters:null,timeoutSeconds:3120,pollMs:2000,maxResponseBytes:67108864});
-interface Node {id:string;name:string;capabilities:('document'|'audio')[];resourceClass:'cpu'|'gpu';mode:'ecs'|'always-on';regionId:string|null;instanceId:string|null;privateIp:string|null;baseUrl:string;healthPath:string;tokenEnv:string|null;concurrency:number;idleSeconds:number;startupSeconds:number;queueSeconds:number;enabled:boolean;revision:number;eciFallback?:Record<string,unknown>|null;documentApi?:DocumentApi;}
+interface Node {id:string;name:string;capabilities:('document'|'audio')[];resourceClass:'cpu'|'gpu';mode:'ecs'|'always-on';regionId:string|null;instanceId:string|null;privateIp:string|null;baseUrl:string;healthPath:string;tokenEnv:string|null;concurrency:number;idleSeconds:number;startupSeconds:number;queueSeconds:number;revision:number;eciFallback?:Record<string,unknown>|null;documentApi?:DocumentApi;}
 interface NodeStatus {state:'online'|'offline'|'starting'|'stopping'|'unknown';source:'ecs'|'eci'|'http';serviceReady:boolean|null;serviceStatus:'ready'|'unreachable'|'not_checked'|'not_running';canStart:boolean;checkedAt?:string;reason?:string;instanceStatus?:string;startup?:{taskId:string;state:string;error?:string}|null;}
 const nodeStatusText=(status?:NodeStatus)=>status?({online:'在线',offline:'不在线',starting:'开机中',stopping:'停机中',unknown:'状态未知'})[status.state]:'检测中';
 const nodeStatusDetail=(status?:NodeStatus)=>!status?'正在读取实例状态':status.state==='online'?`${status.source==='http'?'服务已运行':'实例已运行'} · ${status.serviceStatus==='ready'?'解析 API 可访问':status.serviceStatus==='not_checked'?'当前环境未启用解析 API 调用':'解析 API 暂不可达'}`:status.state==='starting'?'正在通过云端控制接口开机':status.state==='stopping'?'正在按空闲策略停机':status.state==='offline'?'实例或服务未运行':'无法确认实例状态，请检查查询权限和连接';
@@ -22,7 +22,7 @@ function errorText(cause:unknown){
  if(cause instanceof AdminApiError){
   if(cause.code==='CONFIGURATION_CONFLICT')return '已有其他管理员更新此配置。请保留当前修改，刷新配置后重新核对并保存。';
   if(cause.code==='PROCESSING_NODE_IDENTITY_EXISTS')return '该 ECS 或服务地址已登记，请编辑已有节点。';
-  if(cause.status===409)return '节点尚未排空。请先关闭“接收新任务”并等待已有任务结束；ECS 还需确认已节省停机后再修改。';
+  if(cause.status===409)return '节点尚未排空。请等待已有任务结束；ECS 还需确认已节省停机后再修改。';
   if(cause.status===403)return '当前账号没有修改权限，或登录校验已失效。请重新登录后重试。';
   if(cause.status===400)return '配置未通过校验。请检查数值范围、完整 JSON、节点地址和密钥引用；不要填写密钥。';
   if(cause.status===503)return '配置依赖暂不可用。请检查对应的部署开关和节点凭据引用后重试。';
@@ -102,7 +102,6 @@ function NodeEditor({node,editable,cloudEnabled,refreshKey,onSave,onStart,onStat
    </div>
    <details className="mb-5 border-t border-console-line pt-4"><summary className="cursor-pointer text-sm font-medium">高级设置</summary>
     <div className="mt-5 grid gap-x-6 sm:grid-cols-2">
-     <Form.Item name="enabled" label="参与自动调度" extra="允许新任务分配到此节点；机器运行状态由实际检查决定。" valuePropName="checked"><Checkbox>接收新任务</Checkbox></Form.Item>
      <Form.Item name="capabilities" label="处理类型" rules={[{required:true,message:'至少选择一种类型。'}]}><Checkbox.Group options={[{label:'文档',value:'document'},{label:'音频',value:'audio'}]}/></Form.Item>
      <Form.Item name="resourceClass" label="计算资源"><Select options={[{value:'cpu',label:'CPU'},{value:'gpu',label:'GPU'}]}/></Form.Item>
      <Form.Item name="mode" label="唤醒方式"><Select options={[{value:'ecs',label:'启动既有 ECS'},{value:'always-on',label:'无需唤醒，直接调用'}]}/></Form.Item>
