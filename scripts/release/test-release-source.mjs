@@ -1,5 +1,6 @@
 import { appendFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { readReleaseEventContext, verifyCiTrigger } from './release-events.mjs';
 
 const REPOSITORY = 'kyriswu/huahuo-server';
 const WORKFLOW_PATH = '.github/workflows/release-smoke-check.yml';
@@ -7,9 +8,13 @@ const SHA = /^[a-f0-9]{40}$/;
 const failed = () => { throw new Error('TEST_RELEASE_SOURCE_NOT_VERIFIED'); };
 
 function validateContext(context) {
-  if (context.repository !== REPOSITORY || context.eventName !== 'workflow_dispatch'
+  if (context.repository !== REPOSITORY || !['workflow_dispatch', 'workflow_run'].includes(context.eventName)
     || context.ref !== 'refs/heads/main' || !SHA.test(context.controlSha ?? '')
     || (context.expectedTargetSha !== undefined && !SHA.test(context.expectedTargetSha))) failed();
+  if (context.eventName === 'workflow_run') {
+    try { verifyCiTrigger(context, 'test'); } catch { failed(); }
+    if (context.expectedTargetSha !== context.trigger.head_sha) failed();
+  }
 }
 
 /** main supplies trusted control code; only the tested test SHA is deployed. */
@@ -21,17 +26,18 @@ export function selectTestReleaseRevision(context, { mainRef, testRef, ciRuns })
   if (!Array.isArray(ciRuns?.workflow_runs) || !ciRuns.workflow_runs.some(run =>
     run?.head_sha === testRef.object.sha && run.head_branch === 'test' && run.event === 'push'
     && run.status === 'completed' && run.conclusion === 'success' && run.path === WORKFLOW_PATH
-    && run.head_repository?.full_name === REPOSITORY)) failed();
+    && run.head_repository?.full_name === REPOSITORY
+    && (context.eventName !== 'workflow_run' || run.id === context.trigger.id))) failed();
   return { controlSha: context.controlSha, targetSha: testRef.object.sha };
 }
 
 /** Signature verification remains the responsibility of Alibaba STS. */
-export function verifyTestReleaseOidcClaims(claims, controlSha) {
-  if (!SHA.test(controlSha ?? '') || claims?.iss !== 'https://token.actions.githubusercontent.com'
+export function verifyTestReleaseOidcClaims(claims, controlSha, eventName = 'workflow_dispatch') {
+  if (!['workflow_dispatch', 'workflow_run'].includes(eventName) || !SHA.test(controlSha ?? '') || claims?.iss !== 'https://token.actions.githubusercontent.com'
     || claims.aud !== 'sts.aliyuncs.com'
     || claims.sub !== 'repo:kyriswu@5120703/huahuo-server@1415659399:environment:test'
     || claims.ref !== 'refs/heads/main' || claims.repository !== REPOSITORY
-    || claims.event_name !== 'workflow_dispatch' || claims.sha !== controlSha) {
+    || claims.event_name !== eventName || claims.sha !== controlSha) {
     throw new Error('TEST_RELEASE_OIDC_NOT_VERIFIED');
   }
 }
@@ -60,9 +66,7 @@ export async function resolveTestReleaseRevision(context, token, fetchImpl = fet
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const result = await resolveTestReleaseRevision({ repository: process.env.GITHUB_REPOSITORY,
-      eventName: process.env.GITHUB_EVENT_NAME, ref: process.env.GITHUB_REF, controlSha: process.env.GITHUB_SHA,
-      expectedTargetSha: process.env.TEST_RELEASE_SHA }, process.env.GH_TOKEN);
+    const result = await resolveTestReleaseRevision(await readReleaseEventContext(), process.env.GH_TOKEN);
     if (!process.env.GITHUB_ENV) failed();
     await appendFile(process.env.GITHUB_ENV, `TEST_RELEASE_SHA=${result.targetSha}\n`);
     console.log('Protected main control and exact tested test revision verified.');

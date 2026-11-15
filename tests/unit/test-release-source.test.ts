@@ -109,6 +109,19 @@ describe('manual test release source verification (local data fixtures only)', (
   ])('rejects OIDC claims with %s', (_label, patch) => {
     expect(() => verifyTestReleaseOidcClaims({ ...claims(), ...patch }, controlSha)).toThrow(/^TEST_RELEASE_OIDC_NOT_VERIFIED$/);
   });
+  it('accepts only the exact successful test push CI that triggered the main workflow', () => {
+    const snapshot = source(); const trigger = { ...run(), id: 71 };
+    Object.assign(snapshot.ciRuns.workflow_runs[0]!, { id: 71 });
+    const auto = { ...context(), eventName: 'workflow_run', expectedTargetSha: targetSha, trigger };
+    expect(selectTestReleaseRevision(auto, snapshot)).toEqual({ controlSha, targetSha });
+    Object.assign(snapshot.ciRuns.workflow_runs[0]!, { id: 72 });
+    expect(() => selectTestReleaseRevision(auto, snapshot)).toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
+  });
+  it('accepts workflow_run OIDC only when that event was explicitly expected by trusted main control', () => {
+    expect(() => verifyTestReleaseOidcClaims({ ...claims(), event_name: 'workflow_run' }, controlSha, 'workflow_run')).not.toThrow();
+    expect(() => verifyTestReleaseOidcClaims({ ...claims(), event_name: 'workflow_run' }, controlSha)).toThrow('TEST_RELEASE_OIDC_NOT_VERIFIED');
+    expect(() => verifyTestReleaseOidcClaims(claims(), controlSha, 'push')).toThrow('TEST_RELEASE_OIDC_NOT_VERIFIED');
+  });
   it('CLI fails closed for an unauthorized context without printing private input', () => {
     const result = spawnSync(process.execPath, ['scripts/release/test-release-source.mjs'], {
       cwd: process.cwd(), encoding: 'utf8', env: { PATH: process.env.PATH, GH_TOKEN: 'private-token-fixture',

@@ -14,9 +14,11 @@
 
 ## 触发与身份
 
-`test-server-release.yml` 仅 workflow_dispatch，从受保护 main 由 AI／脚本触发；保留人工按钮作为操作入口，但测试不再要求用户逐次点击。main 提供控制代码/调用器/依赖与 Compose；test 提供业务代码及发布清单，需同 SHA 的 test push CI 成功。选择后固定双方完整 SHA，获取身份后及调用前复核；宿主锁内和迁移前也复核，变化就停止，不自动替换候选。合并及 CI 本身不会改变容器；发布执行者在检查通过后自动触发该 workflow 并跟踪结果。
+`test-server-release.yml` 接收 Server CI 的 workflow_run 和恢复用途的 workflow_dispatch。自动路径只接受本仓库 test push 的准确成功 CI；流程始终 checkout 发起时受保护 main 的控制 SHA，不运行 test 控制代码或消费不可信缓存/产物。PR 更新 release plan 表示要发布，进入原五阶段；仅文档/已知控制文件同步可明确跳过。其他业务变化缺少 plan 更新、文件列表不全、错分支/仓库/CI 运行或过期 SHA 均拒绝。
 
-GitHub test/production 两个 environment 已实际保存为仅允许 main 分支、0 个标签，并关闭管理员绕过。production reviewer 只有 `kyriswu`，关闭 prevent-self-review，允许 owner 本人发起后本人批准。RAM 使用此仓库的 `environment:test` subject，旧分支 subject 已移除；5400 秒会话上限和原权限 Policy 保持不变。工作流另核对 `ref=main`、`event_name=workflow_dispatch` 和控制 SHA。该身份已用于首轮真实手动发布；本次来源调整复用它，不创建新的生产身份，production 环境配置不代表正式生产已接入。
+获取身份后与调用前重新检查准确 main/test SHA；不自动改选其他版本。发布串行，不取消在途排空，不自动重发失败/超时调用。手动恢复仍核对 test 同 SHA push CI。
+
+GitHub test/production 两个 environment 已实际保存为仅允许 main 分支、0 个标签，并关闭管理员绕过。production reviewer 只有 `kyriswu`，关闭 prevent-self-review，允许 owner 本人发起后本人批准。RAM 使用此仓库的 `environment:test` subject，旧分支 subject 已移除；5400 秒会话上限和原权限 Policy 保持不变。工作流另核对 `ref=main`、事件为已验证的 workflow_run 或恢复用 workflow_dispatch 和控制 SHA。该身份已用于首轮真实手动发布；本次来源调整复用它，不创建新的生产身份，production 环境配置不代表正式生产已接入。
 
 每次运行交换短期 STS 凭据，GitHub 不保存长期 AK；候选使用 90 分钟会话。专用策略仍仅允许对指定实例和指定命令使用 `InvokeCommand` 与 `DescribeInvocationResults`，不授权启动/停止其他实例、修改 RAM 或任意创建命令。
 

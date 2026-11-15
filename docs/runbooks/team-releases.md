@@ -8,14 +8,14 @@
 
 操作示例：GitHub Action 选择 **main** → 运行 main 的 workflow → 校验 **test** 的提交与 CI → 将该 test 版本部署到测试服务器。业务 SHA 与流程控制 SHA 分别记录。
 
-`main` 是受保护的发布流程来源，`test` 是测试服务器的业务代码来源。团队通过 PR 合入 test，等待 test 的同 SHA push CI，通过 main 中的 workflow_dispatch 发布该 test SHA；AI／脚本可自动完成测试合并和触发，无需逐次人工点击。main/test 同步通过 PR 完成，不强推受保护分支；本地开发使用 test。
+`main` 是受保护的发布流程来源，`test` 是测试服务器的业务代码来源。团队通过 PR 合入 test，等待 test 的同 SHA push CI，GitHub 原生 Auto-merge 合并后，test push CI 成功自动触发 main 中的发布 workflow，无需逐次人工点击。main/test 同步通过 PR 完成，不强推受保护分支；本地开发使用 test。
 
 ## 权限与当前状态
 
 | 操作 | 已保存的权限限制 |
 | --- | --- |
 | 合入 `test` | 团队按已配置的 PR 和 CI 规则合并并部署 |
-| 发布测试 | AI／脚本可从 main 自动触发，部署已通过 CI 的 test SHA |
+| 发布测试 | test push CI 成功自动触发 main 发布流程；手动入口仅作恢复 |
 | 合入 `main` | 只有 owner |
 | 生产发布 | 人工发起，必须 owner 批准 |
 | 测试 Action 的来源与目标 | 从 `main` 发起，使用 `test` environment；继续部署原测试机 |
@@ -34,28 +34,19 @@ test/production 两个 environment 均只允许 main 分支、0 个标签，管�
 
 ## 发布测试版本
 
-1. 从测试环境实际成功 SHA 整理代码、配置和迁移影响，使用发布技能和 PR 模板提交上线清单。
-2. 流程变更先由 owner 合入 main；业务检查通过后可由 AI／脚本锁定 PR head 自动合入 test。owner 已审 main 内容同步到 test 可自动合并，等待 test push CI 成功。
-3. AI／脚本触发 `Test server release` 的 workflow_dispatch，流程来源 main，无需用户逐次点击；人工操作时也选择 main。主分支提供调用器、依赖及 Compose，test 提供业务候选与清单；分别固定完整 SHA。
-4. 调用前与宿主锁内核对双方未移动，失败停止，不自动换候选。查看五阶段结果后才记录该测试环境成功版本。
+1. 用测试环境实际成功 SHA 整理本期影响，准备 release plan 与 PR 上线清单。业务、SQL、ENV 变化必须修改 `scripts/release/plan.json`；计划更新表达本次需要发布，原数据库/配置/兼容验收仍执行。
+2. 创建 test PR 后启用 GitHub 原生 Auto-merge；CI 与负责人审核满足后由 GitHub 合并。AI 可直接设置，无需 owner 对普通 test 业务逐次确认。发布控制变更与 Skill 先由 owner 审核合入 main，再同步 test；main 不自动合并。
+3. 合并后的准确 test SHA 完成 push CI，main 的 `Test server release` 经 workflow_run 自动启动。main 提供控制代码、调用器、依赖及 Compose，test 提供业务及清单；GitHub 自动提供只读 API token，云身份仍用原 OIDC，不新增长期令牌。
+4. 自动入口验证 CI 类型/分支/仓库/运行 ID、当前双 SHA 与合并 PR 的完整文件清单。修改 release plan 的候选进入既有五阶段；只含文档/归属/已知控制文件的同步跳过应用部署。业务变更缺 plan 更新则失败，不能当作无变化。重命名也检查原路径，文件清单不完整则拒绝。
+5. 发布串行且不取消正在排空的发布；旧候选过期就停止。只有终态和验收通过才记录成功。CI 成功与发布成功分别记录。
 
-正式生产尚未接入，成功部署基准为“未初始化”（null），不拿 main Git HEAD 或测试成功记录冒充生产部署。测试成功记录仍保留实际 SHA、配置及迁移历史；分支同步不会重置环境或数据库。
+`workflow_dispatch` 作为显式恢复入口保留，仍从 main 发起、选择准确 test SHA 并验证 push CI；它不跳过配置、迁移或旧服务排空。发布失败不因后续文档提交自动重发，应先核对已有调用、实际容器和已提交迁移，再决定修复或重试。
 
-## 固定测试发布脚本
+## main 的自动准备与生产门禁
 
-在已审 main 控制代码上运行：
+owner 合入 main 后，main push CI 成功自动触发 `Main release readiness`。只复核准确 CI/main SHA 并生成 plan id、角色、迁移数量和配置键摘要，不输出真实配置值。生产尚未接入：基准仍未初始化，不取得生产身份、执行生产迁移或更新容器。
 
-```bash
-node scripts/release/test-publish.mjs --pr <test目标PR编号>
-# 进程中断后读取原状态续查，不重新触发
-node scripts/release/test-publish.mjs --pr <编号> --resume
-```
-
-运行环境提供 `GH_TOKEN`（已有 GitHub App／用户授权身份），需要该仓库读取、PR/Contents 合并与 Actions 触发权限。不要用内置 GITHUB_TOKEN 完成合并：GitHub 会抑制它触发的 push CI，脚本会停在等待 CI 而不能发布；脚本不因此改用未经约定的 CI 事件或绕过检查。不在命令参数、仓库或日志中放令牌，脚本不绕过 GitHub 的分支/负责人规则。它只接受本仓库目标为 test 的 PR，锁定 head、检查 CI、调用合并 API、等待合并后的 test push CI，再从 main 触发固定测试 workflow 并按返回的 run ID 等待终态。main 保护、test Skill 负责人审核、云端固定实例及五阶段门禁不变。
-
-发布 Skill/CODEOWNERS 只能自动同步 owner 已合入 main 的相同内容。纯文档/归属变更跳过应用部署；owner 已审 main 同步若仅额外包含这份发布控制器及其单测，也不重建应用。其他脚本、SQL、ENV 或业务变更不会进入此例外。程序保存 `.local/test-publish/pr-<编号>.json`，锁文件拒绝并发执行，状态原子更新；合并响应丢失可只读确认并续查。dispatch 响应不明确时保留 `dispatching` 并拒绝再次触发，须先核对已有 GitHub run；不删除状态盲目重跑。进程异常留下的锁也须确认无在途进程/发布后再处理。
-
-脚本复用 workflow 的完整预检、迁移、验收、切流和冒烟。`deployment:passed` 表示该固定 workflow 终态成功，独立实机验收仍按 Skill 执行；本期脚本验证是本地 API fixture 与真实 Node 子进程验证，不能冒称脚本已经真实触发过线上发布。
+可选的 `verify_approval` 只演练已有 production 的 owner 审批门禁，使用 `deployment:false`，不会生成 GitHub 生产部署记录，也不访问服务器。生产接入后需在同一 owner 审批边界后连接真实发布执行器；当前准备成功不等于生产发布成功。
 
 ## 共享资源与进度
 

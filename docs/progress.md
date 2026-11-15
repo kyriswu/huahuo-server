@@ -427,3 +427,8 @@ Typecheck、Lint、Build、27文件229项unit/contract、10文件115项隔离PG/
 增加 PR 上线清单与 ENV 值断言，恢复 main 控制/test 业务。main 直接发布尝试在预检被宿主配置检查阻止，未换容器；测试实际基准保留0771fd5，正式生产未初始化。验证与交付见 docs/acceptance/release-config-checklist.md。
 
 真实 test 发布 Action 43725571994 五阶段通过，OK，无到期强退；四角色5b844ba健康、保留上一成功0771fd5与数据卷。正式生产未部署。详见 docs/acceptance/release-config-checklist.md。
+
+
+## 原生 test 自动发布与 main 准备（候选）
+
+收敛为原生Auto-merge与workflow_run，保留现有五阶段和安全门禁；main自动生成准确候选摘要，生产未接入。移除临时总控脚本，细节与验证见 docs/acceptance/native-release-flow.md。
