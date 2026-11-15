@@ -1,8 +1,14 @@
 # 当前开发进度
 
+## 人工发布、分支分工与阶段进度（2026-11-15）
+
+测试发布改为人工 Merge 后再从 main 人工启动 Action，main 提供控制代码、test 提供已通过同 SHA push CI 的业务版本；补齐远端五阶段进度与终态复核边界。737 项 unit/contract、Typecheck/Lint/Build、48 项宿主 mock 和 Skill 静态检查通过；本轮真实隔离 PG/Redis 275 项通过、1 项 Milvus 跳过，f80→候选 SQL 2→2、首次与重复应用均为 `[]`。测试 environment 仅 main/0 标签/管理员绕过关闭已保存，RAM 环境 subject 已回读，新宿主安装核对通过且四角色未重启。候选尚未合并部署；main/test 分支规则和生产审批仍在设置，生产未接入。见[手动发布验收](acceptance/manual-release.md)及[团队操作](runbooks/team-releases.md)。
+
 ## 可复用发布规范、Skill 与迁移验收（2026-11-15）
 
 在已完成的测试机发布基础上，新增仓库 skill、单份发布清单、冻结历史迁移、写库前纯只读检查、迁移后按角色 SQL 断言和配置门禁。每次隔离集成测试先按实际成功 SHA 的 SQL 升级到候选；本期用增量 0002 给已有单行配置补入默认十分钟退出预算，旧版迁移保持不变。数据修正依据规模、锁、时长与恢复条件决定随发布或独立运行，不机械强制双写/独立回填。675 项 unit/contract、275 项真实隔离 PG/Redis（1 项跳过）、Typecheck/Lint/Build 通过；宿主控制流另有 39 项 mock 演练，真实启用状态见[验收](acceptance/standard-release.md)，操作规范见[标准发布](runbooks/standard-release.md)。
+
+后续 [Action 43705816086](https://github.com/kyriswu/huahuo-server/actions/runs/43705816086) 已发布 f80a0c2；实机确认四角色 healthy、DB 版本 2、排空默认值 600000、物理外键 0，并保留当前及前一成功镜像。结果为 `OK_WITH_FORCED_DRAIN`，API 入口排空与旧容器退出有到期强停，不能称全程无中断；仅通过 health 范围。
 
 ## GitHub 真实合并演练与测试机发布准备（2026-11-15）
 

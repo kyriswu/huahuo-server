@@ -1,12 +1,9 @@
 name: Test server release
 
-# Deploy only after main push CI succeeds, or by manual dispatch on main.
+# Dispatch from protected main; deploy the latest test SHA after its push CI.
+# All runner-side control code and dependencies come from main, never test.
 # This does not replace the authenticated release-smoke workflow.
 on:
-  workflow_run:
-    workflows: [Server CI]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -31,53 +28,25 @@ jobs:
     name: Test server deployment acceptance
     if: >-
       github.repository == 'kyriswu/huahuo-server' &&
-      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.path == '.github/workflows/release-smoke-check.yml'))
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    environment: test
     runs-on: ubuntu-latest
     timeout-minutes: 100
-    env:
-      TEST_RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
     steps:
-      - name: Require current main and successful CI for this exact revision
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          node --input-type=module <<'NODE'
-          try {
-            const sha = process.env.TEST_RELEASE_SHA;
-            if (!/^[a-f0-9]{40}$/.test(sha ?? '')) throw new Error();
-            const base = 'https://api.github.com/repos/kyriswu/huahuo-server';
-            const options = { headers: { accept: 'application/vnd.github+json', authorization: 'Bearer ' + process.env.GH_TOKEN }, signal: AbortSignal.timeout(10000), redirect: 'error' };
-            const responses = await Promise.all([
-              fetch(base + '/git/ref/heads/main', options),
-              fetch(base + '/actions/workflows/release-smoke-check.yml/runs?branch=main&event=push&status=success&head_sha=' + sha + '&per_page=10', options),
-            ]);
-            if (responses.some(response => !response.ok)) throw new Error();
-            const [ref, history] = await Promise.all(responses.map(response => response.json()));
-            if (ref.object?.sha !== sha || !history.workflow_runs?.some(run =>
-              run.head_sha === sha && run.head_branch === 'main' && run.event === 'push' && run.conclusion === 'success' &&
-              run.path === '.github/workflows/release-smoke-check.yml' && run.head_repository?.full_name === 'kyriswu/huahuo-server')) throw new Error();
-            console.log('Exact main revision has passed Server CI.');
-          } catch {
-            console.error('::error::TEST_RELEASE_SOURCE_NOT_VERIFIED');
-            process.exit(1);
-          }
-          NODE
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.TEST_RELEASE_SHA }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Verify checked-out revision
-        run: test "$(git rev-parse HEAD)" = "$TEST_RELEASE_SHA"
+      - name: Verify trusted main control revision
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26.11.0'
           package-manager-cache: false
+      - name: Select latest test revision with successful push CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release/test-release-source.mjs
       - name: Install locked caller dependencies
         run: |
           npm install --global pnpm@10.15.1
@@ -85,6 +54,7 @@ jobs:
       - name: Verify OIDC claims and dedicated role configuration
         run: |
           node --input-type=module <<'NODE'
+          import { verifyTestReleaseOidcClaims } from './scripts/release/test-release-source.mjs';
           try {
             if (process.env.TEST_RELEASE_OIDC_PROVIDER_ARN !== 'acs:ram::1883731481145107:oidc-provider/github-actions-huahuo-server' ||
               process.env.TEST_RELEASE_ROLE_ARN !== 'acs:ram::1883731481145107:role/huahuo-server-test-release') throw new Error();
@@ -95,10 +65,8 @@ jobs:
             const token = (await response.json()).value;
             if (typeof token !== 'string' || token.length > 20000 || token.split('.').length !== 3) throw new Error();
             const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
-            if (claims.iss !== 'https://token.actions.githubusercontent.com' || claims.aud !== 'sts.aliyuncs.com' ||
-              claims.sub !== 'repo:kyriswu@5120703/huahuo-server@1415659399:ref:refs/heads/main' ||
-              claims.ref !== 'refs/heads/main' || claims.repository !== 'kyriswu/huahuo-server') throw new Error();
-            console.log('Dedicated main OIDC claims verified.');
+            verifyTestReleaseOidcClaims(claims, process.env.GITHUB_SHA);
+            console.log('Dedicated test environment and main OIDC claims verified.');
           } catch {
             console.error('::error::TEST_RELEASE_OIDC_NOT_VERIFIED');
             process.exit(1);
@@ -113,4 +81,8 @@ jobs:
           role-session-expiration: 5400
           role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Invoke the fixed saved test-server command
-        run: node scripts/release/invoke-cloud-release.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release/test-release-source.mjs
+          node scripts/release/invoke-cloud-release.mjs
