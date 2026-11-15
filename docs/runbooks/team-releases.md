@@ -24,7 +24,7 @@ main/test 分支规则已保存并通过 API 回读。main 的原规则仍要求
 
 test/production 两个 environment 均只允许 main 分支、0 个标签，管理员绕过关闭；production reviewer 仅 `kyriswu`，允许本人发起后本人批准。RAM 使用 `environment:test` subject，旧分支 subject 已移除。本次仅调整原测试发布的代码来源，不改变环境、云角色、保存命令或服务器目标。
 
-上述权限配置尚未用真实协作者账号做拒绝操作的反向实测。原 test 候选方案已完成一次真实手动发布；本次恢复 test 候选及新增配置断言须另行合并和验收，不能用上次成功代替。Skill 是准备指南，GitHub 权限才执行强制限制。本次不接正式生产，也不增加生产发布入口。分项证据见[手动发布验收](../acceptance/manual-release.md)。
+上述权限配置尚未用真实协作者账号做拒绝操作的反向实测。test 业务/main 控制流程已通过本次真实发布验收，新增配置断言入口也已随镜像发布；自动执行授权不降低既有验收要求。Skill 是准备指南，GitHub 权限才执行强制限制。本次不接正式生产，也不增加生产发布入口。分项证据见[手动发布验收](../acceptance/manual-release.md)。
 
 ## 发布 Skill 审核保护
 
