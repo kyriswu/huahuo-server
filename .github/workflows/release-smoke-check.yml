@@ -5,7 +5,7 @@ name: Server CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, test]
   workflow_dispatch:
 
 permissions:

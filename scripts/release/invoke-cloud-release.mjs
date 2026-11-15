@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -11,11 +11,14 @@ import { RetryOptions, RuntimeOptions } from '@darabonba/typescript';
 // This is the explicitly authorized test ECS, never an arbitrary deployment target.
 const TARGET = Object.freeze({ regionId: 'cn-beijing', instanceId: 'i-2zegtoygiiked53yntmj' });
 const MAX_POLLS = 1080;
-const STAGES = ['preflight', 'checkout', 'build', 'migrate', 'deploy', 'health', 'cleanup', 'complete'];
+const STAGES = ['preflight', 'checkout', 'build', 'migrate', 'verify', 'deploy', 'health', 'smoke', 'cleanup', 'complete'];
+const PHASES = ['预检与构建', '数据库迁移', '迁移后验收', '容器切换与旧服务退出', '冒烟与清理'];
+const STAGE_PHASE = { preflight: 1, checkout: 1, build: 1, migrate: 2, verify: 3, deploy: 4, health: 5, smoke: 5, cleanup: 5 };
 const ERROR_CODES = new Set(['TEST_RELEASE_TARGET_DENIED', 'TEST_RELEASE_COMMAND_INVALID', 'TEST_RELEASE_SHA_INVALID',
   'TEST_RELEASE_STS_REQUIRED', 'TEST_RELEASE_TIMEOUT_INVALID', 'TEST_RELEASE_ACTION_DENIED', 'TEST_RELEASE_CLOUD_RESPONSE_INVALID',
   'TEST_RELEASE_RESULT_MISMATCH', 'TEST_RELEASE_OUTPUT_TRUNCATED', 'TEST_RELEASE_OUTPUT_INVALID', 'TEST_RELEASE_TIMEOUT',
-  'TEST_RELEASE_SUBMISSION_UNKNOWN', 'TEST_RELEASE_POLL_FAILED', 'TEST_RELEASE_FAILED']);
+  'TEST_RELEASE_SUBMISSION_UNKNOWN', 'TEST_RELEASE_POLL_FAILED', 'TEST_RELEASE_FAILED',
+  'TEST_RELEASE_PROGRESS_INVALID', 'TEST_RELEASE_REPORT_FAILED']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const { default: OpenApiClient } = createRequire(import.meta.url)('@alicloud/openapi-core');
 
@@ -90,14 +93,87 @@ function execution(response, config, invokeId) {
   return item;
 }
 
-function completion(item, config) {
-  if (item.Dropped !== 0) fail('TEST_RELEASE_OUTPUT_TRUNCATED');
-  if (typeof item.Output !== 'string' || Buffer.byteLength(item.Output) > 4096) fail('TEST_RELEASE_OUTPUT_INVALID');
-  let result;
-  try { result = JSON.parse(item.Output); } catch { fail('TEST_RELEASE_OUTPUT_INVALID'); }
+function terminal(value, config) {
+  const result = value;
   if (!object(result) || Object.keys(result).sort().join(',') !== 'code,sha,stage,status,version'
     || result.version !== 1 || result.sha !== config.sha || !STAGES.includes(result.stage)
     || !['passed', 'failed'].includes(result.status) || !['OK', 'OK_WITH_FORCED_DRAIN', 'FAILED'].includes(result.code)) fail('TEST_RELEASE_OUTPUT_INVALID');
+  return { version: 1, sha: result.sha, stage: result.stage, status: result.status, code: result.code };
+}
+
+function createProgress(config, onProgress) {
+  const seen = [];
+  let finalMarker;
+  const snapshot = (finished = false) => {
+    const visibility = seen.length ? 'reported' : finalMarker ? 'terminal_only' : 'unavailable';
+    const phases = PHASES.map((name, index) => ({ phase: index + 1, name,
+      status: seen.length && !finished ? 'pending' : 'unobserved' }));
+    for (const event of seen) phases[event.phase - 1].status = event.status;
+    const failedPhase = seen.find(event => event.status === 'failed')?.phase ?? null;
+    if (finalMarker?.status === 'failed' && failedPhase) {
+      for (const phase of phases) if (phase.phase > failedPhase) phase.status = 'not_run';
+    }
+    return { visibility, completed: seen.length ? phases.filter(phase => phase.status === 'passed').length : null,
+      total: PHASES.length, failedPhase, phases };
+  };
+  const accept = async (item, finished) => {
+    if (item.Dropped !== 0) fail('TEST_RELEASE_OUTPUT_TRUNCATED');
+    if (typeof item.Output !== 'string' || Buffer.byteLength(item.Output) > 4096) fail('TEST_RELEASE_OUTPUT_INVALID');
+    let lines = item.Output.split('\n').filter(line => line.trim());
+    try {
+      const legacy = JSON.parse(item.Output);
+      if (object(legacy) && !Object.hasOwn(legacy, 'event')) lines = [JSON.stringify(legacy)];
+    } catch { /* Multiple JSONL records or a running partial record. */ }
+    if (lines.length > 11) fail('TEST_RELEASE_PROGRESS_INVALID');
+    const events = [];
+    let marker, partial = false, currentPhase = 1, currentStatus = 'pending';
+    for (const [index, line] of lines.entries()) {
+      let value;
+      try { value = JSON.parse(line); }
+      catch {
+        // A running read may end in a partially written final JSON line.
+        if (!finished && index === lines.length - 1 && !item.Output.endsWith('\n') && line.trimStart().startsWith('{')) { partial = true; break; }
+        fail('TEST_RELEASE_OUTPUT_INVALID');
+      }
+      if (marker) fail('TEST_RELEASE_PROGRESS_INVALID');
+      if (object(value) && value.event === 'progress') {
+        if (Object.keys(value).sort().join(',') !== 'event,phase,sha,status,version'
+          || value.version !== 1 || value.sha !== config.sha || !Number.isInteger(value.phase) || value.phase < 1 || value.phase > 5
+          || !['running', 'passed', 'failed'].includes(value.status)) fail('TEST_RELEASE_PROGRESS_INVALID');
+        if (value.phase !== currentPhase || currentStatus === 'failed'
+          || (value.status === 'running' ? currentStatus !== 'pending' : currentStatus !== 'running')) fail('TEST_RELEASE_PROGRESS_INVALID');
+        events.push({ phase: value.phase, status: value.status });
+        currentStatus = value.status;
+        if (value.status === 'passed') { currentPhase++; currentStatus = 'pending'; }
+      } else marker = terminal(value, config);
+    }
+    if (marker && partial) fail('TEST_RELEASE_PROGRESS_INVALID');
+    if (marker && events.length) {
+      const last = events.at(-1);
+      if (marker.status === 'passed'
+        ? events.length !== 10 || last.phase !== 5 || last.status !== 'passed'
+        : last.status !== 'failed' || STAGE_PHASE[marker.stage] !== last.phase) fail('TEST_RELEASE_PROGRESS_INVALID');
+    }
+    if (finished && !marker) fail('TEST_RELEASE_OUTPUT_INVALID');
+    for (let index = 0; index < Math.min(seen.length, events.length); index++) {
+      if (seen[index].phase !== events[index].phase || seen[index].status !== events[index].status) fail('TEST_RELEASE_PROGRESS_INVALID');
+    }
+    // Repeated cumulative output (including a stale shorter prefix while running)
+    // is not a new event. Terminal output may never omit a previously seen event.
+    if (events.length < seen.length && (finished || marker)) fail('TEST_RELEASE_PROGRESS_INVALID');
+    if (finalMarker && marker && JSON.stringify(finalMarker) !== JSON.stringify(marker)) fail('TEST_RELEASE_PROGRESS_INVALID');
+    if (finalMarker && events.length > seen.length) fail('TEST_RELEASE_PROGRESS_INVALID');
+    for (const event of events.slice(seen.length)) {
+      seen.push(event);
+      try { await onProgress?.({ ...event }, snapshot()); } catch { fail('TEST_RELEASE_REPORT_FAILED'); }
+    }
+    if (marker) finalMarker = marker;
+    return marker;
+  };
+  return { accept, snapshot };
+}
+
+function completion(item, result) {
   const passed = item.InvocationStatus === 'Success' && item.ExitCode === 0 && !item.ErrorCode
     && result.stage === 'complete' && result.status === 'passed' && ['OK', 'OK_WITH_FORCED_DRAIN'].includes(result.code);
   return { status: passed ? 'passed' : 'failed', stage: result.stage, code: passed
@@ -105,12 +181,14 @@ function completion(item, config) {
     : 'TEST_RELEASE_REMOTE_FAILED' };
 }
 
-export async function runCloudRelease(config, { call, wait = delay, now = () => performance.now() } = {}) {
+export async function runCloudRelease(config, { call, wait = delay, now = () => performance.now(), onProgress } = {}) {
   const started = now();
   let stage = 'configuration', requestCount = 0;
-  const report = result => ({ ...result, requestCount, durationMs: Math.max(0, Math.round(now() - started)) });
+  let progress = createProgress({}, onProgress);
+  const report = result => ({ ...result, progress: progress.snapshot(true), requestCount, durationMs: Math.max(0, Math.round(now() - started)) });
   try {
     config = validate(config);
+    progress = createProgress(config, onProgress);
     call ??= createCloudReleaseClient(config);
     const remaining = () => config.totalTimeoutMs - (now() - started);
     const request = async (action, body) => {
@@ -145,27 +223,60 @@ export async function runCloudRelease(config, { call, wait = delay, now = () => 
         fail('TEST_RELEASE_POLL_FAILED');
       }
       const item = execution(response, config, submitted.InvokeId);
-      if (item && !['Pending', 'Running', 'Stopping'].includes(item.InvocationStatus)) return report(completion(item, config));
+      if (item) {
+        const finished = !['Pending', 'Running', 'Stopping'].includes(item.InvocationStatus);
+        const marker = await progress.accept(item, finished);
+        if (finished) return report(completion(item, marker));
+      }
       if (remaining() <= 0 || attempt === MAX_POLLS - 1) fail('TEST_RELEASE_TIMEOUT');
       await wait(Math.min(config.pollIntervalMs, remaining()));
     }
     fail('TEST_RELEASE_TIMEOUT');
   } catch (error) {
-    return report({ status: 'failed', stage, code: error instanceof CloudReleaseError ? error.code : 'TEST_RELEASE_FAILED' });
+    const code = error instanceof CloudReleaseError ? error.code : 'TEST_RELEASE_FAILED';
+    return report({ status: 'failed', stage: code === 'TEST_RELEASE_REPORT_FAILED' ? 'report' : stage, code });
   }
+}
+
+export function renderCloudReleaseSummary(result) {
+  const progress = result.progress ?? createProgress({}).snapshot(true);
+  const status = { running: '进行中', passed: '通过', failed: '失败' }[result.status] ?? '失败';
+  const labels = { pending: '待执行', running: '执行中', passed: '已完成', failed: '失败', not_run: '未执行', unobserved: '不可见' };
+  const lines = ['## 测试服务器发布：' + status, ''];
+  if (progress.visibility === 'reported') lines.push('已完成 ' + progress.completed + ' / 5 项。', '');
+  else lines.push('阶段完成项数不可见；仅有终态或尚未收到进度。旧版协议或同 SHA 幂等返回需要复核宿主发布记录。', '');
+  for (const phase of progress.phases) lines.push('- [' + (phase.status === 'passed' ? 'x' : ' ') + '] ' + phase.phase + '. ' + phase.name + '：' + labels[phase.status]);
+  if (progress.failedPhase) lines.push('', '失败位置：第 ' + progress.failedPhase + ' 阶段。');
+  if (result.stage) lines.push('', '调用器阶段：' + result.stage + '；结果码：' + result.code + '。');
+  if (result.status === 'failed' && ['poll', 'report'].includes(result.stage) && !progress.failedPhase) lines.push('', '调用器未确认有效的发布结果；请复核现有云助手调用，不得自动重发。');
+  if (result.code === 'TEST_RELEASE_OK_WITH_FORCED_DRAIN') lines.push('', '旧服务达到排空上限后被强制停止；本次通过不表示全部请求自然完成。');
+  return lines.join('\n') + '\n';
+}
+
+export function createCloudReleaseReporter({ summaryPath, write = line => process.stdout.write(line) } = {}) {
+  const update = result => { if (summaryPath) writeFileSync(summaryPath, renderCloudReleaseSummary(result)); };
+  return {
+    onProgress(event, progress) {
+      write(JSON.stringify({ event: 'release_progress', phase: event.phase, name: PHASES[event.phase - 1],
+        status: event.status, completed: progress.completed, total: PHASES.length }) + '\n');
+      update({ status: 'running', progress });
+    },
+    finish: update,
+  };
 }
 
 async function main() {
   let result;
-  try { result = await runCloudRelease(readCloudReleaseConfig()); }
+  const reporter = createCloudReleaseReporter({ summaryPath: process.env.GITHUB_STEP_SUMMARY });
+  try { result = await runCloudRelease(readCloudReleaseConfig(), { onProgress: reporter.onProgress }); }
   catch (error) { result = { status: 'failed', stage: 'configuration', code: error instanceof CloudReleaseError ? error.code : 'TEST_RELEASE_FAILED', requestCount: 0, durationMs: 0 }; }
   let exitCode = result.status === 'passed' ? 0 : 1;
   if (result.code === 'TEST_RELEASE_OK_WITH_FORCED_DRAIN') console.warn('::warning::Deployment completed after the configured drain deadline forced old services to stop.');
+  if (result.progress?.visibility === 'terminal_only') console.warn('::notice::Only a terminal result was reported. Stage execution is not visible; review the host record for a legacy or same-SHA idempotent result.');
   try {
-    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-      'Test server release: **' + result.status + '**\n\nStage: ' + result.stage + '\n\nCode: ' + result.code + '\n');
+    reporter.finish(result);
   } catch {
-    result = { status: 'failed', stage: 'report', code: 'TEST_RELEASE_REPORT_FAILED', requestCount: result.requestCount, durationMs: result.durationMs };
+    result = { ...result, status: 'failed', stage: 'report', code: 'TEST_RELEASE_REPORT_FAILED' };
     exitCode = 1;
   }
   // Fixed fields only. No provider errors, command output or credentials are printed.
