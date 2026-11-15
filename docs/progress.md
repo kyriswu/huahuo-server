@@ -4,6 +4,10 @@
 
 # 当前开发进度
 
+## 测试环境启用解析调用（2026-11-16）
+
+用户明确要求开启 PROCESSING_NODES_ENABLED 并发布测试服；已准备沿用现有凭据的候选快照，新增本期配置断言。无数据库变化，开发默认不变。见[候选记录](acceptance/parser-api-enabled.md)。
+
 ## README 与线上云控制环境规则（2026-11-16）
 
 README 按实际工具/版本、依赖、四角色关系、首次运行、配置、开发检查、发布下线及规范重写。明确本地 development、线上测试 test、线上生产 production；后两者默认允许云控制，保留显式 false 和 RAM 授权要求，不连带开启私网解析调用。测试发布清单按实际成功 ce1123e 更新，写库前逐角色校验 APP_ENV、云控制开关及完整 RAM；隔离 CI 显式禁止云操作。817项unit/contract、275项真实隔离PG/Redis通过（1项Milvus跳过），静态检查、构建与15份Compose角色配置通过。已执行迁移、App、真实ENV和云资源未修改，未发布本期候选，验证和待部署项见[环境验收](acceptance/cloud-control-environments.md)。
