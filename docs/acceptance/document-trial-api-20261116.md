@@ -50,3 +50,17 @@
 移至实际成功基准后的重跑：832 项 unit/contract 全部通过，Server/Admin TypeScript、完整 ESLint 与构建通过（Node26.12.1/pnpm10.15.1）。隔离迁移演练基准与候选均为版本3，首次与重复迁移均为空；后续完整隔离集成结果另记。
 
 发布前完整隔离 PostgreSQL/Redis 回归：277 项通过，1 项 Milvus 跳过；临时资源已按归属清理，未清空开发/测试共享库。解析服务在此套集成中为替身，与前述真实解析响应回放分开记录。日志 `release-integration.log`；提交后的 release:check 通过，确认累计7文件、0增量迁移、四角色及 health 验收。PR #16 按现行 test 原生自动合并及 main 自动发布流程推进；此记录不提前宣称部署成功。
+
+## 测试环境已发布（2026-11-16 03:03，北京时间）
+
+[PR #16](https://github.com/kyriswu/huahuo-server/pull/16) 原生自动合并为 `b65e7eea0f61233222e87715791f1eaabeec8082`；PR CI 与该提交的 test push CI 均全部通过（CI 使用 Node26.11.0）。[发布 Action 43749537960](https://github.com/kyriswu/huahuo-server/actions/runs/43749537960/attempts/2) 的控制 SHA 为 `30ed25cfbea55c06b6d275d7d00449ca68a4e954`，业务 SHA 为 b65e7ee。
+
+首轮实际完成3/5，阶段4在旧 Admin 退出后因 CONTAINER_OOM 中止，阶段5未执行；Worker、Scheduler、API 已更新，Admin 短暂不可用。原因是前述容器内大文件探测留下 OOMKilled=true 的历史状态，旧 Admin 退出码实际为0。先启动原 Admin 容器恢复可用性，确认 OOM 标记清除、API/Admin ready200、迁移仍1/2/3且成功记录仍为旧版，再显式重跑同一 Action 的失败任务；未改发布门禁、代码、数据库或配置来规避失败。
+
+第二轮实际五阶段5/5全部通过，终态 TEST_RELEASE_OK；宿主成功记录于北京时间03:03:13更新为 b65e7ee，四角色使用同一镜像且健康，forcedRetirements为空。迁移历史仍为1/2/3，无新增SQL；配置沿用。保留当前 b65e7ee 与前一成功 e0da7c7 镜像，没有删除数据卷。此次最终是完整成功，不将首轮部分更新视为成功或抹去 Admin 中断。
+
+发布后 API/Admin 的 live/ready 均200，真实管理员登录、me、试用能力、节点读取及logout均200；配置revision6、节点revision9保持，未提交新解析任务。另在相同已部署镜像中回放已取回的325页电子标书与419页RT-Thread原始结果，均通过校验且内容逐字保持；queued协议回放正确让出执行，仅一次状态GET、无重提。镜像回放属于隔离行为检查，不声称这些旧内存试用在重启后恢复。
+
+最终只读查询发现原RT-Thread远端任务已完成；结果GET200，419/419页、158张表、73条图片记录、548,019字符、summary.errors=0，source_resource_id与本次原trial相符。完整结果保存在 `.local/document-trial-api-20261116/rtthread-result.json` 和 `rtthread-result.md`。先前“仍queued”是当时观察，不代表当前状态；本次未修改远端调度实现，也未进行全文准确率验收。
+
+发布与恢复的脱敏证据：同目录 `deployed-state.json`、`deployment-recovery.json`、`deployed-admin-api-verification.json`、`deployed-image-protocol-verification.json`，Action两次日志及五阶段进度。失败尝试的证据也保留。默认发布冒烟范围仍为health，不以此冒充专用App账号的认证业务验收；实际Admin认证检查单独列出。
