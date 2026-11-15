@@ -1,8 +1,8 @@
 # 花火 Server 标准发布
 
-测试和生产都先人工审核 Merge，再人工启动对应 Action；合并和 CI 成功均不自动发布。Action 启动后执行固定、可验证的发布步骤。自动化不能保证任意业务改动正确；它应把缺配置、历史迁移冲突、验收失败等问题挡在服务切换前，并在失败时留下准确状态。可靠性要用持续发布记录、故障率和恢复时间衡量，不能从一次演练推导 99.99%。
+当前发布目标是既有测试服务器，按用户确认暂时直接部署 `main`；先人工审核 Merge，等待同 SHA 的 main push CI 成功，再从 main 人工启动 `Test server release`。合并和 CI 成功均不自动发布，现有 test 分支保留但暂不作为候选来源，正式生产尚未接入。Action 启动后执行固定、可验证的发布步骤。自动化不能保证任意业务改动正确；它应把缺配置、历史迁移冲突、验收失败等问题挡在服务切换前，并在失败时留下准确状态。可靠性要用持续发布记录、故障率和恢复时间衡量，不能从一次演练推导 99.99%。
 
-团队操作步骤见[团队发布](team-releases.md)。GitHub main/test 分支规则、两个 environment 限制和 production owner 审批已保存并回读。main owner 的 PR-only 例外仅针对新增 update 限制，原 PR、strict CI、禁止删除/强推规则继续生效；没有用真实协作者账号做反向实测。RAM 信任及宿主安装也已核对，但新手动流程仍待人工 Merge 和 Action，具体状态见[手动发布验收](../acceptance/manual-release.md)。生产服务器、云角色及真实发布入口尚未接入。
+团队操作步骤见[团队发布](team-releases.md)。GitHub main/test 分支规则、两个 environment 限制和 production owner 审批已保存并回读。main owner 的 PR-only 例外仅针对新增 update 限制，原 PR、strict CI、禁止删除/强推规则继续生效；没有用真实协作者账号做反向实测。首轮手动发布已真实完成，本次 main 来源调整及宿主修复仍待合并、安装和发布验收，具体状态见[手动发布验收](../acceptance/manual-release.md)。已有 production environment 配置不代表正式生产已接入。
 
 ## 准备阶段需要判断什么
 
@@ -20,7 +20,7 @@
 
 这张表用于发现遗漏，不要求每次建立所有检查。无影响的项目可以说明“无变化”；有疑问先调查，必要时与用户讨论，不把判断强行压成无依据的通过项。
 
-测试发布的业务候选来自 `test`；Action 从受保护的 `main` 手动发起，执行的调用器及其依赖来自该次 `main` 提交。宿主使用 owner 控制的 `main` Compose，并要求 `test` 候选中的 Compose 与它字节一致。涉及工作流、调用器或 Compose 的控制变更，先由 owner 合入 `main`，再同步到 `test`；不同即拒绝，不静默忽略候选配置。该控制范围限制与普通业务候选的 SHA 分别核对。
+测试 Action 从受保护的 `main` 手动发起，业务代码、调用器、依赖和 Compose 均取发起时同一完整 main SHA，并核对该 SHA 的 main push `Server CI` 成功。获取身份后、调用前再次确认 main 未移动，宿主在发布锁内也核对该 SHA；有变化就拒绝，不自动替换候选。test 分支的内容及 CI 状态不参与本次选择。仍使用原测试 environment、云角色、固定实例与保存命令，不增加正式生产入口。
 
 ## 数据变化的选择
 
@@ -125,6 +125,6 @@ pnpm release:check
 
 ## 当前边界
 
-测试服务器已有真实成功发布记录，标准化及数据库排空预算结果见[标准发布验收](../acceptance/standard-release.md)。本轮分支规则、环境审批、RAM 信任及新宿主安装均已配置核对；PR #4 的首个候选 CI 已成功，最终文档提交仍需再验，新手动流程尚未合并运行。首次由用户 Merge 后等待 main CI 成功，再初始化 test 到该提交，等 test push CI 成功后人工 Action；后续 test 走正常 PR。分项结果见[手动发布验收](../acceptance/manual-release.md)。生产尚无目标服务器、专用云角色及真实发布接入。
+首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态为 `OK_WITH_FORCED_DRAIN`，包含到期强退。本次改为 main 直接部署的候选及宿主修复尚未上线，不能用首轮成功代替验收。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早的标准化及排空预算结果见[标准发布验收](../acceptance/standard-release.md)。test 分支保留，正式生产服务器、专用云角色及发布入口尚未接入。
 
 认证账号凭据仍需提前准备；不生成虚假 JWT、不跳过认证而标记通过。新增基础设施的创建/扩容、未列入已审清单的回填或独立作业、破坏性变更与多机调度不自动被这次发布授权覆盖。现有 skill 会根据请求和已有授权提出并落实具体方案，而不是一律拒绝或一律自动执行。

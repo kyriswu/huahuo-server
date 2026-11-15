@@ -17,14 +17,14 @@ export class ProcessingNodeJobs {
  private readonly events:PgEvents;
  constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,nodes?:ProcessingNodes){this.nodes=nodes??new ProcessingNodes(pool,config);this.events=new PgEvents(pool);}
  async close(){await this.nodes.close();await this.events.close();}
- watch(taskId:string,changed:()=>void){return this.events.subscribe('task_events',taskId,changed);}
+ watchNode(nodeId:string,changed:()=>void){return this.events.subscribe('processing_node_events',nodeId,changed);}
  async start(nodeId:string,scope:AdminScope,traceId:string){
-  if(!this.config.processingNodes.enabled)throw new DomainError(503,'PROCESSING_NODES_DISABLED');
+  if(!this.config.processingNodes.cloudControlEnabled)throw new DomainError(503,'PROCESSING_NODE_CLOUD_CONTROL_DISABLED');
   return transaction(this.pool,async tx=>{
    await assertSuperadmin(tx,scope);await lock(tx,'node-start:'+nodeId);await lock(tx,'processing-nodes');
    const nodeRow=(await tx.query('SELECT * FROM processing_nodes WHERE id=$1',[nodeId])).rows[0];
    if(!nodeRow)throw new DomainError(404,'PROCESSING_NODE_NOT_FOUND');
-   const node=nodeFromRow(nodeRow);nodeConfig(node,this.config.processingNodes);
+   const node=nodeFromRow(nodeRow);nodeConfig(node,this.config.processingNodes,false);
    if(node.mode!=='ecs')throw new DomainError(400,'PROCESSING_NODE_START_NOT_REQUIRED');
    const reference='node-start:'+nodeId;
    const old=(await tx.query("SELECT id FROM tasks WHERE kind='processing.node-start' AND external_reference=$1 AND state NOT IN ('succeeded','failed','cancelled') LIMIT 1",[reference])).rows[0];
@@ -38,13 +38,13 @@ export class ProcessingNodeJobs {
  }
  async status(nodeId:string){
   const task=(await this.pool.query("SELECT id,state,error_code,created_at,updated_at FROM tasks WHERE kind='processing.node-start' AND external_reference=$1 ORDER BY created_at DESC LIMIT 1",['node-start:'+nodeId])).rows[0];
-  return task?{taskId:task.id,state:task.state==='succeeded'?'ready':['failed','cancelled'].includes(task.state)?'failed':'starting',error:task.error_code,updatedAt:task.updated_at.toISOString()}:null;
+  return task?{taskId:task.id,state:task.state==='succeeded'?'running':['failed','cancelled'].includes(task.state)?'failed':'starting',error:task.error_code,updatedAt:task.updated_at.toISOString()}:null;
  }
  async execute(a:Attempt){
   const reference=(await this.pool.query('SELECT external_reference FROM tasks WHERE id=$1',[a.task.id])).rows[0]?.external_reference;
   const id=typeof reference==='string'?reference.slice('node-start:'.length):'';
   const node=await this.nodes.assigned('manual:'+a.task.id);if(node.id!==id)throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
-  const input={requestId:'manual:'+a.task.id,fingerprint:digest(canonical({node:id,operation:'start'})),nodeId:id,recoverAdmission:a.task.attempt_no>1,step:true,admissionSignal:a.signal};
+  const input={requestId:'manual:'+a.task.id,fingerprint:digest(canonical({node:id,operation:'start'})),nodeId:id,recoverAdmission:a.task.attempt_no>1,step:true,readiness:'instance' as const,admissionSignal:a.signal};
   if(Date.now()-a.task.created_at.getTime()>node.startupSeconds*1000){
    await this.nodes.acknowledgeSettled(input).catch(()=>undefined);
    throw Object.assign(new Error('PROCESSING_NODE_START_TIMEOUT'),{code:'PROCESSING_NODE_START_TIMEOUT',retryable:false});

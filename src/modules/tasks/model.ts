@@ -20,9 +20,10 @@ export function parserRequestId(reference:unknown):string|undefined{
  try{const id=match?JSON.parse(Buffer.from(match[1]!,'base64url').toString()).requestId:undefined;return typeof id==='string'?id:undefined;}catch{return;}
 }
 export async function event(tx:pg.PoolClient,id:string) {
- const r=await tx.query('UPDATE tasks SET event_sequence=event_sequence+1,updated_at=now() WHERE id=$1 RETURNING event_sequence,state',[id]);
+ const r=await tx.query('UPDATE tasks SET event_sequence=event_sequence+1,updated_at=now() WHERE id=$1 RETURNING event_sequence,state,kind,external_reference',[id]);
  if(r.rows[0])await tx.query('INSERT INTO task_events(task_id,sequence,state) VALUES($1,$2,$3)',[id,r.rows[0].event_sequence,r.rows[0].state]);
  if(r.rows[0])await tx.query("SELECT pg_notify('task_events',$1)",[id]);
+ if(r.rows[0]?.kind==='processing.node-start'&&r.rows[0].external_reference?.startsWith('node-start:'))await tx.query("SELECT pg_notify('processing_node_events',$1)",[r.rows[0].external_reference.slice('node-start:'.length)]);
 }
 export async function enqueueIntent(tx:pg.PoolClient,id:string,delayMs=0) {
  const policy=currentRuntimeConfig()?.taskPolicy;

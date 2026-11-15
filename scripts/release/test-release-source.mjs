@@ -12,17 +12,16 @@ function validateContext(context) {
     || (context.expectedTargetSha !== undefined && !SHA.test(context.expectedTargetSha))) failed();
 }
 
-/** main supplies trusted control code; only the tested test SHA is deployed. */
-export function selectTestReleaseRevision(context, { mainRef, testRef, ciRuns }) {
+/** The test server temporarily deploys the same reviewed main SHA as its control code. */
+export function selectTestReleaseRevision(context, { mainRef, ciRuns }) {
   validateContext(context);
   if (mainRef?.ref !== 'refs/heads/main' || mainRef.object?.type !== 'commit' || mainRef.object.sha !== context.controlSha
-    || testRef?.ref !== 'refs/heads/test' || testRef.object?.type !== 'commit' || !SHA.test(testRef.object.sha ?? '')
-    || (context.expectedTargetSha !== undefined && testRef.object.sha !== context.expectedTargetSha)) failed();
+    || (context.expectedTargetSha !== undefined && mainRef.object.sha !== context.expectedTargetSha)) failed();
   if (!Array.isArray(ciRuns?.workflow_runs) || !ciRuns.workflow_runs.some(run =>
-    run?.head_sha === testRef.object.sha && run.head_branch === 'test' && run.event === 'push'
+    run?.head_sha === context.controlSha && run.head_branch === 'main' && run.event === 'push'
     && run.status === 'completed' && run.conclusion === 'success' && run.path === WORKFLOW_PATH
     && run.head_repository?.full_name === REPOSITORY)) failed();
-  return { controlSha: context.controlSha, targetSha: testRef.object.sha };
+  return { controlSha: context.controlSha, targetSha: context.controlSha };
 }
 
 /** Signature verification remains the responsibility of Alibaba STS. */
@@ -48,13 +47,13 @@ export async function resolveTestReleaseRevision(context, token, fetchImpl = fet
       if (!response.ok) failed();
       return response.json();
     };
-    const [mainRef, testRef] = await Promise.all([read('/git/ref/heads/main'), read('/git/ref/heads/test')]);
-    // Validate both refs before constructing the CI query, so a ref value can
+    const mainRef = await read('/git/ref/heads/main');
+    // Validate main before constructing the CI query, so a ref value can
     // never become an arbitrary URL or request parameter.
     if (mainRef?.ref !== 'refs/heads/main' || mainRef.object?.type !== 'commit' || mainRef.object.sha !== context.controlSha
-      || testRef?.ref !== 'refs/heads/test' || testRef.object?.type !== 'commit' || !SHA.test(testRef.object.sha ?? '')) failed();
-    const ciRuns = await read(`/actions/workflows/release-smoke-check.yml/runs?branch=test&event=push&status=success&head_sha=${testRef.object.sha}&per_page=10`);
-    return selectTestReleaseRevision(context, { mainRef, testRef, ciRuns });
+      || (context.expectedTargetSha !== undefined && context.expectedTargetSha !== context.controlSha)) failed();
+    const ciRuns = await read(`/actions/workflows/release-smoke-check.yml/runs?branch=main&event=push&status=success&head_sha=${context.controlSha}&per_page=10`);
+    return selectTestReleaseRevision(context, { mainRef, ciRuns });
   } catch { failed(); }
 }
 
@@ -65,7 +64,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       expectedTargetSha: process.env.TEST_RELEASE_SHA }, process.env.GH_TOKEN);
     if (!process.env.GITHUB_ENV) failed();
     await appendFile(process.env.GITHUB_ENV, `TEST_RELEASE_SHA=${result.targetSha}\n`);
-    console.log('Protected main control and exact tested test revision verified.');
+    console.log('Exact main revision and its successful push CI verified for the test server.');
   } catch {
     console.error('::error::TEST_RELEASE_SOURCE_NOT_VERIFIED');
     process.exitCode = 1;

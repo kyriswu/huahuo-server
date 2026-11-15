@@ -1,4 +1,4 @@
-import Fastify, { LogController, type FastifyError } from 'fastify';
+import Fastify, { LogController, type FastifyError, type FastifyLoggerOptions } from 'fastify';
 import swagger from '@fastify/swagger';
 import { Type } from '@sinclair/typebox';
 import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
@@ -11,17 +11,19 @@ import { registerMetrics, type ApplicationMetrics } from '../plugins/metrics.js'
 import { registerLifecycle } from '../plugins/lifecycle.js';
 import { RuntimeSettings } from '../modules/runtime-settings/service.js';
 import { DEFAULT_DRAIN_TIMEOUT_MS } from '../modules/runtime-settings/registry.js';
+import { createErrorSerializer } from '../lib/error-log.js';
 declare module 'fastify' { interface FastifyInstance {
   drainTimeoutSnapshotMs(): number;
   readDrainTimeoutMs(): Promise<number>;
 } }
-export interface BuildOptions { config: AppConfig; dependencies?: Dependencies; backgroundHealthy?:()=>boolean; backgroundActive?:()=>number; metrics?:ApplicationMetrics; }
-export async function buildBase({ config, dependencies, backgroundHealthy, backgroundActive, metrics }: BuildOptions) {
+export interface BuildOptions { config: AppConfig; dependencies?: Dependencies; backgroundHealthy?:()=>boolean; backgroundActive?:()=>number; metrics?:ApplicationMetrics; loggerStream?:FastifyLoggerOptions['stream']; }
+export async function buildBase({ config, dependencies, backgroundHealthy, backgroundActive, metrics, loggerStream }: BuildOptions) {
   const deps = dependencies ?? createDependencies(config);
   const app = Fastify({ logger: {
     level: config.logLevel, base: { service: config.role, instanceId: config.instanceId },
+    ...(loggerStream ? { stream: loggerStream } : {}),
     redact: { paths: ['req.headers.authorization','req.headers.cookie','res.headers.set-cookie','password','token','secret'], censor: '[REDACTED]' },
-    serializers: { req: req => ({ method: req.method, route: req.routeOptions?.url }), err: () => ({ type: 'Error', message: 'Internal failure', stack: '' }) },
+    serializers: { req: req => ({ method: req.method, route: req.routeOptions?.url }), err: createErrorSerializer(config) },
   }, genReqId: req => requestTrace(req.headers), logController: new LogController({ requestIdLogLabel: 'traceId' }),
   // Request timeout bounds receiving the request, not the handler's total work.
   requestTimeout: config.httpRequestTimeoutMs,
@@ -47,11 +49,12 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   app.addHook('onClose', async () => { await deps.close(); });
   app.setErrorHandler<FastifyError>((error, req, reply) => {
     if (error instanceof DomainError) {
+      if (error.statusCode >= 500) req.log.error({ err: error, errorCode: error.code, method: req.method, route: req.routeOptions.url ?? 'unmatched', statusCode: error.statusCode }, 'Request failed');
       if (error.statusCode === 429) reply.header('Retry-After', '60');
       return reply.code(error.statusCode).send(failure(error.code, 'Request could not be completed', req.id, error.statusCode === 503));
     }
     const status = error.validation ? 400 : error.statusCode && error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 500;
-    if (status === 500) req.log.error({ errorCode: 'INTERNAL_ERROR' }, 'Request failed');
+    if (status === 500) req.log.error({ err: error, errorCode: 'INTERNAL_ERROR', method: req.method, route: req.routeOptions.url ?? 'unmatched', statusCode: status }, 'Request failed');
     const code = status === 400 ? 'BAD_REQUEST' : status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_REJECTED';
     reply.code(status).send(failure(code, status === 500 ? 'Service temporarily unavailable' : 'Invalid request', req.id, status === 500));
   });

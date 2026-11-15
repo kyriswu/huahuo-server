@@ -1,5 +1,13 @@
 # 契约兼容性（P01 历史与 P02 增量）
 
+## 服务端异常诊断（2026-11-15）
+
+日志补充脱敏异常链/堆栈、路由和状态，沿用既有traceId；客户端错误envelope、状态码、通用提示及X-Trace-Id不变，不返回内部原因。DomainError新增可选cause但保留原commit参数，无API/任务载荷或Schema变化。四角色HTTP、契约及隔离回归证据见[验收](acceptance/error-diagnostics.md)，尚未线上发布。
+
+## Admin实例状态、云控制与固定节点清单（2026-11-15）
+
+Admin节点状态改用status/events，替换历史start-status/start-events；升级后旧管理页刷新。主state反映实例电源，serviceStatus/serviceReady单独反映API，未探测时serviceReady为null。bootstrap增加cloudControlEnabled，与enabled私网调用权限分离；开机任务Running即完成，不要求私网健康或API Token，仍受认证/CSRF/机器锁保护。原config.enabled仍控制自动选址，手动开机后仍按空闲策略停机。运行方式胶囊只映射已保存mode。PUT节点仅更新现存ID，未知ID404，不再创建；清单随代码发布维护。App业务路径、认证、Task及持久回调载荷不变；冻结迁移未改。见[验收](acceptance/processing-node-status.md)。
+
 ## 发布冒烟沿用现有 API（2026-11-15）
 
 固定读取 live/ready、me/status、workspaces、tasks/running，验证现有 Envelope、身份归属和非终态任务；匿名访问仍应 401。专用会话正常更新 last_seen_at，不新增业务写接口、永久 JWT 或鉴权旁路。4 项真实 API 集成与 27 项 HTTP 替身测试分别记录，见[验收](acceptance/release-smoke.md)。

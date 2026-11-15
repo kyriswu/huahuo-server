@@ -75,5 +75,6 @@ describe('typed runtime registry (no database/cloud)',()=>{
   expect(nodeConfig({...node,tokenEnv:'PROCESSING_NODE_TOKEN_DOCUMENT'},bootstrap).apiToken).toBe('local-test-token');
   expect(()=>nodeConfig({...node,tokenEnv:'ALIYUN_RAM_ACCESS_KEY_SECRET'},bootstrap)).toThrow('PROCESSING_NODE_INVALID');
   expect(()=>nodeConfig({...node,tokenEnv:'PROCESSING_NODE_TOKEN_MISSING'},bootstrap)).toThrow('PROCESSING_NODE_TOKEN_UNAVAILABLE');
+  expect(nodeConfig({...node,tokenEnv:'PROCESSING_NODE_TOKEN_MISSING'},bootstrap,false).apiToken).toBeUndefined();
  });
 });

@@ -25,4 +25,4 @@ COPY --chown=node:node scripts/healthcheck.mjs ./scripts/healthcheck.mjs
 COPY --chown=node:node scripts/rag-consistency.mjs ./scripts/rag-consistency.mjs
 COPY --chown=node:node scripts/release ./scripts/release
 USER node
-CMD ["node", "dist/entrypoints/api-server.js"]
+CMD ["node", "--enable-source-maps", "dist/entrypoints/api-server.js"]

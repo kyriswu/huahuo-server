@@ -131,7 +131,7 @@ export class RagQueryService {
      ...(input.assetMode==='links'?{displayMarkdown:rewriteImageUrls(c.content,localImages,replacements)}:{}),evidence:{child:c.content},context:null};
    });
    return {mode,query,results};
-  }catch(e){if(e instanceof DomainError)throw e;throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE');}
+  }catch(e){if(e instanceof DomainError)throw e;throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE',false,{cause:e});}
   finally{await lease.release();}
  }
 }

@@ -84,14 +84,23 @@ export function registerAdminRoutes(
  app.put('/admin/api/v1/processing-nodes/:nodeId',{preHandler:[auth,csrf],schema:{
   params:Type.Object({nodeId:Id},Strict),body:Type.Object({revision:Type.Integer({minimum:0}),node:NodeSchema},Strict),
   response:{200:Envelope(NodeSchema),...errors},
- }},async req=>{const b=req.body as {revision:number;node:ProcessingNode};if(b.node.id!==(req.params as {nodeId:string}).nodeId)throw new DomainError(400,'PROCESSING_NODE_INVALID');return success(await configuration.nodes.upsert(b.node,b.revision,scope(req),req.id),req.id);});
+ }},async req=>{const b=req.body as {revision:number;node:ProcessingNode};if(b.node.id!==(req.params as {nodeId:string}).nodeId)throw new DomainError(400,'PROCESSING_NODE_INVALID');return success(await configuration.nodes.update(b.node,b.revision,scope(req),req.id),req.id);});
  app.post('/admin/api/v1/processing-nodes/:nodeId/start',{preHandler:[auth,csrf],schema:{params:Type.Object({nodeId:Id},Strict),response:{202:Envelope(Type.Object({taskId:Id,state:Type.String()})),...errors,503:ErrorSchema}}},async(req,reply)=>{
   reply.code(202);return success(await configuration.nodeJobs.start((req.params as {nodeId:string}).nodeId,scope(req),req.id),req.id);
  });
- app.get('/admin/api/v1/processing-nodes/:nodeId/start-status',{preHandler:auth,schema:{params:Type.Object({nodeId:Id},Strict),response:{200:Envelope(Type.Unknown()),...errors}}},async req=>success(await configuration.nodeJobs.status((req.params as {nodeId:string}).nodeId),req.id));
- app.get('/admin/api/v1/processing-nodes/:nodeId/start-events',{preHandler:auth,schema:{params:Type.Object({nodeId:Id},Strict)}},async(req,reply)=>{
-  const nodeId=(req.params as {nodeId:string}).nodeId,initial=await configuration.nodeJobs.status(nodeId);if(!initial)throw new DomainError(404,'PROCESSING_NODE_START_NOT_FOUND');
-  await streamState(reply,()=>configuration.nodeJobs.status(nodeId),changed=>configuration.nodeJobs.watch(initial.taskId,changed),s=>!s||s.state!=='starting');
+ const nodeStatus=async(nodeId:string)=>{
+  const [observed,startup]=await Promise.all([configuration.nodes.observe(nodeId),configuration.nodeJobs.status(nodeId)]);
+  const starting=startup?.state==='starting';
+  return {...observed,...(starting&&observed.state==='offline'?{state:'starting' as const}:{}),canStart:config.processingNodes.cloudControlEnabled&&observed.canStart&&!starting,startup};
+ };
+ app.get('/admin/api/v1/processing-nodes/:nodeId/status',{preHandler:auth,schema:{params:Type.Object({nodeId:Id},Strict),response:{200:Envelope(Type.Unknown()),...errors}}},async(req,reply)=>{reply.header('Cache-Control','no-store');return success(await nodeStatus((req.params as {nodeId:string}).nodeId),req.id);});
+ app.get('/admin/api/v1/processing-nodes/:nodeId/events',{preHandler:auth,schema:{params:Type.Object({nodeId:Id},Strict)}},async(req,reply)=>{
+  const nodeId=(req.params as {nodeId:string}).nodeId;
+  await streamState(reply,()=>nodeStatus(nodeId),async changed=>{
+   const wake=()=>{configuration.nodes.invalidateStatus(nodeId);changed();};
+   const stopTask=await configuration.nodeJobs.watchNode(nodeId,wake);
+   try{const stopMachine=await configuration.nodes.watchStatus(nodeId,wake);return ()=>{stopMachine();stopTask();};}catch(error){stopTask();throw error;}
+  },()=>false);
  });
  const trials=configuration.trials;
  const trialAuth=async(req:FastifyRequest)=>{await auth(req);await trials.authorize(scope(req));};
