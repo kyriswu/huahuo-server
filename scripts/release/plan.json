@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261116-test-cloud-control",
-  "baseRevision": "ce1123ed4ff6c6007ff1cc26de1a2ffd02cdb795",
+  "id": "20261116-parser-api",
+  "baseRevision": "2155cdac07eec059d084e08e09552c003f3df8c5",
   "services": [
     "api-server",
     "admin",
@@ -10,10 +10,10 @@
   ],
   "database": {
     "migrations": [],
-    "verifySql": "scripts/release/changes/20261116-test-cloud-control/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261116-parser-api/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": "线上测试和线上生产默认授予已有云控制能力；本期目标仍为测试服，发布前校验四角色开关及RAM凭据，无业务结构或数据变更。"
+      "reason": "按用户要求启用测试环境文档/音频节点API调用；无数据库或业务数据变化。"
     }
   },
   "configuration": {
@@ -67,6 +67,18 @@
         ],
         "required": true,
         "hasDefault": false
+      },
+      {
+        "key": "PROCESSING_NODES_ENABLED",
+        "operation": "change",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": true,
+        "hasDefault": true
       }
     ],
     "reviewedFiles": [
@@ -75,7 +87,7 @@
       "compose.yaml",
       "src/config/processing-nodes.ts"
     ],
-    "verifyFile": "scripts/release/changes/20261116-test-cloud-control/verify-config.mjs"
+    "verifyFile": "scripts/release/changes/20261116-parser-api/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {
