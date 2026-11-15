@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261115-native-flow",
-  "baseRevision": "5b844ba89e28032d4d47435d8727f9a4a0b143bc",
+  "id": "20261116-test-cloud-control",
+  "baseRevision": "ce1123ed4ff6c6007ff1cc26de1a2ffd02cdb795",
   "services": [
     "api-server",
     "admin",
@@ -10,16 +10,72 @@
   ],
   "database": {
     "migrations": [],
-    "verifySql": "scripts/release/changes/20261115-native-flow/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261116-test-cloud-control/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": "原生自动触发发布与 main 准备升级；本次以空迁移在既有测试机真实验证自动链路，不接正式生产。"
+      "reason": "线上测试和线上生产默认授予已有云控制能力；本期目标仍为测试服，发布前校验四角色开关及RAM凭据，无业务结构或数据变更。"
     }
   },
   "configuration": {
-    "mode": "reuse",
-    "changes": [],
-    "reviewedFiles": []
+    "mode": "candidate",
+    "changes": [
+      {
+        "key": "APP_ENV",
+        "operation": "change",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler",
+          "migrate"
+        ],
+        "required": true,
+        "hasDefault": true
+      },
+      {
+        "key": "PROCESSING_NODES_CLOUD_CONTROL_ENABLED",
+        "operation": "change",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": false,
+        "hasDefault": true
+      },
+      {
+        "key": "ALIYUN_RAM_ACCESS_KEY_ID",
+        "operation": "change",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": true,
+        "hasDefault": false
+      },
+      {
+        "key": "ALIYUN_RAM_ACCESS_KEY_SECRET",
+        "operation": "change",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": true,
+        "hasDefault": false
+      }
+    ],
+    "reviewedFiles": [
+      ".env.example",
+      ".env.compose.cloud.example",
+      "compose.yaml",
+      "src/config/processing-nodes.ts"
+    ],
+    "verifyFile": "scripts/release/changes/20261116-test-cloud-control/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {

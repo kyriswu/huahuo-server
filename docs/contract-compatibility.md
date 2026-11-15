@@ -1,5 +1,9 @@
 # 契约兼容性（P01 历史与 P02 增量）
 
+## 线上环境云控制默认值（2026-11-16）
+
+仅调整部署权限：APP_ENV=test/production 默认允许云端开停机，显式false继续禁用，RAM、管理员鉴权与CSRF要求保持。私网解析调用开关、App路由、认证/envelope、任务载荷、数据库结构均不改。已有测试/生产私密ENV仍需独立准备；不把本地配置与隔离依赖通过声称为线上开机或解析验收，见[验收](acceptance/cloud-control-environments.md)。
+
 ## 服务端异常诊断（2026-11-15）
 
 日志补充脱敏异常链/堆栈、路由和状态，沿用既有traceId；客户端错误envelope、状态码、通用提示及X-Trace-Id不变，不返回内部原因。DomainError新增可选cause但保留原commit参数，无API/任务载荷或Schema变化。四角色HTTP、契约及隔离回归证据见[验收](acceptance/error-diagnostics.md)，尚未线上发布。
