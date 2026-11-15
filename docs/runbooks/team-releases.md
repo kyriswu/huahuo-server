@@ -4,16 +4,24 @@
 
 ## 权限与当前状态
 
-| 操作 | 预期执行者与限制 |
+| 操作 | 已保存的权限限制 |
 | --- | --- |
 | 合入 `test`、人工发布测试 | 已授权团队成员，先经过 PR 和 CI |
 | 合入 `main` | 只有 owner |
 | 生产发布 | 人工发起，必须 owner 批准 |
 | 测试 Action 的流程来源 | 从 `main` 发起，使用 `test` environment；环境只允许 `main` |
 
-已核对的部分：`test` environment 仅允许 `main` 分支、0 个标签，管理员绕过关闭；RAM 已切换到 `environment:test` subject 并移除旧分支 subject。新宿主入口已安装并核对完整性和权限，四角色未重启。
+main/test 分支规则已保存并通过 API 回读。main 的原规则仍要求 PR、strict `Server CI`、禁止删除/强推且无 bypass；独立的 owner-update 规则只给本仓库 owner 管理员 PR-only 例外。这个例外只针对 update 限制，不绕过原来的 PR 或 CI，owner 也须走满足检查的 PR。test 要求 PR、strict `Server CI`、禁止删除/强推且无 bypass，团队可按 PR 合并。
 
-`main`/`test` 分支规则和生产 environment 审批仍在设置，新的手动发布也尚未执行。仓库内 Skill 是准备指南，GitHub 权限才执行强制限制；不能把部分配置完成当作整套方案已通过。生产服务器、专用云角色及真实发布入口还未接入，目前不能执行生产发布。分项证据见[手动发布验收](../acceptance/manual-release.md)。
+test/production 两个 environment 均只允许 main 分支、0 个标签，管理员绕过关闭；production reviewer 仅 `kyriswu`，允许本人发起后本人批准。RAM 已切换到 `environment:test` subject 并移除旧分支 subject，新宿主入口安装核对通过且四角色未重启。
+
+上述是已保存并核对的配置，尚未用真实协作者账号做拒绝操作的反向实测，新手动发布也尚未运行。Skill 是准备指南，GitHub 权限才执行强制限制。生产服务器、专用云角色及真实发布入口还未接入，目前不能执行生产发布。分项证据见[手动发布验收](../acceptance/manual-release.md)。
+
+## 首次启用
+
+用户人工 Merge [PR #4](https://github.com/kyriswu/huahuo-server/pull/4)，等待 main 该 SHA 的 CI 成功；随后初建 test 分支，指向这个已审已测的 main 提交。test 的 push CI 成功后，用户从 main 人工 Run workflow。
+
+test 分支当前尚未初建，保护规则已经配置。这是一次性初始化，后续业务更新使用下面的 test PR 流程。
 
 ## 发布测试版本
 

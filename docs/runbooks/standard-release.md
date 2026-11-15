@@ -2,7 +2,7 @@
 
 测试和生产都先人工审核 Merge，再人工启动对应 Action；合并和 CI 成功均不自动发布。Action 启动后执行固定、可验证的发布步骤。自动化不能保证任意业务改动正确；它应把缺配置、历史迁移冲突、验收失败等问题挡在服务切换前，并在失败时留下准确状态。可靠性要用持续发布记录、故障率和恢复时间衡量，不能从一次演练推导 99.99%。
 
-团队操作步骤见[团队发布](team-releases.md)。预期权限是团队可发布测试环境，`main` 仅 owner 可合入，生产必须 owner 批准。测试 environment、RAM 信任及宿主安装已有分项核对，`main`/`test` 分支规则与生产审批仍在设置；具体状态见[手动发布验收](../acceptance/manual-release.md)，不能把规范或 Skill 当作整套权限已经生效。生产服务器、云角色及真实发布入口尚未接入。
+团队操作步骤见[团队发布](team-releases.md)。GitHub main/test 分支规则、两个 environment 限制和 production owner 审批已保存并回读。main owner 的 PR-only 例外仅针对新增 update 限制，原 PR、strict CI、禁止删除/强推规则继续生效；没有用真实协作者账号做反向实测。RAM 信任及宿主安装也已核对，但新手动流程仍待人工 Merge 和 Action，具体状态见[手动发布验收](../acceptance/manual-release.md)。生产服务器、云角色及真实发布入口尚未接入。
 
 ## 准备阶段需要判断什么
 
@@ -125,6 +125,6 @@ pnpm release:check
 
 ## 当前边界
 
-测试服务器已有真实成功发布记录，标准化及数据库排空预算结果见[标准发布验收](../acceptance/standard-release.md)。本轮测试 environment、RAM 信任及新宿主安装已核对，分支规则和生产审批仍在设置，新手动流程尚未合并部署；分项结果见[手动发布验收](../acceptance/manual-release.md)。生产尚无目标服务器、专用云角色及真实发布接入。
+测试服务器已有真实成功发布记录，标准化及数据库排空预算结果见[标准发布验收](../acceptance/standard-release.md)。本轮分支规则、环境审批、RAM 信任及新宿主安装均已配置核对；PR #4 的首个候选 CI 已成功，最终文档提交仍需再验，新手动流程尚未合并运行。首次由用户 Merge 后等待 main CI 成功，再初始化 test 到该提交，等 test push CI 成功后人工 Action；后续 test 走正常 PR。分项结果见[手动发布验收](../acceptance/manual-release.md)。生产尚无目标服务器、专用云角色及真实发布接入。
 
 认证账号凭据仍需提前准备；不生成虚假 JWT、不跳过认证而标记通过。新增基础设施的创建/扩容、未列入已审清单的回填或独立作业、破坏性变更与多机调度不自动被这次发布授权覆盖。现有 skill 会根据请求和已有授权提出并落实具体方案，而不是一律拒绝或一律自动执行。

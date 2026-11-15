@@ -15,13 +15,19 @@
 
 ## 已完成的配置与安装核对
 
-- GitHub `test` environment 已实际保存：仅允许 `main` 分支，允许标签数为 0，管理员绕过已关闭。
+- GitHub 分支规则已保存并通过 API 回读：原 main 规则 `27305183` 保持 PR、strict `Server CI`、禁止删除/强推且无 bypass；新增 `main-owner-merge`（`27310844`）精确匹配 main，其 update 限制仅给 `RepositoryRole 5` 的 PR-only 例外。该个人仓库的管理员即 owner；例外只属于新增的 update 限制，不绕过原规则的 PR、CI 或删除/强推保护。
+- `test-release-protection`（`27310971`）精确匹配 test，要求 PR、strict `Server CI`，禁止删除/强推，无 bypass；团队成员按 PR 流程合并。test 分支尚未初建，不代表规则尚未配置。
+- GitHub `test`、`production` 两个 environment 均已实际保存：仅允许 main 分支，允许标签数为 0，管理员绕过关闭。production reviewer 只有 `kyriswu`，`prevent-self-review` 关闭，以允许 owner 本人发起后本人批准；这不等于生产发布目标已接入。
 - RAM 信任已更新为本仓库 `environment:test` subject 并回读核对，旧分支 subject 已移除；5400 秒会话上限及原权限 Policy 保持不变，没有扩大云资源权限。
 - 新宿主入口已安装，内容 hash、0700 权限及发布锁空闲状态核对通过；四个运行角色未重启。这是安装核对，不是本期候选已经部署。
 
-## 尚未通过的实际接入
+## PR 与待验项目
 
-本期候选尚未合并、尚未部署。`main`/`test` 分支规则及生产 environment 审批仍在设置中，不能称为已经完成。测试 environment、RAM 信任和宿主安装虽然已分别核对，新手动流程的真实身份交换、test 来源、main Compose 字节一致性和发布结果仍需通过实际 Action 留证，不能用配置保存、本地测试或旧发布结果替代。
+[PR #4](https://github.com/kyriswu/huahuo-server/pull/4) 已创建，首个候选提交 `dce2dca` 的 [Server CI 43709616888](https://github.com/kyriswu/huahuo-server/actions/runs/43709616888) 成功。后续提交按各自 SHA 重跑检查，是否可合并以 PR 当前提交的检查结果为准。
+
+新手动流程尚未合并或运行。首次启用顺序为：用户人工 Merge PR #4 → main 该 SHA 的 CI 成功 → 初建 test 分支指向这个已审已测的 main 提交 → test push CI 成功 → 用户从 main 人工 Run workflow。这是一次性分支初始化；之后 test 的业务变更照常通过 PR 合并。
+
+权限配置、RAM 信任和宿主安装已分别留证，但尚未使用实际协作者账号做禁止操作的反向实测，不能宣称已经验证拒绝结果。新手动流程的真实身份交换、test 来源、main Compose 字节一致性和发布结果仍需通过实际 Action 留证，不能用配置保存、本地测试或旧发布结果替代。
 
 生产尚未接入服务器、专用云角色及真实发布入口。专用认证冒烟凭据仍按既定范围暂缓，本期清单采用测试环境已接受的 health 范围；不宣称认证业务或生产发布通过。真实发布后应补充 main 控制 SHA、test 业务 SHA、对应 CI/Action、实际五阶段或终态证据、镜像与迁移结果，以及有无 `OK_WITH_FORCED_DRAIN`。
 

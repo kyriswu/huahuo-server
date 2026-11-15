@@ -2,7 +2,9 @@
 
 ## 人工发布、分支分工与阶段进度（2026-11-15）
 
-测试发布改为人工 Merge 后再从 main 人工启动 Action，main 提供控制代码、test 提供已通过同 SHA push CI 的业务版本；补齐远端五阶段进度与终态复核边界。737 项 unit/contract、Typecheck/Lint/Build、48 项宿主 mock 和 Skill 静态检查通过；本轮真实隔离 PG/Redis 275 项通过、1 项 Milvus 跳过，f80→候选 SQL 2→2、首次与重复应用均为 `[]`。测试 environment 仅 main/0 标签/管理员绕过关闭已保存，RAM 环境 subject 已回读，新宿主安装核对通过且四角色未重启。候选尚未合并部署；main/test 分支规则和生产审批仍在设置，生产未接入。见[手动发布验收](acceptance/manual-release.md)及[团队操作](runbooks/team-releases.md)。
+测试发布改为人工 Merge 后再从 main 人工启动 Action，main 提供控制代码、test 提供已通过同 SHA push CI 的业务版本；补齐远端五阶段进度与终态复核边界。737 项 unit/contract、Typecheck/Lint/Build、48 项宿主 mock 和 Skill 静态检查通过；本轮真实隔离 PG/Redis 275 项通过、1 项 Milvus 跳过，f80→候选 SQL 2→2、首次与重复应用均为 `[]`。main/test 规则、test/production 环境限制及 owner 审批已保存并 API 回读；owner 的 PR-only 例外不绕过原 main PR/CI 规则，尚未用实际协作者反向实测。RAM 环境 subject 和宿主安装已核对，四角色未重启。
+
+[PR #4](https://github.com/kyriswu/huahuo-server/pull/4) 的首提交 `dce2dca` 已通过 [CI 43709616888](https://github.com/kyriswu/huahuo-server/actions/runs/43709616888)，后续提交按各自 SHA 重跑检查，是否可合并以 PR 当前提交的检查结果为准。新流程尚未合并运行；用户 Merge 后先等 main CI，再初建 test 到该提交、等 test push CI，最后从 main 人工 Action，后续 test 按 PR 更新。生产目标和云角色未接入。见[手动发布验收](acceptance/manual-release.md)及[团队操作](runbooks/team-releases.md)。
 
 ## 可复用发布规范、Skill 与迁移验收（2026-11-15）
 

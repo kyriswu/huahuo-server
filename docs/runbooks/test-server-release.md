@@ -1,16 +1,18 @@
 # 测试服务器人工触发发布接口
 
-首次真实发布已在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过，历史成功提交为 `1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da`。后续标准化发布结果由[验收记录](../acceptance/standard-release.md)维护。本轮改为人工触发并拆分 `main` 控制代码与 `test` 业务候选；测试 environment、RAM 信任及宿主安装已核对，分支规则与生产审批仍在设置，新流程尚未真实发布。分项证据见[手动发布验收](../acceptance/manual-release.md)，团队步骤见[团队发布](team-releases.md)。
+首次真实发布已在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过，历史成功提交为 `1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da`。后续标准化发布结果由[验收记录](../acceptance/standard-release.md)维护。本轮改为人工触发并拆分 `main` 控制代码与 `test` 业务候选；分支规则、环境限制、生产审批、RAM 信任和宿主安装已保存核对，新流程尚未合并运行。分项证据见[手动发布验收](../acceptance/manual-release.md)，团队步骤见[团队发布](team-releases.md)。
 
-本流程用于已确认的北京 ECS 测试机，不等同于生产完整发布验收。`Server CI` 已在 [PR #1](https://github.com/kyriswu/huahuo-server/pull/1) 与合并后的 main 上真实通过。本轮预期通过 GitHub 分支规则和 environment 限制实现“团队操作测试、owner 合入 main 及批准生产”，不能用旧规则的验证结果代替新权限方案验收；生产目标和云角色尚未接入。
+本流程用于已确认的北京 ECS 测试机，不等同于生产完整发布验收。`Server CI` 已在 [PR #1](https://github.com/kyriswu/huahuo-server/pull/1) 与合并后的 main 上真实通过。本轮分支规则及 environment 配置已保存并回读；owner 的 PR-only 例外仅适用于新增 main update 限制，原 PR、strict CI 及禁止删除/强推规则继续生效。尚无实际协作者账号的反向操作实测，生产目标和云角色也尚未接入。
 
 ## 触发与身份
 
 候选 `test-server-release.yml` 只有 `workflow_dispatch`，必须从 `main` 手动发起，使用 `test` environment。先人工合入 `test`，等待该提交 push 的 `Server CI` 成功，再人工点 Action；合并及 CI 完成不会自动发布。`Server CI` 同时覆盖 `main` 和 `test` 的 push。
 
+首次启用先由用户 Merge PR #4，等待 main 该 SHA 的 CI 成功，再初建 test 分支指向它；test push CI 成功后由用户从 main 人工运行。当前 test 尚未初建，规则已配置；后续 test 更新按正常 PR 流程进行。
+
 Action 从 GitHub 读取 `test` 最新 SHA，核对它同 SHA 的 push CI 成功，作为业务候选；checkout、依赖安装和云调用器始终使用发起时受保护的 `main` SHA。获取身份后、调用前再次核对 `main` 和选中的 `test` 均未移动。发布串行，不自动取消正在执行的命令；失败后先核查已有调用，不能直接重复提交。
 
-GitHub `test` environment 已实际保存为仅允许 `main` 分支、0 个标签，并关闭管理员绕过。RAM 信任已更新为此仓库的 `environment:test` subject 并回读，旧分支 subject 已移除；5400 秒会话上限和原权限 Policy 未改变。工作流另核对 `ref=main`、`event_name=workflow_dispatch` 和控制 SHA。新的手动 Action 身份交换尚未执行，配置核对不能替代真实运行验证。
+GitHub test/production 两个 environment 已实际保存为仅允许 main 分支、0 个标签，并关闭管理员绕过。production reviewer 只有 `kyriswu`，关闭 prevent-self-review，允许 owner 本人发起后本人批准。RAM 信任已更新为此仓库的 `environment:test` subject 并回读，旧分支 subject 已移除；5400 秒会话上限和原权限 Policy 未改变。工作流另核对 `ref=main`、`event_name=workflow_dispatch` 和控制 SHA。新的手动 Action 身份交换尚未执行，配置核对不能替代真实运行验证，production 环境配置也不代表生产部署已接入。
 
 每次运行交换短期 STS 凭据，GitHub 不保存长期 AK；候选使用 90 分钟会话。专用策略仍仅允许对指定实例和指定命令使用 `InvokeCommand` 与 `DescribeInvocationResults`，不授权启动/停止其他实例、修改 RAM 或任意创建命令。
 
@@ -58,4 +60,4 @@ GitHub `test` environment 已实际保存为仅允许 `main` 分支、0 个标�
 
 首次发布前，旧 `4e28a98` 镜像因初始化 SQL 校验和与数据库记录不同而 ready 503；该镜像不能记作上一健康版本。后来已真实完成 `1f7adfd` 的自动发布，不能再将当时“尚未执行发布”的准备状态作为当前结论。历史迁移与 checksum 仍冻结，不为恢复旧镜像重写它们。
 
-最新实际成功版本以宿主记录和验收证据为准，不以 `main` 或 `test` 最新提交替代。测试 environment、RAM 信任及新宿主安装已完成分项核对；`main`/`test` 分支规则、生产 environment 审批仍在设置，本期候选尚未合并或部署。生产没有服务器、云角色或真实发布接入。专用账号的认证业务冒烟仍按用户要求暂缓，现有[默认冒烟](release-smoke.md)不跳过缺失凭据而假报成功；既有健康验收成功不等于认证业务已验证。
+最新实际成功版本以宿主记录和验收证据为准，不以 `main` 或 `test` 最新提交替代。分支与环境权限、RAM 信任及新宿主安装均已完成配置核对；本期 PR #4 尚未合并，新手动流程未运行，test 尚待首次初始化。首个候选提交的 CI 成功不代表后续最终文档提交已通过全部检查。生产没有服务器、云角色或真实发布接入。专用账号的认证业务冒烟仍按用户要求暂缓，现有[默认冒烟](release-smoke.md)不跳过缺失凭据而假报成功；既有健康验收成功不等于认证业务已验证。
