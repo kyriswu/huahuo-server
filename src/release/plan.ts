@@ -17,6 +17,7 @@ export interface ReleasePlan {
     mode: 'reuse' | 'candidate';
     changes: { key: string; operation: 'add' | 'change' | 'remove'; roles: Role[]; required: boolean; hasDefault: boolean }[];
     reviewedFiles: string[];
+    verifyFile?: string;
   };
   dependencies: { name: string; checkFile: string }[];
   backfill: { required: boolean; reference: string | null };
@@ -68,7 +69,9 @@ function parsePlan(input: unknown): ReleasePlan {
   const dataChange = object(database.dataChange, ['mode', 'reason']);
   if (!['none', 'inline', 'separate'].includes(String(dataChange.mode)) || typeof dataChange.reason !== 'string'
     || dataChange.reason.length > 2000 || (dataChange.mode !== 'none' && !dataChange.reason.trim())) fail();
-  const configuration = object(plan.configuration, ['mode', 'changes', 'reviewedFiles']);
+  const configuration = object(plan.configuration, ['mode', 'changes', 'reviewedFiles',
+    ...(plan.configuration && typeof plan.configuration === 'object' && Object.hasOwn(plan.configuration, 'verifyFile') ? ['verifyFile'] : [])]);
+  if (configuration.verifyFile !== undefined && configuration.verifyFile !== `scripts/release/changes/${plan.id}/verify-config.mjs`) fail();
   if (!['reuse', 'candidate'].includes(String(configuration.mode)) || !Array.isArray(configuration.changes) || configuration.changes.length > 512) fail();
   const keys = new Set<string>();
   for (const item of configuration.changes) {
@@ -82,6 +85,7 @@ function parsePlan(input: unknown): ReleasePlan {
   }
   if (configuration.mode !== 'candidate' && configuration.changes.some(item =>
     !((item.operation === 'add' && item.hasDefault) || (item.operation === 'remove' && !item.required)))) fail();
+  if (configuration.changes.some(item => item.operation === 'change') && !configuration.verifyFile) fail();
   if (uniqueStrings(configuration.reviewedFiles, 512).some(path => !repositoryPath(path))) fail();
   if (!Array.isArray(plan.dependencies) || plan.dependencies.length > 64) fail();
   const names = new Set<string>();
@@ -157,9 +161,15 @@ export async function validateReleasePlan(input: ReleasePlan, root = process.cwd
   if (databaseChanged && plan.database.verifySql === null) fail('RELEASE_PLAN_DB_VERIFICATION_REQUIRED');
   const configChanged = changed.filter(path => ['.env.example', 'compose.yaml'].includes(path) || path.startsWith('src/config/'));
   if (configChanged.some(path => !plan.configuration.reviewedFiles.includes(path))) fail('RELEASE_PLAN_CONFIG_REVIEW_REQUIRED');
+  if (plan.configuration.verifyFile) await file(root, plan.configuration.verifyFile, 65536);
   if (plan.database.verifySql) await file(root, plan.database.verifySql);
   for (const dependency of plan.dependencies) await file(root, dependency.checkFile);
   if (plan.backfill.reference) await file(root, plan.backfill.reference);
   return { id: plan.id, baseRevision: plan.baseRevision, revision, migrationCount: added.length,
     changedFileCount: changed.length, serviceCount: plan.services.length, smoke: plan.smoke };
+}
+
+/** Validate the reviewed check file without executing it. */
+export async function readConfigurationCheck(plan: ReleasePlan, root: string): Promise<string | null> {
+  return plan.configuration.verifyFile ? file(await realpath(root), plan.configuration.verifyFile, 65536) : null;
 }

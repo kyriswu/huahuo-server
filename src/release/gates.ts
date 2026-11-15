@@ -7,7 +7,7 @@ import { loadConfig, type AppConfig, type Env, type Role } from '../config/confi
 import { preflightMigrations } from '../db/migrate.js';
 import { createDependencies, isReady, poolFor } from '../plugins/dependencies.js';
 import { RuntimeSettings } from '../modules/runtime-settings/service.js';
-import type { ReleasePlan } from './plan.js';
+import { readConfigurationCheck, type ReleasePlan } from './plan.js';
 
 const execute = promisify(execFile);
 const fail = (code: string): never => { throw new Error(code); };
@@ -22,6 +22,18 @@ export function checkReleaseConfiguration(plan: ReleasePlan, role: Role, env: En
     }
   }
   return config;
+}
+
+/** Runs inside each candidate role with its actual injected ENV, before writes. */
+export async function checkReleaseConfigurationAssertions(plan: ReleasePlan, role: Role, env: Env = process.env, root = process.cwd()) {
+  if (!plan.configuration.verifyFile) return { checkCount: 0 };
+  try {
+    await readConfigurationCheck(plan, root);
+    await execute(process.execPath, [resolve(root, plan.configuration.verifyFile)], {
+      cwd: root, env: { ...env, SERVICE_ROLE: role }, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 16384,
+    });
+  } catch { fail('RELEASE_CONFIGURATION_ASSERTION_FAILED'); }
+  return { checkCount: 1 };
 }
 
 export async function checkReleaseHistory(config: AppConfig, plan: ReleasePlan, root = process.cwd()) {

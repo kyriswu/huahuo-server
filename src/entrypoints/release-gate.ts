@@ -1,5 +1,5 @@
 import { readReleasePlan } from '../release/plan.js';
-import { checkReleaseConfiguration, checkReleaseExternal, checkReleaseHistory, checkReleaseRuntime, verifyReleaseDatabase } from '../release/gates.js';
+import { checkReleaseConfiguration, checkReleaseConfigurationAssertions, checkReleaseExternal, checkReleaseHistory, checkReleaseRuntime, verifyReleaseDatabase } from '../release/gates.js';
 import type { Role } from '../config/config.js';
 
 const mode = process.argv[2];
@@ -10,7 +10,8 @@ try {
   const plan = await readReleasePlan();
   const config = checkReleaseConfiguration(plan, role);
   let result: unknown = {};
-  if (mode === 'db-preflight') {
+  if (mode === 'config') result = await checkReleaseConfigurationAssertions(plan, role);
+  else if (mode === 'db-preflight') {
     if (role !== 'migrate') throw new Error('RELEASE_MIGRATOR_REQUIRED');
     result = await checkReleaseHistory(config, plan);
   } else if (mode === 'db-verify') result = await verifyReleaseDatabase(config, plan);
