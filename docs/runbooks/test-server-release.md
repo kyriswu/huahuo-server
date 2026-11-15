@@ -8,7 +8,7 @@
 
 操作示例：GitHub Action 选择 **main** → 运行 main 的 workflow → 校验 **test** 的提交与 CI → 将该 test 版本部署到测试服务器。业务 SHA 与流程控制 SHA 分别记录。
 
-首次真实发布已在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过，历史成功提交为 `1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da`。后续首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态 `OK_WITH_FORCED_DRAIN` 明确记录发生过到期强退。曾尝试直接部署 main，但在预检失败，未换容器；现已恢复 test 业务来源，宿主修复已安装核验，业务发布验收进行中。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早结果见[标准发布验收](../acceptance/standard-release.md)，团队步骤见[团队发布](team-releases.md)。
+首次真实发布已在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过，历史成功提交为 `1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da`。后续首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态 `OK_WITH_FORCED_DRAIN` 明确记录发生过到期强退。曾尝试直接部署 main，但在预检失败，未换容器；现已恢复 test 业务来源，宿主修复已安装核验，业务发布验收已通过。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早结果见[标准发布验收](../acceptance/standard-release.md)，团队步骤见[团队发布](team-releases.md)。
 
 本流程用于已确认的北京 ECS 测试机，不等同于生产完整发布验收。`Server CI` 已在 [PR #1](https://github.com/kyriswu/huahuo-server/pull/1) 与合并后的 main 上真实通过。本轮分支规则及 environment 配置已保存并回读；owner 的 PR-only 例外仅适用于新增 main update 限制，原 PR、strict CI 及禁止删除/强推规则继续生效。尚无实际协作者账号的反向操作实测，生产目标和云角色也尚未接入。
 
@@ -64,4 +64,4 @@ GitHub test/production 两个 environment 已实际保存为仅允许 main 分�
 
 首次发布前，旧 `4e28a98` 镜像因初始化 SQL 校验和与数据库记录不同而 ready 503；该镜像不能记作上一健康版本。后来已真实完成 `1f7adfd` 的自动发布，不能再将当时“尚未执行发布”的准备状态作为当前结论。历史迁移与 checksum 仍冻结，不为恢复旧镜像重写它们。
 
-最新实际成功版本以宿主记录和验收证据为准，不以 main 或 test 最新提交替代。首轮 `0771fd5` 的五阶段成功包含到期强退；main 直接部署尝试已在预检失败，现行来源为 test 业务/main 控制，本次 test 候选已通过 CI，正在真实发布验收。正式生产尚未接入。专用账号的认证业务冒烟仍按用户要求暂缓，现有[默认冒烟](release-smoke.md)不跳过缺失凭据而假报成功；既有健康验收成功不等于认证业务已验证。
+最新实际成功版本以宿主记录和验收证据为准，不以 main 或 test 最新提交替代。首轮 `0771fd5` 的五阶段成功包含到期强退；main 直接部署尝试已在预检失败，现行来源为 test 业务/main 控制，本次 test 候选已通过 CI 与真实发布验收。正式生产尚未接入。专用账号的认证业务冒烟仍按用户要求暂缓，现有[默认冒烟](release-smoke.md)不跳过缺失凭据而假报成功；既有健康验收成功不等于认证业务已验证。

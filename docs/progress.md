@@ -1,12 +1,12 @@
 # 当前发布状态
 
-现行规则：test 业务与清单，main 受保护发布流程；本地和测试服务器目录均在干净 test。PR #6/#7 已合并，代码树一致；本次 test 发布正在验收，正式生产尚未初始化。以下早期条目按历史保留，不作为当前部署指令。
+现行规则：test 业务与清单，main 受保护发布流程；本地和测试服务器目录均在干净 test。PR #6/#7 已合并，代码树一致；本次 test 发布已通过验收，正式生产尚未初始化。以下早期条目按历史保留，不作为当前部署指令。
 
 # 当前开发进度
 
 ## Main 业务更新与测试发布准备（2026-11-15）
 
-将本轮42个业务改动文件移植到实际成功版本0771fd5，保留冻结迁移和排空设置；补齐关闭云控制时遗留ECI checkpoint不得创建实例的遗漏。当时测试机候选暂定直接部署main（该尝试在预检失败，现已恢复test业务/main控制），保留人工Merge和Action。API关停期间已接入普通请求继续完成，四角色真实HTTP回归通过；Typecheck/Lint/Build、771项unit/contract、275项真实隔离PG/Redis通过，1项Milvus跳过；SQL版本2→2、首次与重复应用均为空。该历史候选已合并但未发布成功，后续test更新正在验收，详见[本期验收](acceptance/main-update.md)。
+将本轮42个业务改动文件移植到实际成功版本0771fd5，保留冻结迁移和排空设置；补齐关闭云控制时遗留ECI checkpoint不得创建实例的遗漏。当时测试机候选暂定直接部署main（该尝试在预检失败，现已恢复test业务/main控制），保留人工Merge和Action。API关停期间已接入普通请求继续完成，四角色真实HTTP回归通过；Typecheck/Lint/Build、771项unit/contract、275项真实隔离PG/Redis通过，1项Milvus跳过；SQL版本2→2、首次与重复应用均为空。该历史候选已合并但未发布成功，后续test更新已通过验收，详见[本期验收](acceptance/main-update.md)。
 
 ## 脱敏异常堆栈与 Dozzle 排查（2026-11-15）
 
@@ -422,6 +422,8 @@ Typecheck、Lint、Build、27文件229项unit/contract、10文件115项隔离PG/
 - 8并发批次实际3000端口的两次单请求smoke均200并命中。既有自动清理异常再次发生，长Note的175个持久待删除ID仅在完整归属范围内补偿，失败历史保留；本轮未修复后台业务。最终数据/会话核验见.local/note-hybrid-concurrency8-latency/final-verification.json。
 
 
-## 发布清单与 test 来源恢复（候选）
+## 发布清单与 test 来源恢复（已发布）
 
 增加 PR 上线清单与 ENV 值断言，恢复 main 控制/test 业务。main 直接发布尝试在预检被宿主配置检查阻止，未换容器；测试实际基准保留0771fd5，正式生产未初始化。验证与交付见 docs/acceptance/release-config-checklist.md。
+
+真实 test 发布 Action 43725571994 五阶段通过，OK，无到期强退；四角色5b844ba健康、保留上一成功0771fd5与数据卷。正式生产未部署。详见 docs/acceptance/release-config-checklist.md。

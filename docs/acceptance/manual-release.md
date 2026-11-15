@@ -44,4 +44,4 @@
 
 ## 当前规则：恢复 test 业务来源
 
-PR #6/#7 已合并，main/test 代码树一致。测试业务 SHA 为 `5b844ba89e28032d4d47435d8727f9a4a0b143bc`，main 控制 SHA 为 `19a7f1841ec817d297846548d017358a76cca86e`；test push CI 已通过。宿主修复已安装回验，本地及服务器原部署目录均为干净 test。本次 [Action 43725571994](https://github.com/kyriswu/huahuo-server/actions/runs/43725571994) 正在执行，未记录为成功。正式生产基准未初始化，测试历史不清空。
+PR #6/#7 已合并，main/test 代码树一致。测试业务 SHA 为 `5b844ba89e28032d4d47435d8727f9a4a0b143bc`，main 控制 SHA 为 `19a7f1841ec817d297846548d017358a76cca86e`；test push CI 已通过。宿主修复已安装回验，本地及服务器原部署目录均为干净 test。本次 [Action 43725571994](https://github.com/kyriswu/huahuo-server/actions/runs/43725571994) 已完成五阶段 5/5，结果为 `OK`，无到期强退。正式生产基准未初始化，测试历史不清空。
