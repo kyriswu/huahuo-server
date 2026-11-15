@@ -1,10 +1,22 @@
 # 当前开发进度
 
+## Main 业务更新与测试发布准备（2026-11-15）
+
+将本轮42个业务改动文件移植到实际成功版本0771fd5，保留冻结迁移和排空设置；补齐关闭云控制时遗留ECI checkpoint不得创建实例的遗漏。测试机按当前选择直接部署main，保留人工Merge和Action。API关停期间已接入普通请求继续完成，四角色真实HTTP回归通过；Typecheck/Lint/Build、771项unit/contract、275项真实隔离PG/Redis通过，1项Milvus跳过；SQL版本2→2、首次与重复应用均为空。本期尚未合并发布，详见[本期验收](acceptance/main-update.md)。
+
+## 脱敏异常堆栈与 Dozzle 排查（2026-11-15）
+
+公共500/DomainError 5xx写入脱敏err原因、堆栈/原因链，沿用traceId并附角色、实例、路由模板和状态；RAG/短信/上传保留包装原因，客户端提示不变。四角色启动启用source maps，真实Node26.11/容器26.12编译产物验证到TypeScript行号。12项专项、679项unit/contract、274项真实隔离PG/Redis通过（1项Milvus跳过），静态检查/构建通过；无新依赖/组件/SQL。未执行线上部署，随新版本生效，见[验收](acceptance/error-diagnostics.md)和[日志手册](runbooks/application-logs.md)，不推进Pxx。
+
+## 解析节点云控制、内网调用与发布清单（2026-11-15）
+
+主界面只读显示实例状态及独立的解析API连通性，Running即实例在线；私网API不可达不再阻塞手动开机完成。云控制由独立开关授权，完整RAM凭据或已启用节点调用时默认允许，可显式禁止；私网调用开关仍默认关闭。手动开机只用云接口，经维护队列短步骤与SSE更新；即使未参与自动调度，完成后仍按空闲时限节省停机。运行方式胶囊沿用已保存mode，不推断计费。后台删除新增入口，服务仅UPDATE已存在节点；新增须随代码发布。667项unit/contract、274项真实独立PG/Redis通过（1项Milvus跳过），静态检查/构建和本地Chrome通过；云接口为替身。未改Schema/迁移、App或实际ENV，未开停云机；测试服本轮未发布，不推进Pxx，见[验收](acceptance/processing-node-status.md)。
+
 ## 人工发布、分支分工与阶段进度（2026-11-15）
 
 测试发布改为人工 Merge 后再从 main 人工启动 Action，main 提供控制代码、test 提供已通过同 SHA push CI 的业务版本；补齐远端五阶段进度与终态复核边界。737 项 unit/contract、Typecheck/Lint/Build、48 项宿主 mock 和 Skill 静态检查通过；本轮真实隔离 PG/Redis 275 项通过、1 项 Milvus 跳过，f80→候选 SQL 2→2、首次与重复应用均为 `[]`。main/test 规则、test/production 环境限制及 owner 审批已保存并 API 回读；owner 的 PR-only 例外不绕过原 main PR/CI 规则，尚未用实际协作者反向实测。RAM 环境 subject 和宿主安装已核对，四角色未重启。
 
-[PR #4](https://github.com/kyriswu/huahuo-server/pull/4) 的首提交 `dce2dca` 已通过 [CI 43709616888](https://github.com/kyriswu/huahuo-server/actions/runs/43709616888)，后续提交按各自 SHA 重跑检查，是否可合并以 PR 当前提交的检查结果为准。新流程尚未合并运行；用户 Merge 后先等 main CI，再初建 test 到该提交、等 test push CI，最后从 main 人工 Action，后续 test 按 PR 更新。生产目标和云角色未接入。见[手动发布验收](acceptance/manual-release.md)及[团队操作](runbooks/team-releases.md)。
+[PR #4](https://github.com/kyriswu/huahuo-server/pull/4) 已由用户合并为 `0771fd5`；main/test 同 SHA push CI 通过后，用户手动运行 [Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343)，五阶段通过。四角色实际健康，保留当前和上一成功镜像；本次发生到期强退，结果为 `OK_WITH_FORCED_DRAIN`，不是所有旧工作自然完成。该轮业务来源为 test，与 main 同提交；本期后续候选改为直接 main。生产目标和云角色未接入。见[手动发布验收](acceptance/manual-release.md)及[团队操作](runbooks/team-releases.md)。
 
 ## 可复用发布规范、Skill 与迁移验收（2026-11-15）
 

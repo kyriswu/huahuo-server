@@ -11,6 +11,8 @@ import { ParserMachineIdleMonitor, type MonitorEvents } from './monitor.js';
 export { ParserMachineError, ParserMachineRedis } from './redis.js';
 export type { MachineState, MachinePhase } from './redis.js';
 export interface ParserRequest {
+  /** A manual cloud boot completes at Running; document execution still requires service readiness. */
+  readiness?:'instance';
   /** Durable callers yield instead of holding a Worker slot while queueing/booting. */
   step?:boolean;
   /** Cancels queue/startup waiting only. Submitted durable work uses its remote cancellation protocol. */
@@ -26,6 +28,10 @@ export interface ParserRequest {
   signal?: AbortSignal;
 }
 export interface ParserContext { baseUrl: string; headers: Readonly<Record<string, string>>; signal: AbortSignal }
+export interface MachineObservation {
+  state:'online'|'offline'|'starting'|'stopping'|'unknown';source:'ecs'|'eci'|'http';
+  serviceReady:boolean|null;serviceStatus:'ready'|'unreachable'|'not_checked'|'not_running';canStart:boolean;instanceStatus?:string;reason?:string;
+}
 /** Use settled only after proving the remote parser has finished or never received the request. */
 export class ParserExecutionError extends Error {
   constructor(readonly code: string, readonly outcome: 'settled' | 'unknown' = 'unknown') {
@@ -48,7 +54,7 @@ const assertNotAborted = (signal: AbortSignal) => {
   if (signal.aborted) throw new ParserMachineError('DOCUMENT_PARSER_CANCELLED');
 };
 type HealthCheck = (context: ParserContext) => Promise<boolean>;
-export type IdleAction = 'always_on' | 'unmanaged' | 'busy' | 'transition_pending' | 'start_observed' | 'stop_submitted' | 'stop_confirmed' | 'already_stopped';
+export type IdleAction = 'always_on' | 'unmanaged' | 'control_disabled' | 'busy' | 'transition_pending' | 'start_observed' | 'stop_submitted' | 'stop_confirmed' | 'already_stopped';
 
 export class DocumentParserMachine {
   private readonly healthy: HealthCheck;
@@ -76,13 +82,17 @@ export class DocumentParserMachine {
     await this.state.phase(token, error instanceof EcsPowerError && error.outcome === 'rejected' ? 'ready' : `unknown-${operation}`);
     throw error instanceof EcsPowerError ? error : new EcsPowerError('ECS_API_FAILED', 'unknown');
   }
-  private async online(id: string, owner: string): Promise<boolean> {
+  private async online(id: string, owner: string,allowFallback=true): Promise<boolean> {
     if (this.config.mode === 'always-on') return true;
     const cloud = this.cloud!;
     const token = randomUUID(), phase = await this.state.lock(token, 'request', id, owner);
     if (!phase) return false;
     try {
-      if ((await this.state.status())?.eciTarget) return await this.eci!.online(token, phase);
+      if ((await this.state.status())?.eciTarget){
+        if(!allowFallback)throw new ParserMachineError('PROCESSING_NODE_PRIMARY_INSTANCE_BUSY');
+        // Keep reconciling existing allocations, but never create when power control is disabled.
+        return await this.eci!.online(token, phase, this.config.powerControlEnabled!==false);
+      }
       const instance = await cloud.describe();
       if (phase === 'stopping' || phase === 'unknown-stop') {
         if (instance.status === 'Stopped') {
@@ -98,12 +108,13 @@ export class DocumentParserMachine {
         return true;
       }
       if (instance.status === 'Stopped' && phase === 'ready') {
+        if(this.config.powerControlEnabled===false)throw new ParserMachineError('PROCESSING_NODE_CLOUD_CONTROL_DISABLED');
         assertEconomicalStopEligible(instance);
         // Persist intent BEFORE the RPC. A new owner reconciles it instead of resubmitting.
         if (await this.state.phase(token, 'starting', id, owner)) {
           try { await cloud.start(); }
           catch (error) {
-            if (this.eci && isEcsCapacityRejection(error)) {
+            if (allowFallback&&this.eci && isEcsCapacityRejection(error)) {
               // A definitive rejected start cannot have allocated ECS compute. Never race two clouds.
               try { await this.eci.select(token, instance); }
               catch (selectionError) {
@@ -119,12 +130,12 @@ export class DocumentParserMachine {
       return false;
     } finally { await this.state.unlock(token); }
   }
-  private async ready(id: string, owner: string, signal: AbortSignal): Promise<void> {
+  private async ready(id: string, owner: string, signal: AbortSignal,powerOnly=false): Promise<void> {
     const until = Date.now() + this.config.startupTimeoutMs;
     while (Date.now() < until) {
       assertNotAborted(signal);
-      if (await this.online(id, owner)) {
-        if (await this.healthy(await this.context(signal))) return;
+      if (await this.online(id, owner,!powerOnly)) {
+        if (powerOnly||await this.healthy(await this.context(signal))) return;
       }
       await pause(this.config.pollMs, signal);
     }
@@ -133,6 +144,39 @@ export class DocumentParserMachine {
   private async context(signal: AbortSignal): Promise<ParserContext> {
     const headers: Record<string, string> = this.config.apiToken ? { Authorization: `Bearer ${this.config.apiToken}` } : {};
     return { baseUrl: await this.eci?.baseUrl() ?? this.config.baseUrl, signal, headers: Object.freeze(headers) };
+  }
+
+  /** Read-only cloud/health observation. Never acquires a power lock or starts/stops a machine. */
+  async observe(probeService=true):Promise<MachineObservation>{
+    let source:MachineObservation['source']=this.config.mode==='ecs'?'ecs':'http';
+    const result=(state:MachineObservation['state'],serviceStatus:MachineObservation['serviceStatus'],canStart=false,instanceStatus?:string,reason?:string):MachineObservation=>({state,source,serviceStatus,serviceReady:serviceStatus==='not_checked'?null:serviceStatus==='ready',canStart,instanceStatus,reason});
+    try{
+      const signal=AbortSignal.timeout(12000),coordination=await this.state.status();
+      const service=async()=>probeService?(await this.healthy(await this.context(signal))?'ready':'unreachable') as 'ready'|'unreachable':'not_checked' as const;
+      if(coordination?.eciTarget){
+        source='eci';const snapshot=await this.eci!.observe(coordination.eciTarget);
+        if(['Pending','Scheduling','Creating','Restarting'].includes(snapshot.status))return result('starting','not_running',false,snapshot.status);
+        if(snapshot.status==='Terminating')return result('stopping','not_running',false,snapshot.status);
+        if(snapshot.status!=='Running')return result('offline','not_running',false,snapshot.status);
+        return result('online',!probeService?'not_checked':snapshot.ready?await service():'unreachable',false,snapshot.status);
+      }
+      if(this.config.mode==='ecs'){
+        const instance=await this.cloud!.describe();
+        if(instance.status==='Stopped'){
+          try{assertEconomicalStopEligible(instance);}catch{return result('offline','not_running',false,instance.status,'ECS_ECONOMICAL_STOP_UNSUPPORTED');}
+          const canStart=this.config.powerControlEnabled!==false&&(!coordination||coordination.phase==='ready'&&!coordination.active&&!coordination.queued&&!coordination.uncertain);
+          return result('offline','not_running',canStart,instance.status);
+        }
+        if(instance.status==='Starting'||instance.status==='Pending')return result('starting','not_running',false,instance.status);
+        if(instance.status==='Stopping')return result('stopping','not_running',false,instance.status);
+        return result('online',await service(),false,instance.status);
+      }
+      const readiness=await service();
+      return result(readiness==='not_checked'?'unknown':readiness==='ready'?'online':'offline',readiness);
+    }catch(error){
+      const code=(error as {code?:unknown}).code??(error instanceof Error?error.message:undefined);
+      return result('unknown','not_checked',false,undefined,typeof code==='string'&&/^[A-Z][A-Z0-9_]{0,95}$/.test(code)?code:'PROCESSING_NODE_STATUS_UNAVAILABLE');
+    }
   }
 
   /** Wrap the complete remote parse, including uploads/result collection, with this method. */
@@ -179,8 +223,8 @@ export class DocumentParserMachine {
       }
       if(input.step&&input.resume){/* A persisted job is queried on its original service; never restart it to resume. */}
       else if(input.step){
-        if(!await this.online(id,owner)||!await this.healthy(await this.context(admissionSignal)))throw new ParserExecutionDeferred('admitting',3000);
-      }else await this.ready(id, owner, admissionSignal);
+        if(!await this.online(id,owner,input.readiness!=='instance')||(input.readiness!=='instance'&&!await this.healthy(await this.context(admissionSignal))))throw new ParserExecutionDeferred('admitting',3000);
+      }else await this.ready(id, owner, admissionSignal,input.readiness==='instance');
       assertNotAborted(admissionSignal);
       await this.state.renew(id, owner);
       assertNotAborted(admissionSignal);
@@ -208,6 +252,7 @@ export class DocumentParserMachine {
   /** Redis TIME, not host clocks, decides idleness; the monitor wakes on events/timers. */
   async tick(): Promise<IdleAction> {
     if (this.config.mode === 'always-on') return 'always_on';
+    if(this.config.powerControlEnabled===false)return 'control_disabled';
     const cloud = this.cloud!;
     const token = randomUUID(), phase: MachinePhase | undefined = await this.state.lock(token, 'idle');
     if (!phase) return (await this.state.status()) ? 'busy' : 'unmanaged';
@@ -267,9 +312,19 @@ export function createDocumentParserMachine(config: EnabledDocumentParserMachine
   const state = new ParserMachineRedis(redis, config, prefix);
   const machine = new DocumentParserMachine(state, config.mode === 'ecs' ? new AliyunEcsPower(config) : undefined, config);
   let monitor: ParserMachineIdleMonitor | undefined;
+  let statusSubscriber:Redis|undefined,statusConnecting:Promise<void>|undefined;
+  const statusListeners=new Set<()=>void>();
+  const statusChanged=()=>{for(const changed of statusListeners)changed();};
+  const subscribeStatus=async()=>{await statusSubscriber?.subscribe(state.eventsChannel);statusChanged();};
   return {
     machine,
     async connect() { try { await redis.connect(); } catch { throw new ParserMachineError('DOCUMENT_PARSER_REDIS_UNAVAILABLE'); } },
+    async watch(changed:()=>void){
+      statusListeners.add(changed);
+      if(!statusSubscriber){statusSubscriber=redis.duplicate({lazyConnect:true});statusSubscriber.on('error',()=>undefined);statusSubscriber.on('message',channel=>{if(channel===state.eventsChannel)statusChanged();});statusSubscriber.on('ready',()=>{void subscribeStatus().catch(()=>undefined);});statusConnecting=statusSubscriber.connect().then(()=>subscribeStatus());}
+      try{await statusConnecting;}catch(error){statusListeners.delete(changed);if(!statusListeners.size){statusSubscriber?.disconnect();statusSubscriber=undefined;statusConnecting=undefined;}throw error;}
+      return ()=>{statusListeners.delete(changed);if(!statusListeners.size){statusSubscriber?.disconnect();statusSubscriber=undefined;statusConnecting=undefined;}};
+    },
     async startIdleMonitor(events: MonitorEvents = {}) {
       if (config.mode !== 'ecs') return;
       if (!monitor) {
@@ -279,6 +334,6 @@ export function createDocumentParserMachine(config: EnabledDocumentParserMachine
         await monitor.start();
       }
     },
-    async close() { await monitor?.close(); redis.disconnect(); },
+    async close() { statusListeners.clear();statusSubscriber?.disconnect();statusSubscriber=undefined;await statusConnecting?.catch(()=>undefined);await monitor?.close();redis.disconnect(); },
   };
 }

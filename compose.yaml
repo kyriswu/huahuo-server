@@ -25,6 +25,7 @@ x-backend: &backend
 
 x-app-env: &app-env
   PROCESSING_NODES_ENABLED: ${PROCESSING_NODES_ENABLED:-false}
+  PROCESSING_NODES_CLOUD_CONTROL_ENABLED: ${PROCESSING_NODES_CLOUD_CONTROL_ENABLED:-}
   HTTP_UPLOAD_HARD_MAX_BYTES: ${HTTP_UPLOAD_HARD_MAX_BYTES:-2147483648}
   PROCESSING_NODE_LEASE_MS: ${PROCESSING_NODE_LEASE_MS:-30000}
   PROCESSING_NODE_DEDUP_TTL_SECONDS: ${PROCESSING_NODE_DEDUP_TTL_SECONDS:-86400}
@@ -111,7 +112,7 @@ x-health: &health
 services:
   api-server:
     <<: *backend
-    command: ['node', 'dist/entrypoints/api-server.js']
+    command: ['node', '--enable-source-maps', 'dist/entrypoints/api-server.js']
     environment:
       <<: *app-env
       SERVICE_ROLE: api-server
@@ -163,7 +164,7 @@ services:
 
   admin:
     <<: *backend
-    command: ['node', 'dist/entrypoints/admin.js']
+    command: ['node', '--enable-source-maps', 'dist/entrypoints/admin.js']
     environment:
       <<: [*app-env, *processing-nodes-env]
       SERVICE_ROLE: admin
@@ -190,7 +191,7 @@ services:
 
   worker:
     <<: *backend
-    command: ['node', 'dist/entrypoints/worker.js']
+    command: ['node', '--enable-source-maps', 'dist/entrypoints/worker.js']
     environment:
       <<: [*app-env, *processing-nodes-env]
       WORKER_QUEUES: ${WORKER_QUEUES:-content,ai,commercial,maintenance}
@@ -229,7 +230,7 @@ services:
 
   scheduler:
     <<: *backend
-    command: ['node', 'dist/entrypoints/scheduler.js']
+    command: ['node', '--enable-source-maps', 'dist/entrypoints/scheduler.js']
     environment:
       <<: [*app-env, *processing-nodes-env]
       SERVICE_ROLE: scheduler

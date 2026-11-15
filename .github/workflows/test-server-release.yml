@@ -1,7 +1,7 @@
 name: Test server release
 
-# Dispatch from protected main; deploy the latest test SHA after its push CI.
-# All runner-side control code and dependencies come from main, never test.
+# Dispatch from protected main; deploy that exact main SHA after its push CI.
+# Control code and business code share the same immutable main revision.
 # This does not replace the authenticated release-smoke workflow.
 on:
   workflow_dispatch:
@@ -43,7 +43,7 @@ jobs:
         with:
           node-version: '26.11.0'
           package-manager-cache: false
-      - name: Select latest test revision with successful push CI
+      - name: Verify exact main revision with successful push CI
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release/test-release-source.mjs

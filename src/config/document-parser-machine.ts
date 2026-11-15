@@ -2,6 +2,8 @@ import { isIP } from 'node:net';
 import type { DocumentParserEciConfig } from './document-parser-eci.js';
 
 interface ParserConfigBase {
+  /** Deployment permission for cloud power operations, independent of private API access. */
+  powerControlEnabled?:boolean;
   /** Durable machine occupancy guard supplied by the node registry. */
   canStop?:()=>Promise<boolean>;
   coordinationId?: string;

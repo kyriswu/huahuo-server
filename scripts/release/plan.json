@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261115-manual-release",
-  "baseRevision": "f80a0c2d498d5ade321c1d1675c76a9a1b7559a9",
+  "id": "20261115-main-update",
+  "baseRevision": "0771fd501fc3d4b7d257979032ed753492625b8b",
   "services": [
     "api-server",
     "admin",
@@ -10,16 +10,37 @@
   ],
   "database": {
     "migrations": [],
-    "verifySql": null,
+    "verifySql": "scripts/release/changes/20261115-main-update/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": ""
+      "reason": "处理节点云控制、状态及日志诊断改动；没有结构迁移或历史数据回填。"
     }
   },
   "configuration": {
     "mode": "reuse",
-    "changes": [],
-    "reviewedFiles": []
+    "changes": [
+      {
+        "key": "PROCESSING_NODES_CLOUD_CONTROL_ENABLED",
+        "operation": "add",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": false,
+        "hasDefault": true
+      }
+    ],
+    "reviewedFiles": [
+      ".env.example",
+      "compose.yaml",
+      "src/config/processing-nodes.ts",
+      "src/config/document-parser-machine.ts",
+      "Dockerfile",
+      "package.json",
+      "tsconfig.build.json"
+    ]
   },
   "dependencies": [],
   "backfill": {

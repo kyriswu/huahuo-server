@@ -41,6 +41,11 @@ export class DocumentParserEciFallback {
     else if (checkpoint.containerGroupId !== undefined) throw new ParserMachineError('DOCUMENT_PARSER_ECI_CHECKPOINT_INVALID');
     return ref;
   }
+  async observe(target:ParserEciTarget):Promise<{status:string;ready:boolean}>{
+    if(!target.checkpoint||target.checkpoint.phase!=='submitted')return {status:target.rejected?'Failed':'Pending',ready:false};
+    const snapshot=await this.provider.describe(this.reference(target));
+    return {status:snapshot?.status??'Absent',ready:snapshot?.status==='Running'&&snapshot.containersReady===true};
+  }
   private async reconcile(token: string, target: ParserEciTarget): Promise<ParserEciTarget> {
     if (!target.checkpoint) return target;
     this.reference(target);

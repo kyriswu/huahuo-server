@@ -1,5 +1,13 @@
 # 当前容器与数据库状态
 
+## 异常日志构建与启动参数（2026-11-15）
+
+本项工作仅修改源码、Server source maps及四角色Node启动参数；真实只读Node26.12临时容器验证编译堆栈到TS行号，未操作业务容器、已有卷、中心Dozzle/Grafana或线上服务。实际ENV及冻结迁移未改，新日志须随版本发布后生效；见[验收](acceptance/error-diagnostics.md)。
+
+## 节点云控制与内网调用分离（2026-11-15）
+
+现有本地四角色更新为`huahuo-server:node-control-20261115`，镜像ID `sha256:302195599a781533bbf8f62acbcc74ba1f16edc4025741c27a9af9f7282d1230`，均healthy/readiness200；HTML/JS200，匿名节点状态401，App管理路径404。私网API调用关闭，独立云控制因既有RAM配置允许，未修改真实ENV。只读确认CPU实例Stopped，节点仍一条/revision7/自动调度false/并发16/空闲60秒；原运行配置revision6、已存在Schema版本1/2与物理外键0均保留，本轮不执行迁移或改写checksum。Chrome确认无新增入口，按需启停与不在线分开显示，开机按钮可用但未点击；试用窗口解释API需由同VPC后台调用。手动启动后的空闲停机只在隔离替身测试验证，未启动云机、访问私网解析或更新测试服务器。见[验收](acceptance/processing-node-status.md)，证据`.local/node-control-separation/`的`runtime-result.json`、`status-final.json`及`node-control-final.jpg`。下方为此前运行记录。
+
 ## 冒烟脚本隔离验证（2026-11-15）
 
 本轮只创建并清理自有临时 PG/Redis 测试容器，既有六个容器的 ID/启动时间/重启次数不变。没有更新主栈、写实际 ENV 或迁移目标数据库；GitHub CI 和生产调用接口的代码完成不代表服务器部署已通过。见[验收](acceptance/release-smoke.md)。

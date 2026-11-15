@@ -56,7 +56,7 @@ export class IdentityService {
       // A timeout may follow gateway acceptance. Keep pending and forbid same-key resends.
       if (!(error instanceof SmsProviderError && error.outcome === 'unknown'))
         await this.pool.query("UPDATE otp_requests SET delivery_status='failed' WHERE id=$1",[id]);
-      throw new DomainError(503,'SMS_PROVIDER_FAILED');
+      throw new DomainError(503,'SMS_PROVIDER_FAILED',false,{cause:error});
     }
     await this.pool.query("UPDATE otp_requests SET delivery_status='sent' WHERE id=$1",[id]);
     return data;
