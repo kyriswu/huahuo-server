@@ -26,6 +26,12 @@ test/production 两个 environment 均只允许 main 分支、0 个标签，管�
 
 上述权限配置尚未用真实协作者账号做拒绝操作的反向实测。原 test 候选方案已完成一次真实手动发布；本次恢复 test 候选及新增配置断言须另行合并和验收，不能用上次成功代替。Skill 是准备指南，GitHub 权限才执行强制限制。本次不接正式生产，也不增加生产发布入口。分项证据见[手动发布验收](../acceptance/manual-release.md)。
 
+## 发布 Skill 审核保护
+
+`.github/CODEOWNERS` 只指定 `/.agents/skills/huahuo-release/` 与 `/.github/CODEOWNERS` 归 `@kyriswu` 审核，没有把 `.agents/skills/` 整体设为专属。新增其他 Skill 与普通业务代码不增加 owner 审核要求。
+
+配套规则 `release-skill-owner-review` 面向 main/test，要求 Code Owner 审核、推新提交后旧审核失效，通用审批人数为 0；它与原有 PR、CI、禁止强推规则叠加。仅 kyriswu 本人允许通过 PR 操作这条新增审核规则，避免自己发起的 PR 无法自己审批；命令行直推不在此例外中，原有 CI 仍不可绕过。规则文件也受自身保护。规则保存与 CODEOWNERS 合入目标分支后共同生效，不能仅凭文件存在宣称权限已启用；尚未使用真实协作者做拒绝测试。
+
 ## 发布测试版本
 
 1. 从测试环境实际成功 SHA 整理代码、配置和迁移影响，使用发布技能和 PR 模板提交上线清单。
