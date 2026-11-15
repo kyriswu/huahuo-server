@@ -31,12 +31,17 @@
 
 专用认证冒烟凭据仍按既定范围暂缓，首轮采用测试环境已接受的 health 范围；不宣称认证业务或生产发布通过。
 
-## 本次调整：原测试机直接使用 main
+## 历史尝试：原测试机直接使用 main（已停止采用）
 
-用户明确本次不接正式生产，暂时让上次测试服务器直接部署 main。候选保留现有 `Test server release` 手动入口、`test` environment、OIDC subject、固定实例和保存命令；不创建 production workflow，不删除 test 分支，不修改云资源或 GitHub 设置。
+当时用户明确不接正式生产，暂时让测试服务器直接部署 main。候选保留现有 `Test server release` 手动入口、`test` environment、OIDC subject、固定实例和保存命令；不创建 production workflow，不删除 test 分支，不修改云资源或 GitHub 设置。
 
-来源校验改为只读取 main：业务 SHA、控制 SHA、Compose SHA 均为发起时同一完整 SHA，必须有该 SHA 的 main push `Server CI` 成功记录。获取身份后、调用前重新确认 main 未移动；锁定的目标 SHA 不允许变为其他提交。test 分支的 SHA 和 CI 不再参与默认发布选择。宿主入口需同步只核对 main，唯一命令参数继续为 `sha`，五阶段及失败不自动重发规则不变。
+当时的来源校验改为只读取 main：业务 SHA、控制 SHA、Compose SHA 均为发起时同一完整 SHA，必须有该 SHA 的 main push `Server CI` 成功记录。获取身份后、调用前重新确认 main 未移动；锁定的目标 SHA 不允许变为其他提交。test 分支的 SHA 和 CI 不再参与默认发布选择。宿主入口需同步只核对 main，唯一命令参数继续为 `sha`，五阶段及失败不自动重发规则不变。
 
 这部分是新候选修改，须完成对应本地检查，并在 owner 人工 Merge、同 SHA CI 成功后再人工 Action 验收。候选修改或上面的首轮成功都不能视为本次已部署。
 
 操作步骤见[团队发布](../runbooks/team-releases.md)，执行与恢复原则见[标准发布](../runbooks/standard-release.md)。本期结果不覆盖旧阶段的测试数量和初次失败记录。
+
+
+## 当前规则：恢复 test 业务来源
+
+PR #6/#7 已合并，main/test 代码树一致。测试业务 SHA 为 `5b844ba89e28032d4d47435d8727f9a4a0b143bc`，main 控制 SHA 为 `19a7f1841ec817d297846548d017358a76cca86e`；test push CI 已通过。宿主修复已安装回验，本地及服务器原部署目录均为干净 test。本次 [Action 43725571994](https://github.com/kyriswu/huahuo-server/actions/runs/43725571994) 已完成五阶段 5/5，结果为 `OK`，无到期强退。正式生产基准未初始化，测试历史不清空。

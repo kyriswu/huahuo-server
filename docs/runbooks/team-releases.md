@@ -1,5 +1,13 @@
 # 团队发布
 
+## 分支与环境的含义
+
+- `main` 是 Git 分支：当前提供受保护的发布 workflow、调用器、依赖及 Compose 等部署控制文件。下文“从 main 启动 Action”表示执行 main 中的流程，不表示测试业务代码来自 main。
+- `test` 是 Git 分支：提供测试服务器实际运行的业务代码和本期发布清单，镜像按选定的 test 提交构建。
+- 测试／生产环境是部署目标及各自配置，不是分支名称；正式生产尚未接入，不能从 main 的存在推定生产已部署。
+
+操作示例：GitHub Action 选择 **main** → 运行 main 的 workflow → 校验 **test** 的提交与 CI → 将该 test 版本部署到测试服务器。业务 SHA 与流程控制 SHA 分别记录。
+
 `main` 是受保护的发布流程来源，`test` 是测试服务器的业务代码来源。团队通过 PR 合入 test，等待 test 的同 SHA push CI，通过 main 中的手动 Action 发布该 test SHA。main/test 同步通过 PR 完成，不强推受保护分支；本地开发使用 test。
 
 ## 权限与当前状态
@@ -17,6 +25,12 @@ main/test 分支规则已保存并通过 API 回读。main 的原规则仍要求
 test/production 两个 environment 均只允许 main 分支、0 个标签，管理员绕过关闭；production reviewer 仅 `kyriswu`，允许本人发起后本人批准。RAM 使用 `environment:test` subject，旧分支 subject 已移除。本次仅调整原测试发布的代码来源，不改变环境、云角色、保存命令或服务器目标。
 
 上述权限配置尚未用真实协作者账号做拒绝操作的反向实测。原 test 候选方案已完成一次真实手动发布；本次恢复 test 候选及新增配置断言须另行合并和验收，不能用上次成功代替。Skill 是准备指南，GitHub 权限才执行强制限制。本次不接正式生产，也不增加生产发布入口。分项证据见[手动发布验收](../acceptance/manual-release.md)。
+
+## 发布 Skill 审核保护
+
+`.github/CODEOWNERS` 只指定 `/.agents/skills/huahuo-release/` 与 `/.github/CODEOWNERS` 归 `@kyriswu` 审核，没有把 `.agents/skills/` 整体设为专属。新增其他 Skill 与普通业务代码不增加 owner 审核要求。
+
+配套规则 `release-skill-owner-review` 面向 main/test，要求 Code Owner 审核、推新提交后旧审核失效，通用审批人数为 0；它与原有 PR、CI、禁止强推规则叠加。仅 kyriswu 本人允许通过 PR 操作这条新增审核规则，避免自己发起的 PR 无法自己审批；命令行直推不在此例外中，原有 CI 仍不可绕过。规则文件也受自身保护。规则保存与 CODEOWNERS 合入目标分支后共同生效，不能仅凭文件存在宣称权限已启用；尚未使用真实协作者做拒绝测试。
 
 ## 发布测试版本
 
