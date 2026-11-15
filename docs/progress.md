@@ -1,8 +1,12 @@
+# 当前发布状态
+
+现行规则：test 业务与清单，main 受保护发布流程；本地和测试服务器目录均在干净 test。PR #6/#7 已合并，代码树一致；本次 test 发布正在验收，正式生产尚未初始化。以下早期条目按历史保留，不作为当前部署指令。
+
 # 当前开发进度
 
 ## Main 业务更新与测试发布准备（2026-11-15）
 
-将本轮42个业务改动文件移植到实际成功版本0771fd5，保留冻结迁移和排空设置；补齐关闭云控制时遗留ECI checkpoint不得创建实例的遗漏。测试机按当前选择直接部署main，保留人工Merge和Action。API关停期间已接入普通请求继续完成，四角色真实HTTP回归通过；Typecheck/Lint/Build、771项unit/contract、275项真实隔离PG/Redis通过，1项Milvus跳过；SQL版本2→2、首次与重复应用均为空。本期尚未合并发布，详见[本期验收](acceptance/main-update.md)。
+将本轮42个业务改动文件移植到实际成功版本0771fd5，保留冻结迁移和排空设置；补齐关闭云控制时遗留ECI checkpoint不得创建实例的遗漏。当时测试机候选暂定直接部署main（该尝试在预检失败，现已恢复test业务/main控制），保留人工Merge和Action。API关停期间已接入普通请求继续完成，四角色真实HTTP回归通过；Typecheck/Lint/Build、771项unit/contract、275项真实隔离PG/Redis通过，1项Milvus跳过；SQL版本2→2、首次与重复应用均为空。该历史候选已合并但未发布成功，后续test更新正在验收，详见[本期验收](acceptance/main-update.md)。
 
 ## 脱敏异常堆栈与 Dozzle 排查（2026-11-15）
 
@@ -16,7 +20,7 @@
 
 测试发布改为人工 Merge 后再从 main 人工启动 Action，main 提供控制代码、test 提供已通过同 SHA push CI 的业务版本；补齐远端五阶段进度与终态复核边界。737 项 unit/contract、Typecheck/Lint/Build、48 项宿主 mock 和 Skill 静态检查通过；本轮真实隔离 PG/Redis 275 项通过、1 项 Milvus 跳过，f80→候选 SQL 2→2、首次与重复应用均为 `[]`。main/test 规则、test/production 环境限制及 owner 审批已保存并 API 回读；owner 的 PR-only 例外不绕过原 main PR/CI 规则，尚未用实际协作者反向实测。RAM 环境 subject 和宿主安装已核对，四角色未重启。
 
-[PR #4](https://github.com/kyriswu/huahuo-server/pull/4) 已由用户合并为 `0771fd5`；main/test 同 SHA push CI 通过后，用户手动运行 [Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343)，五阶段通过。四角色实际健康，保留当前和上一成功镜像；本次发生到期强退，结果为 `OK_WITH_FORCED_DRAIN`，不是所有旧工作自然完成。该轮业务来源为 test，与 main 同提交；本期后续候选改为直接 main。生产目标和云角色未接入。见[手动发布验收](acceptance/manual-release.md)及[团队操作](runbooks/team-releases.md)。
+[PR #4](https://github.com/kyriswu/huahuo-server/pull/4) 已由用户合并为 `0771fd5`；main/test 同 SHA push CI 通过后，用户手动运行 [Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343)，五阶段通过。四角色实际健康，保留当前和上一成功镜像；本次发生到期强退，结果为 `OK_WITH_FORCED_DRAIN`，不是所有旧工作自然完成。该轮业务来源为 test，与 main 同提交；后续曾尝试直接main但预检失败，现已恢复test业务/main控制。生产目标和云角色未接入。见[手动发布验收](acceptance/manual-release.md)及[团队操作](runbooks/team-releases.md)。
 
 ## 可复用发布规范、Skill 与迁移验收（2026-11-15）
 
