@@ -1,14 +1,12 @@
 # 测试服务器人工触发发布接口
 
-首次真实发布已在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过，历史成功提交为 `1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da`。后续首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态 `OK_WITH_FORCED_DRAIN` 明确记录发生过到期强退。本次按用户确认改为原测试机直接部署 main；候选与宿主修复尚未上线。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早结果见[标准发布验收](../acceptance/standard-release.md)，团队步骤见[团队发布](team-releases.md)。
+首次真实发布已在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过，历史成功提交为 `1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da`。后续首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态 `OK_WITH_FORCED_DRAIN` 明确记录发生过到期强退。曾尝试直接部署 main，但在预检失败，未换容器；现按用户确认恢复 test 业务来源，宿主修复尚未上线。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早结果见[标准发布验收](../acceptance/standard-release.md)，团队步骤见[团队发布](team-releases.md)。
 
 本流程用于已确认的北京 ECS 测试机，不等同于生产完整发布验收。`Server CI` 已在 [PR #1](https://github.com/kyriswu/huahuo-server/pull/1) 与合并后的 main 上真实通过。本轮分支规则及 environment 配置已保存并回读；owner 的 PR-only 例外仅适用于新增 main update 限制，原 PR、strict CI 及禁止删除/强推规则继续生效。尚无实际协作者账号的反向操作实测，生产目标和云角色也尚未接入。
 
 ## 触发与身份
 
-候选 `test-server-release.yml` 只有 `workflow_dispatch`，必须从 `main` 手动发起，使用原 `test` environment。由 owner 按 PR 规则人工合入 main，等待该 SHA 的 main push `Server CI` 成功，再人工点 Action；合并及 CI 完成不会自动发布。现有 test 分支及其 CI 保留，但暂不作为发布来源。
-
-Action 只读取 main，要求它仍为发起时的完整 SHA，并核对同 SHA 的 main push CI 成功。业务代码、checkout、依赖、云调用器及 Compose 都来自该提交；获取身份后、调用前再次核对 main 未移动及目标 SHA 未变化，不读取 test 头或自动换成其他成功版本。发布串行，不自动取消正在执行的命令；失败后先核查已有调用，不能直接重复提交。
+`test-server-release.yml` 仅 workflow_dispatch，从受保护 main 手动启动。main 提供控制代码/调用器/依赖与 Compose；test 提供业务代码及发布清单，需同 SHA 的 test push CI 成功。选择后固定双方完整 SHA，获取身份后及调用前复核；宿主锁内和迁移前也复核，变化就停止，不自动替换候选。合并和 CI 不自动发布。
 
 GitHub test/production 两个 environment 已实际保存为仅允许 main 分支、0 个标签，并关闭管理员绕过。production reviewer 只有 `kyriswu`，关闭 prevent-self-review，允许 owner 本人发起后本人批准。RAM 使用此仓库的 `environment:test` subject，旧分支 subject 已移除；5400 秒会话上限和原权限 Policy 保持不变。工作流另核对 `ref=main`、`event_name=workflow_dispatch` 和控制 SHA。该身份已用于首轮真实手动发布；本次来源调整复用它，不创建新的生产身份，production 环境配置不代表正式生产已接入。
 
@@ -30,7 +28,7 @@ GitHub test/production 两个 environment 已实际保存为仅允许 main 分�
 
 ## 宿主结果协议
 
-固定命令调用宿主维护的发布入口。宿主文件、入口配置和详细构建日志独立于本仓库；本仓库只保存调用接口。本次候选约定宿主在锁内核对传入 SHA 等于当前 main，并核对计划实际成功基准；业务、Compose 和控制代码都来自该固定 SHA，不依赖 test 分支。使用已验证的配置快照与现有存储，不覆盖服务器未提交改动。候选代码停止读取、清单标记为非必需删除的旧 ENV 键可以保留在成功快照中，配置审查仍不可跳过。
+固定命令调用宿主维护的发布入口。宿主文件、入口配置和详细构建日志独立于本仓库；本仓库只保存调用接口。宿主在锁内核对传入 SHA 等于当前 test，另固定 main 控制 SHA，并核对测试环境实际成功基准；业务与清单来自 test，Compose 与控制来自 main。使用已验证的配置快照与现有存储，不覆盖服务器未提交改动。候选代码停止读取、清单标记为非必需删除的旧 ENV 键可以保留在成功快照中，配置审查仍不可跳过。
 
 以下是一条最终结果示例；五阶段进度使用固定脱敏报告，不转发原始命令输出：
 

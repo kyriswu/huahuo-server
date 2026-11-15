@@ -1,13 +1,13 @@
 # 团队发布
 
-`main` 是 Git 分支，不是另一个服务器。按当前约定，已有测试服务器直接部署 owner 合入 `main` 的版本；流程代码、业务代码和 Compose 使用同一完整 SHA。遵循“人工 Merge → 同 SHA 的 CI 通过 → 从 main 人工 Action”，合并和 CI 都不自动发布。保留现有 `test` 分支，暂不将它作为发布候选；以后需要时再调整。
+`main` 是受保护的发布流程来源，`test` 是测试服务器的业务代码来源。团队通过 PR 合入 test，等待 test 的同 SHA push CI，通过 main 中的手动 Action 发布该 test SHA。main/test 同步通过 PR 完成，不强推受保护分支；本地开发使用 test。
 
 ## 权限与当前状态
 
 | 操作 | 已保存的权限限制 |
 | --- | --- |
-| 合入 `test` | 仍按已配置的 PR 和 CI 规则；暂不作为部署来源 |
-| 人工发布测试 | 从 main 手动发起，部署该次 main SHA |
+| 合入 `test` | 团队按已配置的 PR 和 CI 规则合并并部署 |
+| 人工发布测试 | 从 main 手动发起，部署已通过 CI 的 test SHA |
 | 合入 `main` | 只有 owner |
 | 生产发布 | 人工发起，必须 owner 批准 |
 | 测试 Action 的来源与目标 | 从 `main` 发起，使用 `test` environment；继续部署原测试机 |
@@ -16,16 +16,16 @@ main/test 分支规则已保存并通过 API 回读。main 的原规则仍要求
 
 test/production 两个 environment 均只允许 main 分支、0 个标签，管理员绕过关闭；production reviewer 仅 `kyriswu`，允许本人发起后本人批准。RAM 使用 `environment:test` subject，旧分支 subject 已移除。本次仅调整原测试发布的代码来源，不改变环境、云角色、保存命令或服务器目标。
 
-上述权限配置尚未用真实协作者账号做拒绝操作的反向实测。原 test 候选方案已完成一次真实手动发布；本次 main 候选调整须另行合并和验收，不能用上次成功代替。Skill 是准备指南，GitHub 权限才执行强制限制。本次不接正式生产，也不增加生产发布入口。分项证据见[手动发布验收](../acceptance/manual-release.md)。
+上述权限配置尚未用真实协作者账号做拒绝操作的反向实测。原 test 候选方案已完成一次真实手动发布；本次恢复 test 候选及新增配置断言须另行合并和验收，不能用上次成功代替。Skill 是准备指南，GitHub 权限才执行强制限制。本次不接正式生产，也不增加生产发布入口。分项证据见[手动发布验收](../acceptance/manual-release.md)。
 
 ## 发布测试版本
 
-1. 从测试环境实际成功 SHA 整理本期代码、配置和迁移影响，更新发布清单及验收，提交 PR。
-2. 由 owner 按 PR 规则人工合入 `main`，等待该 SHA 的 push `Server CI` 成功。
-3. 在 Actions 选择 `Test server release`，从 `main` 人工运行。流程只接受发起时的完整 main SHA，且必须有同 SHA 的 main push CI 成功记录；不改选更早的成功版本，也不读取 test 最新提交。
-4. 查看阶段进度与结果。获取身份后、调用前再次核对 `main` 未移动，宿主在发布锁内也核对该 SHA。若 main 已移动，等待新提交检查完成后重新准备，不自动切换候选。
+1. 从测试环境实际成功 SHA 整理代码、配置和迁移影响，使用发布技能和 PR 模板提交上线清单。
+2. 流程变更先由 owner 合入 main；业务变更合入 test。需要同步时先 main → test 的 PR，等待 test push CI 成功。
+3. Actions 选择 `Test server release`，分支 main，人工 Run workflow。主分支提供调用器、依赖及 Compose，test 提供业务候选与清单；分别固定完整 SHA。
+4. 调用前与宿主锁内核对双方未移动，失败停止，不自动换候选。查看五阶段结果后才记录该测试环境成功版本。
 
-工作流、云调用器、依赖、Compose 和业务代码都来自同一受保护的 `main` SHA。现有 `test` 分支的存在、提交内容和 CI 状态不参与这次选择。测试机仍使用既有 `test` environment/OIDC 身份、固定实例和固定保存命令，唯一命令参数仍是 `sha`，不接受任意目标或 shell。
+正式生产尚未接入，成功部署基准为“未初始化”（null），不拿 main Git HEAD 或测试成功记录冒充生产部署。测试成功记录仍保留实际 SHA、配置及迁移历史；分支同步不会重置环境或数据库。
 
 ## 共享资源与进度
 

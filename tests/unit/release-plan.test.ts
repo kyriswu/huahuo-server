@@ -95,6 +95,17 @@ describe('reviewed release plan', () => {
     plan.configuration.changes[0]!.operation = 'change';
     await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_INVALID');
   });
+  it('requires a reviewed configuration assertion for changed values and checks its file', async () => {
+    plan.configuration.mode = 'candidate';
+    plan.configuration.changes = [{ key: 'BUDGET', operation: 'change', roles: ['worker'], required: true, hasDefault: false }];
+    await save(); await expect(readReleasePlan(root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+    plan.configuration.verifyFile = `scripts/release/changes/${plan.id}/verify-config.mjs`;
+    await save(); await expect(validateReleasePlan(await readReleasePlan(root), root)).rejects.toThrow('RELEASE_PLAN_FILE_INVALID');
+    await put(plan.configuration.verifyFile, "if (process.env.SERVICE_ROLE === 'worker' && process.env.BUDGET !== '20') process.exitCode = 1;");
+    await expect(validateReleasePlan(await readReleasePlan(root), root)).resolves.toMatchObject({ id: plan.id });
+    plan.configuration.verifyFile = '../private.mjs';
+    await save(); await expect(readReleasePlan(root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+  });
   it('reuses the successful ENV snapshot after reviewed code stops reading optional retired keys', async () => {
     await put('src/config/config.ts', 'export const timeout = process.env.SHUTDOWN_TIMEOUT_MS;\n');
     await put('compose.yaml', 'services:\n  worker:\n    stop_grace_period: ${STOP_GRACE_PERIOD}\n');

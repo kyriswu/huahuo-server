@@ -416,3 +416,8 @@ Typecheck、Lint、Build、27文件229项unit/contract、10文件115项隔离PG/
 - 4并发混合测试的真实3000端口补充smoke均200。已知自动清理异常本轮再次出现，保留失败任务并对测试fixture使用完整归属和持久待删除ID补偿；没有修改业务Worker或掩盖失败。最终强一致核验见 .local/note-hybrid-concurrency-latency/final-verification.json。
 
 - 8并发批次实际3000端口的两次单请求smoke均200并命中。既有自动清理异常再次发生，长Note的175个持久待删除ID仅在完整归属范围内补偿，失败历史保留；本轮未修复后台业务。最终数据/会话核验见.local/note-hybrid-concurrency8-latency/final-verification.json。
+
+
+## 发布清单与 test 来源恢复（候选）
+
+增加 PR 上线清单与 ENV 值断言，恢复 main 控制/test 业务。main 直接发布尝试在预检被宿主配置检查阻止，未换容器；测试实际基准保留0771fd5，正式生产未初始化。验证与交付见 docs/acceptance/release-config-checklist.md。

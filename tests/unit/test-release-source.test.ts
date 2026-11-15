@@ -3,20 +3,20 @@ import { spawnSync } from 'node:child_process';
 // @ts-expect-error Release tooling deliberately uses dependency-free JavaScript.
 import { resolveTestReleaseRevision, selectTestReleaseRevision, verifyTestReleaseOidcClaims } from '../../scripts/release/test-release-source.mjs';
 
-const controlSha = 'a'.repeat(40), targetSha = controlSha, movedSha = 'c'.repeat(40);
+const controlSha = 'a'.repeat(40), targetSha = 'b'.repeat(40), movedSha = 'c'.repeat(40);
 const context = () => ({ repository: 'kyriswu/huahuo-server', eventName: 'workflow_dispatch', ref: 'refs/heads/main', controlSha });
 const branch = (name: string, sha: string) => ({ ref: `refs/heads/${name}`, object: { type: 'commit', sha } });
-const run = () => ({ head_sha: targetSha, head_branch: 'main', event: 'push', status: 'completed', conclusion: 'success',
+const run = () => ({ head_sha: targetSha, head_branch: 'test', event: 'push', status: 'completed', conclusion: 'success',
   path: '.github/workflows/release-smoke-check.yml', head_repository: { full_name: 'kyriswu/huahuo-server' } });
-const source = () => ({ mainRef: branch('main', controlSha), ciRuns: { workflow_runs: [run()] } });
+const source = () => ({ mainRef: branch('main', controlSha), testRef: branch('test', targetSha), ciRuns: { workflow_runs: [run()] } });
 const claims = () => ({ iss: 'https://token.actions.githubusercontent.com', aud: 'sts.aliyuncs.com',
   sub: 'repo:kyriswu@5120703/huahuo-server@1415659399:environment:test', ref: 'refs/heads/main',
   repository: 'kyriswu/huahuo-server', event_name: 'workflow_dispatch', sha: controlSha });
 
 describe('manual test release source verification (local data fixtures only)', () => {
-  it('deploys the exact protected-main control revision after that same SHA passes push CI', () => {
+  it('keeps protected-main control separate from the successfully tested target commit', () => {
     expect(selectTestReleaseRevision(context(), source())).toEqual({ controlSha, targetSha });
-    expect(controlSha).toBe(targetSha);
+    expect(controlSha).not.toBe(targetSha);
   });
   it.each([
     ['different repository', { repository: 'other/huahuo-server' }],
@@ -33,17 +33,14 @@ describe('manual test release source verification (local data fixtures only)', (
     const snapshot = source(); snapshot.mainRef.object.sha = movedSha;
     expect(() => selectTestReleaseRevision(context(), snapshot)).toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
   });
-  it('rejects main moving after selection even if the new SHA has passed CI', () => {
-    const snapshot = source(); snapshot.mainRef.object.sha = movedSha; snapshot.ciRuns.workflow_runs[0]!.head_sha = movedSha;
+  it('rejects test moving after target selection even if the new SHA has passed CI', () => {
+    const snapshot = source(); snapshot.testRef.object.sha = movedSha; snapshot.ciRuns.workflow_runs[0]!.head_sha = movedSha;
     expect(() => selectTestReleaseRevision({ ...context(), expectedTargetSha: targetSha }, snapshot)).toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
     expect(selectTestReleaseRevision({ ...context(), expectedTargetSha: targetSha }, source()).targetSha).toBe(targetSha);
   });
-  it('rejects a target SHA different from the dispatch revision instead of deploying test or another revision', () => {
-    expect(() => selectTestReleaseRevision({ ...context(), expectedTargetSha: movedSha }, source())).toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
-  });
   it.each([
     ['wrong target revision', { head_sha: movedSha }],
-    ['test CI', { head_branch: 'test' }],
+    ['main CI', { head_branch: 'main' }],
     ['PR CI', { event: 'pull_request' }],
     ['manual CI', { event: 'workflow_dispatch' }],
     ['failed CI', { conclusion: 'failure' }],
@@ -57,19 +54,20 @@ describe('manual test release source verification (local data fixtures only)', (
   it('requires CI evidence and correct branch ref objects', () => {
     const missing = source(); missing.ciRuns.workflow_runs = [];
     expect(() => selectTestReleaseRevision(context(), missing)).toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
-    const wrongBranch = source(); wrongBranch.mainRef.ref = 'refs/heads/test';
+    const wrongBranch = source(); wrongBranch.testRef.ref = 'refs/heads/main';
     expect(() => selectTestReleaseRevision(context(), wrongBranch)).toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
     const tag = source(); tag.mainRef.object.type = 'tag';
     expect(() => selectTestReleaseRevision(context(), tag)).toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
   });
-  it('reads only main and its exact push CI, never depends on the test branch, and refuses redirects', async () => {
+  it('uses fixed GitHub read endpoints, filters CI by the selected test SHA, and refuses redirects', async () => {
     const snapshot = source();
     const request = vi.fn(async (url: string) => ({ ok: true, json: async () =>
-      url.endsWith('/main') ? snapshot.mainRef : snapshot.ciRuns }));
+      url.endsWith('/main') ? snapshot.mainRef : url.endsWith('/test') ? snapshot.testRef : snapshot.ciRuns }));
     expect(await resolveTestReleaseRevision(context(), 'private-token-fixture', request)).toEqual({ controlSha, targetSha });
     expect(request.mock.calls.map(([url]) => url)).toEqual([
       'https://api.github.com/repos/kyriswu/huahuo-server/git/ref/heads/main',
-      `https://api.github.com/repos/kyriswu/huahuo-server/actions/workflows/release-smoke-check.yml/runs?branch=main&event=push&status=success&head_sha=${targetSha}&per_page=10`,
+      'https://api.github.com/repos/kyriswu/huahuo-server/git/ref/heads/test',
+      `https://api.github.com/repos/kyriswu/huahuo-server/actions/workflows/release-smoke-check.yml/runs?branch=test&event=push&status=success&head_sha=${targetSha}&per_page=10`,
     ]);
     for (const call of request.mock.calls) {
       const options = (call as unknown as [string, { redirect: string; signal: AbortSignal; headers: { authorization: string } }])[1];
@@ -83,14 +81,10 @@ describe('manual test release source verification (local data fixtures only)', (
     expect(request).not.toHaveBeenCalled();
   });
   it('does not use an unvalidated ref value in a follow-up request', async () => {
-    const request = vi.fn(async () => ({ ok: true, json: async () => branch('main', 'private?redirect=https://other.invalid') }));
+    const request = vi.fn(async (url: string) => ({ ok: true, json: async () =>
+      url.endsWith('/main') ? branch('main', controlSha) : branch('test', 'private?redirect=https://other.invalid') }));
     await expect(resolveTestReleaseRevision(context(), 'fixture', request)).rejects.toThrow(/^TEST_RELEASE_SOURCE_NOT_VERIFIED$/);
-    expect(request).toHaveBeenCalledTimes(1);
-  });
-  it('stops before looking up CI if a later invocation tries to switch the selected target', async () => {
-    const request = vi.fn(async () => ({ ok: true, json: async () => branch('main', controlSha) }));
-    await expect(resolveTestReleaseRevision({ ...context(), expectedTargetSha: movedSha }, 'fixture', request)).rejects.toThrow('TEST_RELEASE_SOURCE_NOT_VERIFIED');
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
   });
   it('sanitizes API, malformed JSON and HTTP failures', async () => {
     const privateMessage = 'private-token-or-response-must-not-be-logged';
