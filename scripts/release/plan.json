@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261116-parser-api",
-  "baseRevision": "2155cdac07eec059d084e08e09552c003f3df8c5",
+  "id": "20261116-node-defaults",
+  "baseRevision": "c14435e8998a0625f893717631f67570109dfd4b",
   "services": [
     "api-server",
     "admin",
@@ -9,85 +9,25 @@
     "scheduler"
   ],
   "database": {
-    "migrations": [],
-    "verifySql": "scripts/release/changes/20261116-parser-api/verify-db.sql",
+    "migrations": [
+      "0003_retire_node_admission_toggle.sql"
+    ],
+    "verifySql": "scripts/release/changes/20261116-node-defaults/verify-db.sql",
     "dataChange": {
-      "mode": "none",
-      "reason": "按用户要求启用测试环境文档/音频节点API调用；无数据库或业务数据变化。"
+      "mode": "inline",
+      "reason": "退役节点接收新任务开关；已核对目标仅1个节点。单事务UPDATE将旧字段固定true供旧容器交接，新API不再暴露或读取；不动现有任务快照，失败事务回滚。"
     }
   },
   "configuration": {
-    "mode": "candidate",
-    "changes": [
-      {
-        "key": "APP_ENV",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler",
-          "migrate"
-        ],
-        "required": true,
-        "hasDefault": true
-      },
-      {
-        "key": "PROCESSING_NODES_CLOUD_CONTROL_ENABLED",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": true
-      },
-      {
-        "key": "ALIYUN_RAM_ACCESS_KEY_ID",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": true,
-        "hasDefault": false
-      },
-      {
-        "key": "ALIYUN_RAM_ACCESS_KEY_SECRET",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": true,
-        "hasDefault": false
-      },
-      {
-        "key": "PROCESSING_NODES_ENABLED",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": true,
-        "hasDefault": true
-      }
-    ],
+    "mode": "reuse",
+    "changes": [],
     "reviewedFiles": [
       ".env.example",
       ".env.compose.cloud.example",
       "compose.yaml",
       "src/config/processing-nodes.ts"
     ],
-    "verifyFile": "scripts/release/changes/20261116-parser-api/verify-config.mjs"
+    "verifyFile": "scripts/release/changes/20261116-node-defaults/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {

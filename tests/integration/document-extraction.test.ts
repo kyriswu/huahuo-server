@@ -89,8 +89,9 @@ const server=createServer((req,res)=>{void(async()=>{
  }
  res.writeHead(404);res.end('{}');
  })().catch(error=>{errors.push(error);res.writeHead(500);res.end('{}');});});
-beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw new Error('TEST_ADDRESS');baseUrl=`http://127.0.0.1:${address.port}`;});
-afterAll(async()=>{await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);redis.disconnect();await root.end();await new Promise<void>(done=>server.close(()=>done()));await rm(directory,{recursive:true,force:true});});
+let originalNodes:Record<string,unknown>[]=[];
+beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();originalNodes=(await root.query('SELECT * FROM processing_nodes')).rows;await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw new Error('TEST_ADDRESS');baseUrl=`http://127.0.0.1:${address.port}`;});
+afterAll(async()=>{await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query('DELETE FROM processing_nodes');for(const row of originalNodes)await root.query('INSERT INTO processing_nodes(id,config,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5)',[row.id,JSON.stringify(row.config),row.revision,row.created_at,row.updated_at]);redis.disconnect();await root.end();await new Promise<void>(done=>server.close(()=>done()));await rm(directory,{recursive:true,force:true});});
 
 async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=false,serviceDefaults=false){
  scenario=state;autoCallback=state==='success'||state==='failed-file';getCount=0;postCount=0;sourceReads=0;deleteCount=0;failGet=state==='get-error';hold=state==='pending'||state==='cancel-error';onGet=undefined;beforeAsyncReply=undefined;replyJobId=undefined;requests.splice(0);errors.splice(0);remoteJobs.clear();
@@ -103,7 +104,7 @@ async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=fa
  const extraction=extractionConfig(mode);if(!extraction.enabled)throw Error('TEST_CONFIG_REQUIRED');
  await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');
  const documentApi={mode:'async' as const,parameters:serviceDefaults?null:extraction.parameters,timeoutSeconds:3120,pollMs:100,maxResponseBytes:67108864};
- await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
+ await root.query('DELETE FROM processing_nodes');
  const nodeId=randomUUID(),nodePrefix=prefix+':processing-node:{'+nodeId+'}';
  await root.query('INSERT INTO processing_nodes(id,config) VALUES($1,$2)',[nodeId,JSON.stringify({documentApi,name:'loopback parser',capabilities:['document'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:baseUrl+'/node-'+prefix,healthPath:'',tokenEnv:null,eciFallback:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:true})]);
  apiConfig.rag.enabled=true;workerConfig.rag.enabled=true;
@@ -175,7 +176,7 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    const created=await s.start();expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect((await s.task(created.jobId)).state).toBe('waiting_external');expect(getCount).toBe(0);
    await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
    expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();expect((await s.task(created.jobId)).state).toBe('reconciling');
-   await root.query(`UPDATE processing_nodes SET config=jsonb_set(jsonb_set(config,'{documentApi,timeoutSeconds}','4000'),'{enabled}','false'),revision=revision+1 WHERE id=$1`,[s.nodeId]);
+   await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{documentApi,timeoutSeconds}','4000'),revision=revision+1 WHERE id=$1`,[s.nodeId]);
    await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect(postCount).toBe(1);expect(sourceReads).toBe(1);expect((await s.task(created.jobId)).state).toBe('succeeded');
   }finally{await s.close();}
@@ -273,7 +274,7 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    expect(decodeDocumentReference((await s.task(created.jobId)).external_reference)).toMatchObject({phase:'job',jobId});expect(postCount).toBe(1);
   }finally{await s.close();}
  });
- it('recovers pre-submit admission on its original disabled node without submitting twice',async()=>{
+ it('recovers pre-submit admission on its original node without submitting twice',async()=>{
   const s=await setup('async');
   const crash=vi.spyOn(ProcessingNodes.prototype,'withNode').mockImplementationOnce(async function(this:ProcessingNodes,capability,input){
    const node=await this.bind(input.requestId,capability),runtime=await this.runtime(node);
@@ -282,7 +283,6 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
   try{
    const created=await s.start();expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();expect(postCount).toBe(0);
    const before=await s.task(created.jobId);expect(before.external_reference).toMatch(/^xberg-bound:/);expect(before.external_state).toBe('none');
-   await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
    await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect(postCount).toBe(1);
    const assignments=(await root.query('SELECT request_id,settled FROM processing_node_assignments WHERE request_id LIKE $1',[created.jobId+':%'])).rows;
