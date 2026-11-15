@@ -68,6 +68,18 @@ describe('document extraction protocol; fetch is mocked, no private-network call
   const raw=sampleExtraction();(raw.results[0]!.kb as {uploaded_resources:unknown[]}).uploaded_resources=[];
   expect(()=>validateExtractionResponse(raw,[sampleContext])).toThrow('DOCUMENT_EXTRACTION_RESPONSE_INVALID');
  });
+ it('preserves repeated image receipts across pages when ownership and stored object match',()=>{
+  const raw=sampleExtraction(),receipts=(raw.results[0]!.kb as {uploaded_resources:Record<string,unknown>[]}).uploaded_resources;
+  receipts.push({...receipts[0],page_number:2,reused:true,upload_ms:0});
+  expect(validateExtractionResponse(raw,[sampleContext])).toBe(raw);
+  expect(receipts).toHaveLength(2);
+ });
+ it.each(['bucket','object_key','sha256','bytes','mime_type','etag','source_resource_id','parse_run_id'])('rejects repeated image receipts with conflicting %s',key=>{
+  const raw=sampleExtraction(),receipts=(raw.results[0]!.kb as {uploaded_resources:Record<string,unknown>[]}).uploaded_resources;
+  const changes:Record<string,unknown>={bucket:'other-bucket',object_key:'other/image.jpg',sha256:'a'.repeat(64),bytes:123,mime_type:'image/png',etag:'other-etag',source_resource_id:crypto.randomUUID(),parse_run_id:crypto.randomUUID()};
+  receipts.push({...receipts[0],[key]:changes[key]});
+  expect(()=>validateExtractionResponse(raw,[sampleContext])).toThrow('DOCUMENT_EXTRACTION_RESPONSE_INVALID');
+ });
  it('retains input indexes on partial multi-file failure and never shifts later file contexts',async()=>{
   const second={source_resource_id:'11111111-1111-4111-8111-111111111111',parse_run_id:'22222222-2222-4222-8222-222222222222'};
   const third={source_resource_id:'33333333-3333-4333-8333-333333333333',parse_run_id:'44444444-4444-4444-8444-444444444444'};
@@ -97,6 +109,28 @@ describe('document extraction protocol; fetch is mocked, no private-network call
   expect(fetch).toHaveBeenCalledTimes(1);expect(h.submitted).toHaveBeenCalledExactlyOnceWith('detached-job');
   expect((fetch.mock.calls[0]![1]!.body as FormData).get('callback_url')).toBe('http://api.test/callback/test');
  });
+ it('waits for a queued job to run and complete without resubmitting',async()=>{
+  const states=['queued','running','completed'];
+  const fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>{
+   if(init?.method==='POST')return json({job_id:'job-1'},202);
+   if(String(url).endsWith('/result'))return json({job_id:'job-1',state:'completed',result:sampleExtraction()});
+   return json({job_id:'job-1',state:states.shift()});
+  });
+  const h=hooks();await new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,h);
+  expect(fetch.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(1);
+  expect(h.submitted).toHaveBeenCalledExactlyOnceWith('job-1');
+  expect(states).toHaveLength(0);
+ });
+ it('defers an existing queued job without submitting it again',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({job_id:'existing-job',state:'queued'}));
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,{...hooks(),singleStep:true},'existing-job')).rejects.toMatchObject({phase:'external'});
+  expect(fetch).toHaveBeenCalledTimes(1);expect(fetch.mock.calls[0]![1]!.method).toBe('GET');
+ });
+ it('still rejects an unrecognized remote job state without resubmitting',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({job_id:'existing-job',state:'unexpected'}));
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,hooks(),'existing-job')).rejects.toMatchObject({code:'DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN'});
+  expect(fetch).toHaveBeenCalledTimes(1);expect(fetch.mock.calls[0]![1]!.method).toBe('GET');
+ });
  it('bounds a compensation check to one pending status GET',async()=>{
   const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({job_id:'existing-job',state:'running'}));
   await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,{...hooks(),singleStep:true},'existing-job')).rejects.toMatchObject({phase:'external'});
@@ -116,9 +150,9 @@ describe('document extraction protocol; fetch is mocked, no private-network call
   await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,{...hooks(),cancellation:async()=>'send'},'job-1')).rejects.toMatchObject({code:'DOCUMENT_EXTRACTION_CANCELLED',terminalState:'cancelled',outcome:'settled'});
   expect(methods).toEqual(['DELETE','GET','GET','POST']);
  });
- it('waits after a 202 result response without submitting another extraction',async()=>{
+ it.each(['queued','pending','running'])('waits after a 202 %s result response without submitting another extraction',async state=>{
   let results=0;const fetch=vi.fn<typeof globalThis.fetch>(async url=>{
-   if(String(url).endsWith('/result'))return ++results===1?json({job_id:'job-1',state:'running'},202):json({job_id:'job-1',state:'completed',result:sampleExtraction()});
+   if(String(url).endsWith('/result'))return ++results===1?json({job_id:'job-1',state},202):json({job_id:'job-1',state:'completed',result:sampleExtraction()});
    return json({job_id:'job-1',state:'completed',result_state:'available'});
   });
   await new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,hooks(),'job-1');

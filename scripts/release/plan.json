@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261116-node-defaults",
-  "baseRevision": "c14435e8998a0625f893717631f67570109dfd4b",
+  "id": "20261116-parser-queued",
+  "baseRevision": "e0da7c727fb6f15652e6c82d444dcd87925830fa",
   "services": [
     "api-server",
     "admin",
@@ -9,25 +9,17 @@
     "scheduler"
   ],
   "database": {
-    "migrations": [
-      "0003_retire_node_admission_toggle.sql"
-    ],
-    "verifySql": "scripts/release/changes/20261116-node-defaults/verify-db.sql",
+    "migrations": [],
+    "verifySql": null,
     "dataChange": {
-      "mode": "inline",
-      "reason": "退役节点接收新任务开关；已核对目标仅1个节点。单事务UPDATE将旧字段固定true供旧容器交接，新API不再暴露或读取；不动现有任务快照，失败事务回滚。"
+      "mode": "none",
+      "reason": "仅修复解析客户端的排队状态与重复图片回执校验，不变更数据库读写、Schema或历史数据。"
     }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [],
-    "reviewedFiles": [
-      ".env.example",
-      ".env.compose.cloud.example",
-      "compose.yaml",
-      "src/config/processing-nodes.ts"
-    ],
-    "verifyFile": "scripts/release/changes/20261116-node-defaults/verify-config.mjs"
+    "reviewedFiles": []
   },
   "dependencies": [],
   "backfill": {

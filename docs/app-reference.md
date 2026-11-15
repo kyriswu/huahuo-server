@@ -1,5 +1,9 @@
 # App 只读参照基线
 
+## 文档解析客户端协议修复（2026-11-16）
+
+本机同级 `../huahuo-ai` 不存在，标记 UNVERIFIED_APP；未复制、修改或运行 App。此次仅修复后端与外部解析服务的状态/回执校验，App 路由、请求参数、响应 Schema、鉴权和 Task 载荷均未变。Server 契约测试及真实解析响应回放分别留证，不能替代移动端实测，见[验收](acceptance/document-trial-api-20261116.md)。
+
 ## 节点默认可用与试用就绪检查（2026-11-16）
 
 只读复核api_endpoints.dart与http_auth_repository.dart，哈希仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1与d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。仅Admin删除节点开关并明确试用未就绪错误，App协议不变；未写App或运行Flutter。
