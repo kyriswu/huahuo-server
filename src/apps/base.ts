@@ -28,6 +28,9 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   // Request timeout bounds receiving the request, not the handler's total work.
   requestTimeout: config.httpRequestTimeoutMs,
   connectionTimeout: config.httpConnectionTimeoutMs,
+  // Finish API requests already reaching the retiring upstream; dependencies
+  // remain available until onClose and the existing drain deadline still applies.
+  ...(config.role === 'api-server' ? { return503OnClosing: false } : {}),
   bodyLimit: 1048576,
   ajv: { customOptions: { removeAdditional: false } }, forceCloseConnections: 'idle' }).withTypeProvider<TypeBoxTypeProvider>();
   registerMetrics(app, config, metrics);

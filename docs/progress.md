@@ -2,7 +2,7 @@
 
 ## Main 业务更新与测试发布准备（2026-11-15）
 
-将本轮42个业务改动文件移植到实际成功版本0771fd5，保留冻结迁移和排空设置；补齐关闭云控制时遗留ECI checkpoint不得创建实例的遗漏。测试机按当前选择直接部署main，保留人工Merge和Action。Typecheck/Lint/Build、767项unit/contract、275项真实隔离PG/Redis通过，1项Milvus跳过；SQL版本2→2、首次与重复应用均为空。本期尚未合并发布，详见[本期验收](acceptance/main-update.md)。
+将本轮42个业务改动文件移植到实际成功版本0771fd5，保留冻结迁移和排空设置；补齐关闭云控制时遗留ECI checkpoint不得创建实例的遗漏。测试机按当前选择直接部署main，保留人工Merge和Action。API关停期间已接入普通请求继续完成，四角色真实HTTP回归通过；Typecheck/Lint/Build、771项unit/contract、275项真实隔离PG/Redis通过，1项Milvus跳过；SQL版本2→2、首次与重复应用均为空。本期尚未合并发布，详见[本期验收](acceptance/main-update.md)。
 
 ## 脱敏异常堆栈与 Dozzle 排查（2026-11-15）
 
