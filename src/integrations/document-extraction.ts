@@ -54,11 +54,15 @@ export function validateExtractionResponse(value: unknown, contexts: readonly (F
     const ids = new Map<string, UploadedResource>();
     for (const rawReceipt of receipts) {
       const r = object(rawReceipt);
-      if (!validUuid(r.resource_id) || r.uuid !== r.resource_id || ids.has(r.resource_id) || r.source_resource_id !== context.source_resource_id || r.parse_run_id !== context.parse_run_id
+      if (!validUuid(r.resource_id) || r.uuid !== r.resource_id || r.source_resource_id !== context.source_resource_id || r.parse_run_id !== context.parse_run_id
         || typeof r.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(r.sha256) || typeof r.bytes !== 'number' || !Number.isSafeInteger(r.bytes) || r.bytes <= 0
         || typeof r.mime_type !== 'string' || !r.mime_type.startsWith('image/') || typeof r.bucket !== 'string' || !/^[a-z0-9][a-z0-9-]{2,62}$/.test(r.bucket)
         || typeof r.object_key !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,1023}$/.test(r.object_key) || r.object_key.includes('..') || r.object_key.includes('//')
         || typeof r.etag !== 'string' || !r.etag) protocol();
+      // Repeated page images can reuse one uploaded object. Require the same
+      // ownership and storage receipt, while preserving per-occurrence metadata.
+      const previous = ids.get(r.resource_id);
+      if (previous && ['uuid','bucket','object_key','sha256','bytes','mime_type','etag','source_resource_id','parse_run_id'].some(key => previous[key] !== r[key])) protocol();
       ids.set(r.resource_id, r as UploadedResource);
     }
     for (const rawImage of doc.images) {
@@ -169,8 +173,8 @@ export class DocumentExtractionClient {
           const result=validateExtractionResponse(terminal.result,contexts);
           await hooks.received?.(jobId,result);return result;
         }
-        if(!['pending','running'].includes(String(terminal.state)))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN','unknown');
-      } else if (!['pending', 'running'].includes(String(job.state))) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN', 'unknown');
+        if(!['queued','pending','running'].includes(String(terminal.state)))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN','unknown');
+      } else if (!['queued', 'pending', 'running'].includes(String(job.state))) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN', 'unknown');
       if(hooks.singleStep)throw new ParserExecutionDeferred('external');
       try { await sleep(this.config.pollMs, undefined, { signal }); }
       catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN', 'unknown', true); }
