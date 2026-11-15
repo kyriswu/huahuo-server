@@ -23,7 +23,11 @@
 
 保留DATABASE/Redis连接、密钥/证书、OSS连接与RAM凭据、应用监听/公开URL、模型服务地址/凭据/提供器及固定模型规格、Milvus库和集合绑定、tokenizer部署路径、源文件域名白名单、付费提供器总开关BILLING_MODE、云端控制与私网API调用开关、HTTP硬上限及协调租约/去重保留/排队容量。主模板为`.env.example`；完全重复的`.env.document-parser.example`已删除。模型规格固定匹配现有1024维集合，不能把换模型/维度当普通性能调参。
 
-`PROCESSING_NODES_ENABLED`仅允许本部署执行私网文档/音频API调用，默认false；它不再阻止手动云端开机。新增独立的`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`：省略或为空时，在已配置完整RAM凭据或已启用节点调用时默认允许云端控制，可显式false禁止本部署开机及空闲停机。实际云操作仍由超级管理员/业务调度授权、RAM权限及既有机器锁共同约束，不因存在凭据绕过会话或CSRF。
+环境由 `APP_ENV` 区分：`development` 为本地开发，`test` 为线上测试，`production` 为线上生产；分支名称和 Docker 的 `NODE_ENV=production` 不决定业务环境。
+
+`PROCESSING_NODES_ENABLED`仅允许本部署执行私网文档/音频API调用，默认false；它不再阻止手动云端开机。独立的`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`省略或为空时，线上测试和线上生产默认允许云端控制；本地开发沿用已配置完整RAM凭据或已启用节点调用时默认允许的规则。任何环境均可显式false禁止本部署开机及空闲停机。默认允许不提供凭据，实际云操作仍要求完整RAM凭据及其权限，并受超级管理员/业务调度授权和既有机器锁约束，不绕过会话或CSRF。
+
+测试部署使用 `APP_ENV=test`，建议显式 `PROCESSING_NODES_CLOUD_CONTROL_ENABLED=true`，四常驻角色注入已有授权的 `ALIYUN_RAM_ACCESS_KEY_ID` 和 `ALIYUN_RAM_ACCESS_KEY_SECRET`。本期发布在写库前逐角色校验；migrate只校验环境，不需要云凭据。旧ENV明确false时必须先改为true，保留私网调用开关原值，使用同一配置快照重新创建四角色，单纯restart不会更新ENV。隔离CI虽然也使用test，但显式关闭云控制且不继承真实凭据。生产执行器尚未接入，生产默认值通过本地配置解析验收，不代表已部署。见[环境与云控制验收](../acceptance/cloud-control-environments.md)。
 
 这里的网络环境是发起请求的Admin/Worker服务器，不是浏览器所在网络。浏览器从外网访问同VPC的后台时，后台仍可走内网解析；本地外网部署可以通过阿里云公网控制接口开机，但保持私网API调用关闭。控制专用部署可用[外网配置片段](../../resources/processing-nodes/external-control.env.example)，Worker仅消费maintenance；同VPC部署用[内网片段](../../resources/processing-nodes/test-control.env.example)。配置片段合入原环境，不替换已有凭据和连接。
 

@@ -81,7 +81,7 @@ try {
   // NODE_OPTIONS preloads and dotenv settings cannot reach the test subprocess.
   const testEnv = {};
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'TERM', 'CI', 'VOLTA_HOME', 'VOLTA_FEATURE_PNPM']) if (process.env[key] !== undefined) testEnv[key] = process.env[key];
-  Object.assign(testEnv, { APP_ENV: 'test', DATABASE_SSL_MODE: 'disable', PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled', SMS_PROVIDER: 'disabled', ALLOW_MOCK_PROVIDERS: 'false', LOG_LEVEL: 'silent', REDIS_CACHE_URL: `redis://127.0.0.1:${redisPort}/14`, REDIS_QUEUE_URL: `redis://127.0.0.1:${redisPort}/15` });
+  Object.assign(testEnv, { APP_ENV: 'test', PROCESSING_NODES_CLOUD_CONTROL_ENABLED: 'false', DATABASE_SSL_MODE: 'disable', PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled', SMS_PROVIDER: 'disabled', ALLOW_MOCK_PROVIDERS: 'false', LOG_LEVEL: 'silent', REDIS_CACHE_URL: `redis://127.0.0.1:${redisPort}/14`, REDIS_QUEUE_URL: `redis://127.0.0.1:${redisPort}/15` });
   for (const role of ['MIGRATOR', 'API', 'ADMIN', 'WORKER', 'SCHEDULER']) testEnv[`TEST_DATABASE_${role === 'MIGRATOR' ? 'MIGRATION' : role}_URL`] = `postgresql://huahuo_${role.toLowerCase()}:${variables[`POSTGRES_${role}_PASSWORD`]}@127.0.0.1:${pgPort}/${database}`;
   if (milvus) Object.assign(testEnv, {
     TEST_MILVUS_MODE: 'local', TEST_MILVUS_ADDRESS: `127.0.0.1:${boundPort(milvus, 19530)}`,

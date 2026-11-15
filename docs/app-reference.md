@@ -1,5 +1,9 @@
 # App 只读参照基线
 
+## README 与环境规则（2026-11-16）
+
+只读复核真实 App 的 api_endpoints.dart 与 http_auth_repository.dart；客户端仍从 HUAHUO_SERVER/HUAHUO_AGENT 获取地址，认证沿用既有路径。本期仅文档和服务端部署权限默认值，不改 App HTTP 契约。app:reference:diff 仍报告旧基线已有的认证源码/测试差异与工作树状态变化，未覆盖基线或 App；快照保存在 `.local/readme-test-cloud/app-reference.json`，未运行 Flutter。
+
 ## 服务端异常诊断（2026-11-15）
 
 只读复核api_endpoints.dart与http_auth_repository.dart，哈希与本轮开始时一致；仍使用原错误envelope/traceId，不新增客户端参数或暴露stack。未写App或运行Flutter，本轮证据见[验收](acceptance/error-diagnostics.md)。
