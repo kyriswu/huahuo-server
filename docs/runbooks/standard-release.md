@@ -1,8 +1,8 @@
 # 花火 Server 标准发布
 
-当前测试服务器固定部署 `test` 业务代码；发布流程从受保护 `main` 手动发起。合并和 CI 均不自动发布，test 候选需同 SHA push CI 成功。main/test 同步仍走 PR。正式生产尚未接入，其成功基准为未初始化/null；测试基准保留实际成功版本，不因分支调整重置数据库或已应用迁移。自动化应阻断缺配置、历史冲突及验收失败，不能保证任意业务正确。
+当前测试服务器固定部署 `test` 业务代码；AI／脚本从受保护 `main` 触发既有 workflow_dispatch。合并及 CI 本身不改变容器；AI／脚本在 test 同 SHA push CI 成功后触发发布。main/test 同步仍走 PR。正式生产尚未接入，其成功基准为未初始化/null；测试基准保留实际成功版本，不因分支调整重置数据库或已应用迁移。自动化应阻断缺配置、历史冲突及验收失败，不能保证任意业务正确。
 
-团队操作步骤见[团队发布](team-releases.md)。GitHub main/test 分支规则、两个 environment 限制和 production owner 审批已保存并回读。main owner 的 PR-only 例外仅针对新增 update 限制，原 PR、strict CI、禁止删除/强推规则继续生效；没有用真实协作者账号做反向实测。首轮手动发布已真实完成，本次恢复 test 来源、配置断言及宿主修复仍待合并、安装和发布验收，具体状态见[手动发布验收](../acceptance/manual-release.md)。已有 production environment 配置不代表正式生产已接入。
+团队操作步骤见[团队发布](team-releases.md)。GitHub main/test 分支规则、两个 environment 限制和 production owner 审批已保存并回读。main owner 的 PR-only 例外仅针对新增 update 限制，原 PR、strict CI、禁止删除/强推规则继续生效；没有用真实协作者账号做反向实测。首轮手动发布已真实完成，PR #6/#7 已合并并通过 CI，宿主修复已安装核验，本次 test 更新已完成五阶段发布验收，具体状态见[手动发布验收](../acceptance/manual-release.md)。已有 production environment 配置不代表正式生产已接入。
 
 ## 准备阶段需要判断什么
 
@@ -20,7 +20,7 @@
 
 这张表用于发现遗漏，不要求每次建立所有检查。无影响的项目可以说明“无变化”；有疑问先调查，必要时与用户讨论，不把判断强行压成无依据的通过项。
 
-测试 Action 从受保护 main 手动发起；调用器、依赖和 Compose 固定为该 main 控制 SHA；业务、发布清单和镜像固定为已通过同 SHA push CI 的 test 头。调用前再次核对两头未移动，宿主锁内及迁移前再次检查，变化则拒绝。原 environment、云身份及固定测试实例不变。
+测试 Action 由 AI／脚本从受保护 main 触发，无需逐次人工确认；调用器、依赖和 Compose 固定为该 main 控制 SHA；业务、发布清单和镜像固定为已通过同 SHA push CI 的 test 头。调用前再次核对两头未移动，宿主锁内及迁移前再次检查，变化则拒绝。原 environment、云身份及固定测试实例不变。
 
 ## 数据变化的选择
 
@@ -133,6 +133,6 @@ pnpm release:check
 
 ## 当前边界
 
-首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态为 `OK_WITH_FORCED_DRAIN`，包含到期强退。本次改为 main 直接部署的候选及宿主修复尚未上线，不能用首轮成功代替验收。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早的标准化及排空预算结果见[标准发布验收](../acceptance/standard-release.md)。test 分支保留，正式生产服务器、专用云角色及发布入口尚未接入。
+首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态为 `OK_WITH_FORCED_DRAIN`，包含到期强退。main 直接部署尝试在预检失败，未切换服务；现已恢复 test 业务/main 控制来源，本次已完成独立发布验收。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早的标准化及排空预算结果见[标准发布验收](../acceptance/standard-release.md)。test 分支保留，正式生产服务器、专用云角色及发布入口尚未接入。
 
 认证账号凭据仍需提前准备；不生成虚假 JWT、不跳过认证而标记通过。新增基础设施的创建/扩容、未列入已审清单的回填或独立作业、破坏性变更与多机调度不自动被这次发布授权覆盖。现有 skill 会根据请求和已有授权提出并落实具体方案，而不是一律拒绝或一律自动执行。
