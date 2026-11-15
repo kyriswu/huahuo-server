@@ -1,5 +1,9 @@
 # 当前开发进度
 
+## GitHub 真实合并演练与测试机发布准备（2026-11-15）
+
+全部工作区改动经 PR #1 合入 main `58da15340d60709065a9522e3b3a1887f08e22f7`，PR 和 main push 的 Server CI 均真实通过，分支保护已启用。新增测试机 workflow 和固定云助手调用器处于下一分支，48 项本地替身测试及全量 561 项 unit/contract、Lint/Typecheck 通过。云助手只读诊断定位旧镜像基线哈希不匹配导致四角色 unhealthy；未更新服务或数据库。用户随后确认云端授权，专用 OIDC 发布身份和固定命令已创建，宿主安装及真实 workflow 部署继续验证，见[接口及状态](runbooks/test-server-release.md)。
+
 ## 默认发布冒烟与 Actions 接口（2026-11-15）
 
 新增固定六次 GET 冒烟、AI 编写约束、可复用生产调用接口和 PR/main/手动触发的 Server CI。完整 513 项 unit/contract、247 项真实隔离 PG/Redis（1 项 Milvus 跳过）、类型/Lint/构建通过。用户确认先留凭据接口，并授权全部工作区改动参与下一步真实 GitHub 演练；本机结果不代表线上部署。见[验收](acceptance/release-smoke.md)。
