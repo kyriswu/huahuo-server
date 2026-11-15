@@ -7,6 +7,14 @@ description: 为花火 Server 准备、审查、演练或执行发布，评估�
 
 先读仓库 `AGENTS.md`、`docs/runbooks/standard-release.md`；涉及分支、团队权限或发布按钮时再读 `docs/runbooks/team-releases.md`。仓库内的规范与执行器是同一套流程，不复制另一个发布框架。Skill 指导准备与判断，实际强制权限依靠 GitHub 分支规则、环境限制和云身份，不能把文档约定说成已生效的权限。
 
+## 分支与环境的含义
+
+- `main` 是 Git 分支：当前提供受保护的发布 workflow、调用器、依赖及 Compose 等部署控制文件。下文“从 main 启动 Action”表示执行 main 中的流程，不表示测试业务代码来自 main。
+- `test` 是 Git 分支：提供测试服务器实际运行的业务代码和本期发布清单，镜像按选定的 test 提交构建。
+- 测试／生产环境是部署目标及各自配置，不是分支名称；正式生产尚未接入，不能从 main 的存在推定生产已部署。
+
+操作示例：GitHub Action 选择 **main** → 运行 main 的 workflow → 校验 **test** 的提交与 CI → 将该 test 版本部署到测试服务器。业务 SHA 与流程控制 SHA 分别记录。
+
 ## 先判断，再形成候选
 
 1. 核对当前工作区、目标环境和它**实际成功部署的 SHA**。使用已授权的只读记录；不知道目标或记录过期就说明缺项，不能拿 `origin/main` 冒充线上版本。保护未提交工作，不操作同级 App。

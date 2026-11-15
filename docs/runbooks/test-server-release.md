@@ -1,5 +1,13 @@
 # 测试服务器人工触发发布接口
 
+## 分支与环境的含义
+
+- `main` 是 Git 分支：当前提供受保护的发布 workflow、调用器、依赖及 Compose 等部署控制文件。下文“从 main 启动 Action”表示执行 main 中的流程，不表示测试业务代码来自 main。
+- `test` 是 Git 分支：提供测试服务器实际运行的业务代码和本期发布清单，镜像按选定的 test 提交构建。
+- 测试／生产环境是部署目标及各自配置，不是分支名称；正式生产尚未接入，不能从 main 的存在推定生产已部署。
+
+操作示例：GitHub Action 选择 **main** → 运行 main 的 workflow → 校验 **test** 的提交与 CI → 将该 test 版本部署到测试服务器。业务 SHA 与流程控制 SHA 分别记录。
+
 首次真实发布已在 [PR #2 的 Action](https://github.com/kyriswu/huahuo-server/actions/runs/43700035519/attempts/2) 通过，历史成功提交为 `1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da`。后续首轮 [手动 Action 43713175343](https://github.com/kyriswu/huahuo-server/actions/runs/43713175343) 使用当时同为 `0771fd501fc3d4b7d257979032ed753492625b8b` 的 main 控制版本和 test 业务版本，真实完成五阶段 5/5，终态 `OK_WITH_FORCED_DRAIN` 明确记录发生过到期强退。曾尝试直接部署 main，但在预检失败，未换容器；现已恢复 test 业务来源，宿主修复已安装核验，业务发布验收进行中。分项证据见[手动发布验收](../acceptance/manual-release.md)，更早结果见[标准发布验收](../acceptance/standard-release.md)，团队步骤见[团队发布](team-releases.md)。
 
 本流程用于已确认的北京 ECS 测试机，不等同于生产完整发布验收。`Server CI` 已在 [PR #1](https://github.com/kyriswu/huahuo-server/pull/1) 与合并后的 main 上真实通过。本轮分支规则及 environment 配置已保存并回读；owner 的 PR-only 例外仅适用于新增 main update 限制，原 PR、strict CI 及禁止删除/强推规则继续生效。尚无实际协作者账号的反向操作实测，生产目标和云角色也尚未接入。

@@ -1,5 +1,13 @@
 # 团队发布
 
+## 分支与环境的含义
+
+- `main` 是 Git 分支：当前提供受保护的发布 workflow、调用器、依赖及 Compose 等部署控制文件。下文“从 main 启动 Action”表示执行 main 中的流程，不表示测试业务代码来自 main。
+- `test` 是 Git 分支：提供测试服务器实际运行的业务代码和本期发布清单，镜像按选定的 test 提交构建。
+- 测试／生产环境是部署目标及各自配置，不是分支名称；正式生产尚未接入，不能从 main 的存在推定生产已部署。
+
+操作示例：GitHub Action 选择 **main** → 运行 main 的 workflow → 校验 **test** 的提交与 CI → 将该 test 版本部署到测试服务器。业务 SHA 与流程控制 SHA 分别记录。
+
 `main` 是受保护的发布流程来源，`test` 是测试服务器的业务代码来源。团队通过 PR 合入 test，等待 test 的同 SHA push CI，通过 main 中的手动 Action 发布该 test SHA。main/test 同步通过 PR 完成，不强推受保护分支；本地开发使用 test。
 
 ## 权限与当前状态
