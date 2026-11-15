@@ -7,18 +7,20 @@ export interface TaskPublisher {publish(delivery:Delivery):Promise<void>;}
 export class TaskScheduler {
  constructor(readonly pool:pg.Pool,readonly publisher:TaskPublisher,readonly owner:string=randomUUID(),readonly redeliveryMs=30000){}
  async recover(){return transaction(this.pool,async tx=>{
-  const r=await tx.query<TaskRow>("SELECT * FROM tasks WHERE (state IN ('running','cancel_requested') AND (lease_until<now() OR lease_until IS NULL)) OR (state='waiting_external' AND updated_at<now()-interval '30 seconds') ORDER BY updated_at LIMIT 50 FOR UPDATE SKIP LOCKED");
+  const r=await tx.query<TaskRow>("SELECT * FROM tasks WHERE state IN ('running','cancel_requested') AND (lease_until<now() OR lease_until IS NULL) ORDER BY updated_at LIMIT 50 FOR UPDATE SKIP LOCKED");
   for(const t of r.rows){
-   const state=t.external_state!=='none'?'reconciling':t.state==='cancel_requested'?'cancelled':t.attempt_no>=t.max_attempts?'failed':'queued';
+   const managed=(t as TaskRow&{external_reference:string}).external_reference?.match(/^(xberg-(bound|job|cancelling):|node-start:)/);
+   const state=managed?'reconciling':t.external_state!=='none'?'reconciling':t.state==='cancel_requested'?'cancelled':t.attempt_no-t.resume_count>=t.max_attempts?'failed':'queued';
    await tx.query("UPDATE tasks SET state=$2,version=version+1,lease_owner=NULL,lease_until=NULL,available_at=now(),error_code=$3,retryable=$4 WHERE id=$1",[t.id,state,state==='failed'?'ATTEMPTS_EXHAUSTED':null,state==='failed']);
    await tx.query("UPDATE task_attempts SET state='abandoned',finished_at=now() WHERE task_id=$1 AND attempt_no=$2 AND state='running'",[t.id,t.attempt_no]);
-   if(state==='queued')await enqueueIntent(tx,t.id);await event(tx,t.id);
+   if(state==='queued'||managed)await enqueueIntent(tx,t.id);await event(tx,t.id);
   }
   // Redis is a delivery mechanism; periodic PG repair also covers acknowledged-but-lost jobs.
   const pending=await tx.query<{id:string}>(`SELECT t.id FROM tasks t WHERE t.available_at<=now() AND (
    (t.state IN ('queued','retry_scheduled') AND t.external_state='none') OR
-   (t.state='reconciling' AND t.kind IN ('rag.document-ingest','text.ingest') AND t.external_state='submitted'
-    AND (t.external_reference LIKE 'xberg-job:%' OR t.external_reference LIKE 'xberg-cancelling:%') AND t.attempt_no<t.max_attempts))
+   (t.state IN ('waiting_external','reconciling') AND (
+    (t.kind IN ('rag.document-ingest','text.ingest') AND (t.external_reference LIKE 'xberg-bound:%' OR t.external_reference LIKE 'xberg-job:%' OR t.external_reference LIKE 'xberg-cancelling:%')) OR
+    (t.kind='processing.node-start' AND t.external_reference LIKE 'node-start:%'))))
    AND NOT EXISTS(SELECT 1 FROM task_outbox o WHERE o.task_id=t.id AND (o.status IN ('pending','delivering') OR o.sent_at>now()-$1*interval '1 millisecond'))
    ORDER BY t.created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,[this.redeliveryMs]);
   for(const t of pending.rows)await enqueueIntent(tx,t.id);

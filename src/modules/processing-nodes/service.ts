@@ -5,10 +5,12 @@ import type {AppConfig} from '../../config/config.js';
 import {createDocumentParserMachine,type ParserContext,type ParserRequest} from '../../lib/document-parser-machine/index.js';
 import {DomainError,lock,transaction} from '../identity/store.js';
 import {nodeConfig,nodeFromRow,type Capability,type ProcessingNode} from './model.js';
+import {defaultDocumentApi} from '../../config/document-extraction.js';
 import {assertSuperadmin,type AdminScope} from '../admin/service.js';
 type Runtime=ReturnType<typeof createDocumentParserMachine>;
 type Factory=(config:ReturnType<typeof nodeConfig>)=>Runtime;
 const routing=(node:ProcessingNode)=>canonical({...node,name:'',enabled:false,revision:0,capabilities:[...node.capabilities].sort(),eciFallback:node.eciFallback??null});
+const lifecycleRouting=(node:ProcessingNode)=>routing({...node,documentApi:defaultDocumentApi()});
 export class ProcessingNodes {
  private runtimes=new Map<string,{key:string;runtime:Runtime;connected:Promise<void>}>();
  private timer?:NodeJS.Timeout;private refresh?:Promise<void>;private closed=false;
@@ -21,7 +23,7 @@ export class ProcessingNodes {
   if(!entry){const runtime=this.factory(cfg);entry={key,runtime,connected:runtime.connect()};this.runtimes.set(node.id,entry);}
   try{await entry.connected;return entry.runtime;}catch(error){if(this.runtimes.get(node.id)===entry)this.runtimes.delete(node.id);await entry.runtime.close().catch(()=>undefined);throw error;}
  }
- async bind(requestId:string,capability:Capability,recoverAdmission=false):Promise<ProcessingNode>{
+ async bind(requestId:string,capability:Capability,recoverAdmission=false,retryFrom?:string,nodeId?:string):Promise<ProcessingNode>{
   if(!this.config.processingNodes.enabled)throw new DomainError(503,'PROCESSING_NODES_DISABLED');
   if(!requestId||requestId.length>256||!['document','audio'].includes(capability))throw new DomainError(400,'PROCESSING_ASSIGNMENT_INVALID');
   return transaction(this.pool,async tx=>{
@@ -37,12 +39,26 @@ export class ProcessingNodes {
     }
     return old.snapshot as ProcessingNode;
    }
+   let node:ProcessingNode;
+   if(retryFrom){
+    const previous=(await tx.query('SELECT * FROM processing_node_assignments WHERE request_id=$1',[retryFrom])).rows[0];
+    if(!previous?.settled||previous.capability!==capability)throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
+    const current=(await tx.query('SELECT * FROM processing_nodes WHERE id=$1',[previous.node_id])).rows[0];
+    if(!current||lifecycleRouting(nodeFromRow(current))!==lifecycleRouting(previous.snapshot))throw new DomainError(409,'PROCESSING_NODE_CONFIGURATION_CHANGED');
+    node=previous.snapshot as ProcessingNode;
+   }else if(nodeId){
+    const row=(await tx.query('SELECT * FROM processing_nodes WHERE id=$1',[nodeId])).rows[0];
+    if(!row)throw new DomainError(404,'PROCESSING_NODE_NOT_FOUND');node=nodeFromRow(row);
+    if(!node.capabilities.includes(capability))throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
+   }else{
    const row=(await tx.query(`SELECT n.* FROM processing_nodes n
     WHERE n.config @> jsonb_build_object('enabled',true,'capabilities',jsonb_build_array($1::text))
     ORDER BY (SELECT count(*)::float/(n.config->>'concurrency')::integer FROM processing_node_assignments a WHERE a.node_id=n.id AND NOT a.settled),n.created_at,n.id
     LIMIT 1`,[capability])).rows[0];
    if(!row)throw new DomainError(503,'PROCESSING_NODE_UNAVAILABLE');
-   const node=nodeFromRow(row);nodeConfig(node,this.config.processingNodes);
+   node=nodeFromRow(row);
+   }
+   nodeConfig(node,this.config.processingNodes);
    await tx.query('INSERT INTO processing_node_assignments(request_id,node_id,capability,snapshot) VALUES($1,$2,$3,$4)',[requestId,node.id,capability,JSON.stringify(node)]);
    return node;
   });
@@ -52,19 +68,21 @@ export class ProcessingNodes {
   if(!row)throw new DomainError(409,'PROCESSING_ASSIGNMENT_MISSING');if(row.settled)throw new DomainError(409,'PROCESSING_ASSIGNMENT_SETTLED');return row.snapshot as ProcessingNode;
  }
  async settle(requestId:string){await this.pool.query('UPDATE processing_node_assignments SET settled=true,settled_at=coalesce(settled_at,now()) WHERE request_id=$1',[requestId]);}
- async withNode<T>(capability:Capability,input:ParserRequest,execute:(context:ParserContext)=>Promise<T>):Promise<T>{
+ async withNode<T>(capability:Capability,input:ParserRequest&{retryFrom?:string;nodeId?:string},execute:(context:ParserContext,node:ProcessingNode)=>Promise<T>):Promise<T>{
   if(!this.config.processingNodes.enabled)throw new DomainError(503,'PROCESSING_NODES_DISABLED');
-  const node=input.resume?await this.assigned(input.requestId):await this.bind(input.requestId,capability,input.recoverAdmission);
+  const node=input.resume?await this.assigned(input.requestId):await this.bind(input.requestId,capability,input.recoverAdmission,input.retryFrom,input.nodeId);
   if(!node.capabilities.includes(capability))throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
   const runtime=await this.runtime(node);
   try{
    // Lost Redis must not erase durable remote occupancy or turn an uncertain old run into a new POST.
    const count=Number((await this.pool.query('SELECT count(*) AS n FROM processing_node_assignments WHERE node_id=$1 AND NOT settled AND started AND request_id<>$2',[node.id,input.requestId])).rows[0].n);
    const state=await runtime.machine.state.status();
-   if(count>(state?.active??0))throw new DomainError(503,'PROCESSING_NODE_COORDINATION_UNCERTAIN');
+   const own=(await this.pool.query('SELECT started FROM processing_node_assignments WHERE request_id=$1',[input.requestId])).rows[0];
+   if(!state&&own?.started)throw new DomainError(503,'PROCESSING_NODE_COORDINATION_UNCERTAIN');
+   if(count>(state?.active??0)+(state?.queued??0))throw new DomainError(503,'PROCESSING_NODE_COORDINATION_UNCERTAIN');
+   await this.pool.query('UPDATE processing_node_assignments SET started=true WHERE request_id=$1',[input.requestId]);
    return await runtime.machine.withDocumentParser(input,async context=>{
-    await this.pool.query('UPDATE processing_node_assignments SET started=true WHERE request_id=$1',[input.requestId]);
-    return execute(context);
+    return execute(context,node);
    });
   }
   finally{
@@ -83,7 +101,8 @@ export class ProcessingNodes {
  async startMonitors(onError:(error:unknown)=>void=()=>undefined){
   if(!this.config.processingNodes.enabled)return;
   const update=async()=>{
-   try{for(const node of await this.list()){
+   try{
+    for(const node of await this.list()){
     try{const runtime=await this.runtime(node);await runtime.startIdleMonitor({onError});}catch(error){onError(error);}
    }}catch(error){onError(error);}
    finally{if(!this.closed){this.timer=setTimeout(()=>{this.refresh=update();},30000);this.timer.unref();}}
@@ -94,7 +113,8 @@ export class ProcessingNodes {
   return transaction(this.pool,async tx=>{
    await assertSuperadmin(tx,scope);
    const validated=nodeConfig(input,this.config.processingNodes);
-   input={...input,name:input.name.trim(),baseUrl:validated.baseUrl,eciFallback:input.eciFallback??null};
+   input={...input,name:input.name.trim(),baseUrl:validated.baseUrl,eciFallback:input.eciFallback??null,
+    ...(input.capabilities.includes('document')?{documentApi:input.documentApi??defaultDocumentApi()}:{})};
    await lock(tx,'processing-nodes');
    const oldRow=(await tx.query('SELECT * FROM processing_nodes WHERE id=$1 FOR UPDATE',[input.id])).rows[0];
    const old=oldRow?nodeFromRow(oldRow):undefined;

@@ -10,19 +10,24 @@ import {hashPassword} from '../../src/modules/identity/crypto.js';
 import {ProcessingNodes} from '../../src/modules/processing-nodes/service.js';
 import type {ProcessingNode} from '../../src/modules/processing-nodes/model.js';
 import {RuntimeSettings,currentRuntimeConfig} from '../../src/modules/runtime-settings/service.js';
-import {ParserExecutionError} from '../../src/lib/document-parser-machine/index.js';
+import {RUNTIME_CONFIGURATION_SCHEMA_KEY,RUNTIME_CONFIGURATION_SCHEMA_VERSION} from '../../src/modules/runtime-settings/registry.js';
+import {ParserExecutionError,DocumentParserMachine,ParserMachineRedis} from '../../src/lib/document-parser-machine/index.js';
+import {ProcessingNodeJobs} from '../../src/modules/processing-nodes/jobs.js';
+import {TaskEngine} from '../../src/modules/tasks/engine.js';
+import type {EcsInstance,EcsPowerPort} from '../../src/integrations/ecs-power.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
 import {BillingService} from '../../src/modules/billing/service.js';
 import {transaction} from '../../src/modules/identity/store.js';
 import {AdminDocumentTrials} from '../../src/modules/admin/document-trials.js';
 import {AdminService} from '../../src/modules/admin/service.js';
-import {extractionConfig} from '../support/extraction-config.js';
 import {sampleExtraction} from '../support/document-extraction.js';
 import type {FileContext} from '../../src/integrations/document-extraction.js';
+import {DocumentCallbacks} from '../../src/modules/ingestion/document-callbacks.js';
+import {defaultDocumentApi} from '../../src/config/document-extraction.js';
 
 const database=process.env.TEST_DATABASE_MIGRATION_URL,redisUrl=process.env.REDIS_QUEUE_URL;
 if(!database||!/^huahuo_test_/.test(new URL(database).pathname.slice(1))||!redisUrl||new URL(redisUrl).hostname!=='127.0.0.1'||Number(new URL(redisUrl).pathname.slice(1))<10)throw Error('ISOLATED_DEPENDENCIES_REQUIRED');
-const env={...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_PUBLIC_BASE_URL:'http://runtime-api.test',ADMIN_PUBLIC_BASE_URL:'http://runtime-admin.test',APP_TOKEN_SECRET:'a'.repeat(48),ADMIN_SESSION_SECRET:'b'.repeat(48),REDIS_CACHE_URL:process.env.REDIS_CACHE_URL,REDIS_QUEUE_URL:redisUrl,REDIS_KEY_PREFIX:'runtime_'+randomUUID().replaceAll('-',''),PROCESSING_NODES_ENABLED:'true'};
+const env={...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_PUBLIC_BASE_URL:'http://runtime-api.test',API_SERVICE_BASE_URL:'http://runtime-api.internal.test',ADMIN_PUBLIC_BASE_URL:'http://runtime-admin.test',APP_TOKEN_SECRET:'a'.repeat(48),ADMIN_SESSION_SECRET:'b'.repeat(48),REDIS_CACHE_URL:process.env.REDIS_CACHE_URL,REDIS_QUEUE_URL:redisUrl,REDIS_KEY_PREFIX:'runtime_'+randomUUID().replaceAll('-',''),PROCESSING_NODES_ENABLED:'true'};
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:database}));
 const adminConfig=loadConfig('admin',{...env,DATABASE_URL:process.env.TEST_DATABASE_ADMIN_URL});
 const workerConfig=loadConfig('worker',{...env,DATABASE_URL:process.env.TEST_DATABASE_WORKER_URL});
@@ -79,8 +84,11 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   expect(both.map(r=>r.statusCode).sort()).toEqual([200,409]);
   const audits=(await root.query("SELECT reason FROM admin_audit_events WHERE action='configuration.update' AND trace_id=$1",[both.find(r=>r.statusCode===200)!.json().traceId])).rows;
   expect(audits).toHaveLength(1);expect(JSON.parse(audits[0].reason)).toMatchObject({category:'tasks',before:{'tasks.maxAttempts':3}});
-  const view=await get();expect(view.definitions.map((d:{category:string})=>d.category)).toEqual(expect.arrayContaining(['tasks','document','rag','storage','billing','features']));
+  const view=await get();expect(view.definitions.map((d:{category:string})=>d.category)).toEqual(expect.arrayContaining(['tasks','rag','storage','billing','features']));
   expect(JSON.stringify(view)).not.toContain('password_hash');
+  // An ordinary edit must not add metadata unknown to pre-compatibility binaries
+  // or persist this Admin version's complete set of defaults.
+  expect((await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values).toEqual({'tasks.maxAttempts':view.values['tasks.maxAttempts']});
  });
  it('keeps a consistent per-request snapshot across concurrent edits and refreshes subsequent work',async()=>{
   await save('tasks',{'tasks.maxAttempts':4});const settings=new RuntimeSettings(workerPool,workerConfig);
@@ -89,6 +97,62 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   await start;await save('tasks',{'tasks.maxAttempts':6});
   const second=await settings.run(async()=>{expect(workerConfig.taskPolicy.maxAttempts).toBe(6);return workerConfig.runtimeRevision;});
   release();expect(await first).toBeLessThan(second);expect(currentRuntimeConfig()).toBeUndefined();expect(workerConfig.taskPolicy.maxAttempts).toBe(3);
+ });
+ it('reads future optional fields safely and preserves them through a strict older Admin edit',async()=>{
+  const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
+  const stored={[RUNTIME_CONFIGURATION_SCHEMA_KEY]:RUNTIME_CONFIGURATION_SCHEMA_VERSION,'tasks.futureOptional':{enabled:false,weights:[1,2]},'tasks.maxAttempts':4};
+  const settings=new RuntimeSettings(workerPool,workerConfig);
+  try{
+   await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(stored)]);
+   const state=await get();expect(state.values['tasks.maxAttempts']).toBe(4);
+   expect(Object.hasOwn(state.values,'tasks.futureOptional')).toBe(false);expect(state.values).not.toHaveProperty(RUNTIME_CONFIGURATION_SCHEMA_KEY);
+   expect((await app.inject('/health/ready')).statusCode).toBe(200);
+   await settings.run(async()=>{expect(workerConfig.taskPolicy.maxAttempts).toBe(4);});
+   const result=await save('tasks',{'tasks.maxAttempts':6},state.revision);expect(result.statusCode,result.body).toBe(200);
+   expect(Object.hasOwn(result.json().data.values,'tasks.futureOptional')).toBe(false);
+   expect(result.json().data.values).not.toHaveProperty(RUNTIME_CONFIGURATION_SCHEMA_KEY);
+   const persisted=(await root.query('SELECT revision,"values" FROM runtime_configuration WHERE singleton=true')).rows[0];
+   expect(persisted.values).toEqual({...stored,'tasks.maxAttempts':6});
+   for(const patch of [{'tasks.futureOptional':{enabled:true}},{[RUNTIME_CONFIGURATION_SCHEMA_KEY]:2}]){
+    expect((await save('tasks',patch,Number(persisted.revision))).statusCode).toBe(400);
+   }
+   expect((await save('tasks',{'tasks.maxAttempts':5},state.revision)).statusCode).toBe(409);
+   const unchanged=(await root.query('SELECT revision,"values" FROM runtime_configuration WHERE singleton=true')).rows[0];
+   expect(unchanged).toEqual(persisted);
+   await settings.run(async()=>{expect(workerConfig.taskPolicy.maxAttempts).toBe(6);});
+  }finally{await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(original)]);}
+ });
+ it('refuses an incompatible configuration contract without executing work or overwriting it',async()=>{
+  const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
+  const stored={...original,[RUNTIME_CONFIGURATION_SCHEMA_KEY]:RUNTIME_CONFIGURATION_SCHEMA_VERSION+1};
+  const settings=new RuntimeSettings(workerPool,workerConfig),execute=vi.fn(async()=>undefined);
+  try{
+   const state=(await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true RETURNING revision',[JSON.stringify(stored)])).rows[0];
+   await expect(settings.load()).rejects.toMatchObject({code:'CONFIGURATION_VERSION_UNSUPPORTED',statusCode:503});
+   await expect(settings.run(execute)).rejects.toMatchObject({code:'CONFIGURATION_VERSION_UNSUPPORTED'});expect(execute).not.toHaveBeenCalled();
+   expect((await app.inject('/health/ready')).statusCode).toBe(503);expect((await app.inject('/health/live')).statusCode).toBe(200);
+   const view=await app.inject({url:'/admin/api/v1/configuration',headers:{cookie:superCookie}});expect(view.statusCode,view.body).toBe(503);
+   const rejected=await save('tasks',{'tasks.maxAttempts':5},Number(state.revision));expect(rejected.statusCode,rejected.body).toBe(503);
+   expect(rejected.json().error.code).toBe('CONFIGURATION_VERSION_UNSUPPORTED');
+   const unchanged=(await root.query('SELECT revision,"values" FROM runtime_configuration WHERE singleton=true')).rows[0];
+   expect(unchanged).toEqual({revision:state.revision,values:stored});
+   expect((await root.query("SELECT count(*)::int AS n FROM admin_audit_events WHERE action='configuration.update' AND trace_id=$1",[rejected.json().traceId])).rows[0].n).toBe(0);
+  }finally{await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(original)]);}
+  expect((await app.inject('/health/ready')).statusCode).toBe(200);
+ });
+ it('fails readiness for invalid known values and forbidden secrets even alongside compatible future fields',async()=>{
+  const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
+  const settings=new RuntimeSettings(workerPool,workerConfig),execute=vi.fn(async()=>undefined);
+  try{
+   for(const [patch,code] of [[{'tasks.maxAttempts':99},'CONFIGURATION_INVALID'],[{'tasks.futureOptional':{apiKey:'must-not-persist'}},'CONFIGURATION_SECRET_FORBIDDEN']] as const){
+    await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify({...original,'tasks.futureOptional':false,...patch})]);
+    await expect(settings.run(execute)).rejects.toMatchObject({code});
+    const response=await app.inject('/health/ready');expect(response.statusCode,response.body).toBe(503);expect(response.body).not.toContain('must-not-persist');
+    expect((await app.inject('/health/live')).statusCode).toBe(200);
+   }
+   expect(execute).not.toHaveBeenCalled();
+  }finally{await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(original)]);}
+  expect((await app.inject('/health/ready')).statusCode).toBe(200);
  });
  it('applies the database upload limit through existing App routes',async()=>{
   await save('storage',{'storage.maxUploadBytes':1000});
@@ -112,8 +176,10 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   expect(workerConfig.milvus.rrfK).toBe(60);
  });
  it('assigns by occupied capacity, preserves node affinity and shares document/audio occupancy',async()=>{
-  const a=baseNode(),b=baseNode();expect((await nodeSave(a)).statusCode).toBe(200);expect((await nodeSave(b)).statusCode).toBe(200);
+  const a=baseNode(),b=baseNode({documentApi:{...defaultDocumentApi(),mode:'async',timeoutSeconds:4000}});expect((await nodeSave(a)).statusCode).toBe(200);expect((await nodeSave(b)).statusCode).toBe(200);
   const first=await nodes.bind('first-'+a.id,'document'),second=await nodes.bind('second-'+a.id,'audio');expect(first.id).not.toBe(second.id);
+  expect(first.documentApi).toMatchObject({mode:'async',parameters:null,timeoutSeconds:3120});
+  expect(second.documentApi).toMatchObject({mode:'async',parameters:null,timeoutSeconds:4000});
   expect((await nodes.bind('first-'+a.id,'document')).id).toBe(first.id);
   await expect(nodes.bind('first-'+a.id,'audio')).rejects.toMatchObject({code:'PROCESSING_ASSIGNMENT_CONFLICT'});
   const disabled={...Object.fromEntries(Object.entries(first).reverse()),enabled:false} as ProcessingNode;expect((await nodeSave(disabled,1)).statusCode).toBe(200);
@@ -185,8 +251,50 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
 });
 
 
+describe('manual startup: durable tasks, event notifications and mock cloud only',()=>{
+ it('authenticates and deduplicates startup, yields boot checks and pushes readiness without status polling',async()=>{
+  const node=baseNode({name:'Manual CPU node',mode:'ecs',capabilities:['document'],enabled:false,regionId:'cn-beijing',instanceId:'i-manual'+randomUUID().replaceAll('-','').slice(0,16),privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health'});
+  expect((await nodeSave(node)).statusCode).toBe(200);
+  const path=`/admin/api/v1/processing-nodes/${node.id}/start`;
+  expect((await app.inject({method:'POST',url:path})).statusCode).toBe(401);
+  expect((await app.inject({method:'POST',url:path,headers:{cookie:superCookie,origin:env.ADMIN_PUBLIC_BASE_URL}})).statusCode).toBe(403);
+  expect((await app.inject({method:'POST',url:path,headers:{cookie:operatorCookie,origin:env.ADMIN_PUBLIC_BASE_URL,'x-csrf-token':operatorCsrf}})).statusCode).toBe(403);
+  const first=await app.inject({method:'POST',url:path,headers:headers()}),second=await app.inject({method:'POST',url:path,headers:headers()});
+  expect(first.statusCode,first.body).toBe(202);expect(second.json().data.taskId).toBe(first.json().data.taskId);
+  const taskId=first.json().data.taskId as string;
+  const instance:EcsInstance={instanceId:node.instanceId!,regionId:node.regionId!,instanceType:'ecs.c8y.16xlarge',status:'Stopped',stoppedMode:'StopCharging',chargeType:'PostPaid',networkType:'vpc',vpcId:'vpc-test',privateIps:[node.privateIp!],localStorageAmount:0,localStorageCapacity:0,operationLocked:false};
+  const cloud:EcsPowerPort={describe:vi.fn(async()=>({...instance})),start:vi.fn(async()=>{instance.status='Starting';}),stopEconomically:vi.fn(async()=>undefined)};
+  const controlled=new ProcessingNodes(workerPool,workerConfig,cfg=>({machine:new DocumentParserMachine(new ParserMachineRedis(redis,cfg,env.REDIS_KEY_PREFIX),cloud,cfg,async()=>true),connect:async()=>undefined,close:async()=>undefined,startIdleMonitor:async()=>undefined}));
+  const jobs=new ProcessingNodeJobs(workerPool,workerConfig,controlled),engine=new TaskEngine(workerPool,15000,undefined,undefined,undefined,undefined,undefined,undefined,jobs);
+  const live=await buildAdminServer({config:adminConfig,dependencies:{pool:adminPool,check:async()=>({postgres:true,schema:true,redisCache:true,redisQueue:true}),close:async()=>undefined}});
+  const streamAbort=new AbortController();
+  try{
+   await live.listen({host:'127.0.0.1',port:0});const address=live.server.address();if(!address||typeof address==='string')throw Error('TEST_ADDRESS');
+   const stream=await fetch(`http://127.0.0.1:${address.port}/admin/api/v1/processing-nodes/${node.id}/start-events`,{headers:{cookie:superCookie},signal:AbortSignal.any([streamAbort.signal,AbortSignal.timeout(4000)])});
+   expect(stream.status).toBe(200);expect(stream.headers.get('content-type')).toContain('text/event-stream');
+   const messages=stream.text();
+   const run=async()=>{await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[taskId]);const attempt=await engine.claim(taskId,randomUUID());expect(attempt).not.toBeNull();return engine.execute(attempt!);};
+   expect(await run()).toBe(false);expect(cloud.start).toHaveBeenCalledTimes(1);
+   expect((await root.query('SELECT state,lease_owner,external_state FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'waiting_external',lease_owner:null,external_state:'none'});
+   expect(await run()).toBe(false);expect(cloud.start).toHaveBeenCalledTimes(1);
+   instance.status='Running';expect(await run()).toBe(true);
+   const body=await messages;expect(body).toContain('"state":"starting"');expect(body).toContain('"state":"ready"');
+   expect((await root.query('SELECT state,attempt_no,resume_count FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'succeeded',attempt_no:3,resume_count:2});
+   expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',['manual:'+taskId])).rows[0].settled).toBe(true);
+   expect((await root.query("SELECT config->'enabled' AS enabled FROM processing_nodes WHERE id=$1",[node.id])).rows[0].enabled).toBe(false);
+   expect(cloud.start).toHaveBeenCalledTimes(1);expect(cloud.stopEconomically).not.toHaveBeenCalled();
+  }finally{streamAbort.abort();await live.close();await jobs.close();}
+ });
+ it('keeps the deployment switch authoritative and does not queue a paid action while disabled',async()=>{
+  const scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]);
+  const disabled=new ProcessingNodeJobs(adminPool,{...adminConfig,processingNodes:{...adminConfig.processingNodes,enabled:false}});
+  const before=Number((await root.query("SELECT count(*) AS n FROM tasks WHERE kind='processing.node-start'")).rows[0].n);
+  try{await expect(disabled.start(randomUUID(),scope,randomUUID())).rejects.toMatchObject({code:'PROCESSING_NODES_DISABLED'});expect(Number((await root.query("SELECT count(*) AS n FROM tasks WHERE kind='processing.node-start'")).rows[0].n)).toBe(before);}finally{await disabled.close();}
+ });
+});
+
 describe('Admin-only document trial, no business ingestion',()=>{
- const counts=async()=>Object.fromEntries(await Promise.all(['notes','resources','rag_ingestion_versions','text_ingestion_jobs','kb_document_keyword_builds','kb_document_keyword_chunks','tasks','task_inputs'].map(async table=>[table,Number((await root.query('SELECT count(*) AS n FROM '+table)).rows[0].n)])));
+ const counts=async()=>Object.fromEntries(await Promise.all(['notes','resources','rag_ingestion_versions','text_ingestion_jobs','kb_document_keyword_builds','kb_document_keyword_chunks','tasks','task_inputs','task_outbox','document_parse_callbacks','processing_node_assignments','admin_audit_events'].map(async table=>[table,Number((await root.query('SELECT count(*) AS n FROM '+table)).rows[0].n)])));
  it('checks admin session, superadmin and CSRF before accepting a trial',async()=>{
   expect((await app.inject('/admin/api/v1/document-trials/capabilities')).statusCode).toBe(401);
   expect((await app.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:operatorCookie}})).statusCode).toBe(403);
@@ -199,29 +307,76 @@ describe('Admin-only document trial, no business ingestion',()=>{
   await vi.waitFor(async()=>{const r=await app.inject({url:'/admin/api/v1/document-trials/'+id,headers:{cookie:superCookie}});expect(r.json().data.state).toBe('completed');});
   const result=await app.inject({url:'/admin/api/v1/document-trials/'+id+'/result',headers:{cookie:superCookie}});expect(result.statusCode,result.body).toBe(200);expect(result.json().data.result.content).toContain('NATIVE_NO_STORE_2718');
   expect(await counts()).toEqual(before);
-  expect((await root.query("SELECT count(*)::int AS n FROM admin_audit_events WHERE action='document-trial.start' AND target_id=$1",[id])).rows[0].n).toBe(1);
+  expect((await root.query("SELECT count(*)::int AS n FROM admin_audit_events WHERE action='document-trial.start' AND target_id=$1",[id])).rows[0].n).toBe(0);
  });
  it('rejects unsupported names, unconfigured PDF and unsafe download links',async()=>{
+  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
   for(const[fileName,expected]of [['../a.txt',400],['a.exe',400],['a.pdf',503]] as const){
    const r=await app.inject({method:'POST',url:'/admin/api/v1/document-trials/upload?'+new URLSearchParams({fileName,mimeType:'application/octet-stream'}),headers:{...headers(),'content-type':'application/octet-stream'},payload:Buffer.from('sample')});expect(r.statusCode,r.body).toBe(expected);
   }
   const url=await app.inject({method:'POST',url:'/admin/api/v1/document-trials',headers:headers(),payload:{fileUrl:'http://169.254.169.254/latest/meta-data/'}});expect(url.statusCode,url.body).toBe(400);
  });
- it('uses the same full config, extraction protocol and node occupancy for PDF without business persistence',async()=>{
+ it('probes the configured parser API with in-memory results and zero trial database writes',async()=>{
   await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});expect((await nodeSave(node)).statusCode).toBe(200);
-  const extraction=extractionConfig('sync');await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1',[JSON.stringify({'document.mode':'sync','document.parameters':extraction.parameters,'document.pollMs':100})]);
-  const fetchDouble=vi.fn<typeof fetch>(async(_url,options)=>{
-   const form=options!.body as FormData;expect(JSON.parse(String(form.get('config')))).toEqual(extraction.parameters);
-   const context=(JSON.parse(String(form.get('file_contexts'))) as FileContext[])[0]!;return new Response(JSON.stringify(sampleExtraction(context)),{status:200});
+  let context:FileContext;const jobId=randomUUID();
+  const fetchDouble=vi.fn<typeof fetch>(async(url,options)=>{
+   if(options?.method==='POST'){
+    expect(String(url)).toBe(node.baseUrl+'/extract-async');const form=options.body as FormData;
+    expect(form.has('config')).toBe(false);expect(form.has('callback_url')).toBe(false);
+    context=(JSON.parse(String(form.get('file_contexts'))) as FileContext[])[0]!;
+    return new Response(JSON.stringify({job_id:jobId}),{status:202});
+   }
+   if(String(url).endsWith('/result'))return new Response(JSON.stringify({job_id:jobId,state:'completed',result:sampleExtraction(context)}));
+   return new Response(JSON.stringify({job_id:jobId,state:'completed',result_state:'available'}));
   });
   const service=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble),scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]);
   const before=await counts();
   try{
-   const job=await service.start(scope,{file:{bytes:Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF'),fileName:'trial.pdf',contentType:'application/pdf',finalUrl:''}},randomUUID());
+   const job=await service.start(scope,{file:{bytes:Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF'),fileName:'trial.pdf',contentType:'application/pdf',finalUrl:''}});
    await vi.waitFor(()=>expect(service.status(scope,job.id).state).toBe('completed'));
-   expect(fetchDouble).toHaveBeenCalledTimes(1);expect(service.result(scope,job.id).result).toMatchObject({summary:{errors:0}});
-   expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',[job.id])).rows[0].settled).toBe(true);
+   expect(fetchDouble).toHaveBeenCalledTimes(3);expect(service.result(scope,job.id).result).toMatchObject({summary:{errors:0}});
    expect(()=>service.status({...scope,adminId:randomUUID()},job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');expect(await counts()).toEqual(before);
+   await expect(adminPool.query('SELECT 1 FROM document_parse_callbacks LIMIT 1')).rejects.toMatchObject({code:'42501'});
+   await service.close();expect(()=>service.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');
   }finally{await service.close();await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);}
+ });
+ it('discards an interrupted probe on close without durable recovery or a second submission',async()=>{
+  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});expect((await nodeSave(node)).statusCode).toBe(200);
+  const fetchDouble=vi.fn<typeof fetch>(async(_url,options)=>new Promise<Response>((_resolve,reject)=>{
+   options!.signal!.addEventListener('abort',()=>reject(new Error('probe interrupted')),{once:true});
+  }));
+  const service=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble),replacement=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble);
+  const scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]),before=await counts();
+  try{
+   const job=await service.start(scope,{file:{bytes:Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF'),fileName:'interrupt.pdf',contentType:'application/pdf',finalUrl:''}});
+   await vi.waitFor(()=>expect(fetchDouble).toHaveBeenCalledTimes(1));await service.close();
+   expect(()=>service.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');expect(()=>replacement.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');
+   await new Promise(resolve=>setTimeout(resolve,20));expect(fetchDouble).toHaveBeenCalledTimes(1);expect(await counts()).toEqual(before);
+  }finally{await service.close();await replacement.close();await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);}
+ });
+ it('uses the API service address for durable user-task callbacks while Admin listens independently',async()=>{
+  const apiConfig=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL});
+  const api=await buildApiServer({config:apiConfig});
+  const apiAddress=await api.listen({host:'127.0.0.1',port:0}),adminAddress=await app.listen({host:'127.0.0.1',port:0});
+  const callbacks=new DocumentCallbacks(workerPool,{...workerConfig,apiServiceBaseUrl:apiAddress});
+  const missing=new DocumentCallbacks(workerPool,{...workerConfig,apiServiceBaseUrl:undefined});
+  const context={source_resource_id:randomUUID(),parse_run_id:randomUUID()},input={requestId:randomUUID(),fingerprint:'a'.repeat(64),taskId:randomUUID(),contexts:[context],timeoutMs:30000,maxResponseBytes:67108864};
+  const userId=await insertFixtureUser(root),workspaceId=randomUUID();
+  await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'callback fixture',true,$3)",[workspaceId,userId,randomUUID()]);
+  await root.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state) VALUES($1,$2,$3,'rag.document-ingest','content','queued')",[input.taskId,userId,workspaceId]);
+  try{
+   expect(apiAddress).not.toBe(adminAddress);
+   const adminResponse=await fetch(adminAddress+'/admin/api/v1/me',{headers:{cookie:superCookie}});expect(adminResponse.status).toBe(200);await adminResponse.text();
+   await expect(transaction(workerPool,tx=>missing.prepare(tx,input))).rejects.toMatchObject({code:'API_SERVICE_ADDRESS_REQUIRED'});
+   expect((await root.query('SELECT count(*)::int n FROM document_parse_callbacks WHERE request_id=$1',[input.requestId])).rows[0].n).toBe(0);
+   const prepared=await transaction(workerPool,tx=>callbacks.prepare(tx,input));
+   expect(new URL(prepared.url).origin).toBe(apiAddress);expect(new URL(prepared.url).origin).not.toBe(env.APP_PUBLIC_BASE_URL);
+   const body={event:'extraction.completed',event_id:randomUUID(),job_id:randomUUID(),state:'completed',result:sampleExtraction(context)};
+   const response=await fetch(prepared.url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+   expect(response.status).toBe(200);expect((await response.json()).data).toMatchObject({accepted:true,duplicate:false});
+   expect((await callbacks.forRequest(input.requestId))?.terminal_state).toBe('completed');
+   const forged=new URL(prepared.url);forged.pathname=forged.pathname.replace(/[^/]+$/,'x'.repeat(43));
+   const denied=await fetch(forged,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});expect(denied.status).toBe(404);await denied.text();
+  }finally{await api.close();await root.query('DELETE FROM document_parse_callbacks WHERE request_id=$1',[input.requestId]);await root.query('DELETE FROM tasks WHERE id=$1',[input.taskId]);}
  });
 });

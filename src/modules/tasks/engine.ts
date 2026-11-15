@@ -3,27 +3,32 @@ import type pg from 'pg';
 import type { StorageJobs } from '../storage/jobs.js';
 import { randomUUID } from 'node:crypto';
 import { transaction } from '../identity/store.js';
-import { type TaskRow, hash, event, enqueueIntent, retryDelay } from './model.js';
+import { type TaskRow, hash, event, enqueueIntent, retryDelay,parserRequestId } from './model.js';
+import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
+import type {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
 import type { BillingService } from '../billing/service.js';
 import { UnavailableTagExtractor, extractBoundedTags, validateTagLabels, type TagExtractor } from '../assets/tag-extractor.js';
 import type { RagIngestionJobs } from '../rag/jobs.js';
 import type { NoteIndexJobs } from '../ingestion/jobs.js';
+import type { TaskMetrics, TaskResult } from '../../plugins/metrics.js';
 export interface Attempt {task:TaskRow;owner:string;version:number;attempt:number;signal?:AbortSignal;}
 export class TaskEngine {
- constructor(readonly pool:pg.Pool,readonly leaseMs=15000,readonly billing?:BillingService,readonly storage?:StorageJobs,readonly tagExtractor:TagExtractor=new UnavailableTagExtractor('disabled'),readonly rag?:RagIngestionJobs,readonly noteIndex?:NoteIndexJobs,readonly textIngestion?:TextIngestionJobs){}
+ constructor(readonly pool:pg.Pool,readonly leaseMs=15000,readonly billing?:BillingService,readonly storage?:StorageJobs,readonly tagExtractor:TagExtractor=new UnavailableTagExtractor('disabled'),readonly rag?:RagIngestionJobs,readonly noteIndex?:NoteIndexJobs,readonly textIngestion?:TextIngestionJobs,readonly nodeJobs?:ProcessingNodeJobs,readonly metrics?:TaskMetrics){}
  async claim(id:string,owner:string):Promise<Attempt|null>{return transaction(this.pool,async tx=>{
   const r=await tx.query<TaskRow>(`SELECT * FROM tasks WHERE id=$1 AND available_at<=now() AND (
    (state IN ('queued','retry_scheduled') AND external_state='none') OR
-   (state='reconciling' AND kind IN ('rag.document-ingest','text.ingest') AND external_state='submitted'
-    AND (external_reference LIKE 'xberg-job:%' OR external_reference LIKE 'xberg-cancelling:%') AND attempt_no<max_attempts)
+   (state IN ('waiting_external','reconciling','cancel_requested') AND (lease_until IS NULL OR lease_until<now()) AND (
+    (kind IN ('rag.document-ingest','text.ingest') AND (external_reference LIKE 'xberg-bound:%' OR external_reference LIKE 'xberg-job:%' OR external_reference LIKE 'xberg-cancelling:%')) OR
+    (kind='processing.node-start' AND external_reference LIKE 'node-start:%')))
   ) FOR UPDATE`,[id]);const t=r.rows[0];if(!t)return null;
-  if(t.attempt_no>=t.max_attempts){await tx.query("UPDATE tasks SET state='failed',error_code='ATTEMPTS_EXHAUSTED',retryable=true WHERE id=$1",[id]);if(this.billing&&t.reservation_id)await this.billing.releaseReservationTx(tx,t.reservation_id);await event(tx,id);return null;}
-  const updated=await tx.query<TaskRow>("UPDATE tasks SET state='running',attempt_no=attempt_no+1,version=version+1,lease_owner=$2,lease_until=now()+$3*interval '1 millisecond' WHERE id=$1 RETURNING *",[id,owner,this.leaseMs]);
+  const continuation=Boolean(parserRequestId((t as TaskRow&{external_reference:string}).external_reference))||t.kind==='processing.node-start'&&t.attempt_no>0;
+  if(!continuation&&t.attempt_no-t.resume_count>=t.max_attempts){await tx.query("UPDATE tasks SET state='failed',error_code='ATTEMPTS_EXHAUSTED',retryable=true WHERE id=$1",[id]);if(this.billing&&t.reservation_id)await this.billing.releaseReservationTx(tx,t.reservation_id);await event(tx,id);return null;}
+  const updated=await tx.query<TaskRow>("UPDATE tasks SET state='running',attempt_no=attempt_no+1,resume_count=resume_count+$4,version=version+1,lease_owner=$2,lease_until=now()+$3*interval '1 millisecond' WHERE id=$1 RETURNING *",[id,owner,this.leaseMs,continuation?1:0]);
   const task=updated.rows[0]!;await tx.query("INSERT INTO task_attempts(task_id,attempt_no,version,owner,state) VALUES($1,$2,$3,$4,'running')",[id,task.attempt_no,task.version,owner]);await event(tx,id);
   return {task,owner,version:task.version,attempt:task.attempt_no};
  });}
  async heartbeat(a:Attempt){const r=await this.pool.query("UPDATE tasks SET lease_until=now()+$5*interval '1 millisecond' WHERE id=$1 AND lease_owner=$2 AND version=$3 AND attempt_no=$4 AND state='running' AND lease_until>now()",[a.task.id,a.owner,a.version,a.attempt,this.leaseMs]);return r.rowCount===1;}
- async finish(a:Attempt,digest:string,byteCount:number,apply?:(tx:pg.PoolClient)=>Promise<void>){return transaction(this.pool,async tx=>{
+ async finish(a:Attempt,digest:string,byteCount:number,apply?:(tx:pg.PoolClient)=>Promise<void>){const applied=await transaction(this.pool,async tx=>{
   const lease=await tx.query<Pick<TaskRow,'id'|'reservation_id'>>(`WITH locked AS MATERIALIZED (
    SELECT id,reservation_id,state,version,attempt_no,lease_owner,lease_until FROM tasks WHERE id=$1 FOR UPDATE
   )
@@ -36,22 +41,43 @@ export class TaskEngine {
   await tx.query("UPDATE task_attempts SET state='succeeded',finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[t.id,a.attempt]);
   if (this.billing && t.reservation_id) await this.billing.commitReservationTx(tx,t.reservation_id);
   await event(tx,t.id);return true;
- });}
- async fail(a:Attempt,code:string,retryable:boolean){return transaction(this.pool,async tx=>{
-  const r=await tx.query<TaskRow>("SELECT * FROM tasks WHERE id=$1 AND version=$2 AND lease_owner=$3 AND state='running' AND lease_until>now() FOR UPDATE",[a.task.id,a.version,a.owner]);const t=r.rows[0];if(!t)return false;
-  const retry=retryable&&t.attempt_no<t.max_attempts&&t.external_state==='none',delay=retryDelay(t.attempt_no);
+ });if(applied)this.metrics?.recordTaskAttempt(a.task.kind,'success');return applied;}
+ async fail(a:Attempt,code:string,retryable:boolean){const outcome=await transaction(this.pool,async tx=>{
+  const r=await tx.query<TaskRow>("SELECT * FROM tasks WHERE id=$1 AND version=$2 AND lease_owner=$3 AND state='running' AND lease_until>now() FOR UPDATE",[a.task.id,a.version,a.owner]);const t=r.rows[0];if(!t)return {applied:false,result:null};
+  const retry=retryable&&t.attempt_no-t.resume_count<t.max_attempts&&t.external_state==='none',delay=retryDelay(t.attempt_no-t.resume_count);
   const state=t.external_state!=='none'?'reconciling':retry?'retry_scheduled':'failed';
   await tx.query("UPDATE tasks SET state=$2,error_code=$3,retryable=$4,lease_until=NULL,lease_owner=NULL,version=version+1,available_at=now()+$5*interval '1 millisecond' WHERE id=$1",[t.id,state,code,retryable,delay]);
   await tx.query("UPDATE task_attempts SET state='failed',error_code=$3,finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[t.id,a.attempt,code]);
-  if(retry)await enqueueIntent(tx,t.id,delay); if (!retry && t.external_state === 'none' && this.billing && t.reservation_id) await this.billing.releaseReservationTx(tx,t.reservation_id); await event(tx,t.id);return true;
- });}
+  if(retry)await enqueueIntent(tx,t.id,delay); if (!retry && t.external_state === 'none' && this.billing && t.reservation_id) await this.billing.releaseReservationTx(tx,t.reservation_id); await event(tx,t.id);return {applied:true,result:state==='reconciling'?null:'failure' as TaskResult};
+ });if(outcome.result)this.metrics?.recordTaskAttempt(a.task.kind,outcome.result);return outcome.applied;}
  // Future provider adapters must record intent BEFORE the external call. Recovery never resubmits it.
  async markExternal(a:Attempt,reference:string|null){const r=await this.pool.query("UPDATE tasks SET external_state='unknown',external_reference=$5 WHERE id=$1 AND version=$2 AND lease_owner=$3 AND attempt_no=$4 AND state='running' AND lease_until>now()",[a.task.id,a.version,a.owner,a.attempt,reference]);return r.rowCount===1;}
  async waitingExternal(a:Attempt,reference:string){return transaction(this.pool,async tx=>{
   const r=await tx.query("UPDATE tasks SET state='waiting_external',external_state='submitted',external_reference=$5,lease_owner=NULL,lease_until=NULL,version=version+1 WHERE id=$1 AND version=$2 AND lease_owner=$3 AND attempt_no=$4 AND state='running' AND lease_until>now()",[a.task.id,a.version,a.owner,a.attempt,reference]);
   if(r.rowCount){await tx.query("UPDATE task_attempts SET state='waiting_external',finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[a.task.id,a.attempt]);await event(tx,a.task.id);}return r.rowCount===1;
  });}
+ async defer(a:Attempt,delayMs:number){return transaction(this.pool,async tx=>{
+  const row=(await tx.query<TaskRow&{external_reference:string;cancel_requested_at:Date|null}>(`WITH locked AS MATERIALIZED (
+   SELECT * FROM tasks WHERE id=$1 FOR UPDATE
+  ) SELECT * FROM locked WHERE lease_owner=$2 AND attempt_no=$3 AND lease_until>clock_timestamp()`,[a.task.id,a.owner,a.attempt])).rows[0];
+  if(!row)return false;
+  const requestId=parserRequestId(row.external_reference);
+  // Cancellation fences business writes by advancing version. The same live
+  // attempt may still hand off its durable parser receipt after its local step
+  // ends; it may neither clear cancellation nor hand off an unknown POST intent.
+  const cancelling=row.state==='cancel_requested'&&row.version>a.version&&Boolean(row.cancel_requested_at)&&Boolean(requestId)&&['rag.document-ingest','text.ingest'].includes(row.kind);
+  if(!cancelling&&(row.state!=='running'||row.version!==a.version))return false;
+  const ready=requestId&&(await tx.query('SELECT 1 FROM document_parse_callbacks WHERE request_id=$1 AND terminal_state IS NOT NULL AND NOT consumed',[requestId])).rowCount;
+  const delay=cancelling||ready?0:delayMs;
+  await tx.query("UPDATE tasks SET state=$3,lease_until=NULL,lease_owner=NULL,version=version+1,available_at=now()+$2*interval '1 millisecond',error_code=NULL WHERE id=$1",[a.task.id,delay,cancelling?'cancel_requested':'waiting_external']);
+  await tx.query("UPDATE task_attempts SET state='waiting_external',finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[a.task.id,a.attempt]);
+  await enqueueIntent(tx,a.task.id,delay);await event(tx,a.task.id);return false;
+ });}
  async execute(a:Attempt){
+  try{return await this.executeOwned(a);}catch(error){if(error instanceof ParserExecutionDeferred)return this.defer(a,error.delayMs);throw error;}
+ }
+ private async executeOwned(a:Attempt){
+  if(a.task.kind==='processing.node-start'&&this.nodeJobs){const result=await this.nodeJobs.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind==='text.ingest'&&this.textIngestion){const result=await this.textIngestion.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind.startsWith('storage.')&&this.storage){const result=await this.storage.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind==='kb.note-cleanup'&&this.noteIndex){const result=await this.noteIndex.executeCleanup(a);return this.finish(a,result.digest,result.bytes);}

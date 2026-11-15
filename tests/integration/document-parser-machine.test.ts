@@ -4,7 +4,7 @@ import { Redis } from 'ioredis';
 import { createServer } from 'node:http';
 import { createDocumentParserConfig, type EcsDocumentParserConfig, type EnabledDocumentParserMachineConfig } from '../../src/config/document-parser-machine.js';
 import { EcsPowerError, type EcsInstance, type EcsPowerPort } from '../../src/integrations/ecs-power.js';
-import { DocumentParserMachine, ParserExecutionError, ParserMachineRedis, type ParserRequest } from '../../src/lib/document-parser-machine/index.js';
+import { DocumentParserMachine, ParserExecutionError, ParserExecutionDeferred, ParserMachineRedis, type ParserRequest } from '../../src/lib/document-parser-machine/index.js';
 import { ParserMachineIdleMonitor } from '../../src/lib/document-parser-machine/monitor.js';
 
 // Real Redis/Lua and two real clients; ECS/HTTP are controlled doubles, never live paid calls.
@@ -65,6 +65,21 @@ async function expire(state: ParserMachineRedis, input: ParserRequest) {
 }
 
 describe('single document parser coordination: real isolated Redis, mock ECS/HTTP', () => {
+  it('parks remote work without a heartbeat or uncertain gate and keeps capacity until its terminal receipt',async()=>{
+    const s=setup({concurrency:2}),input={...request(),step:true};
+    await expect(s.machine.withDocumentParser(input,async()=>{throw new ParserExecutionDeferred('external');})).rejects.toMatchObject({phase:'external'});
+    await expire(s.state,input);expect(await s.state.status()).toMatchObject({active:1,uncertain:0});
+    await expect(s.other.withDocumentParser({...request(),step:true},async()=>42)).resolves.toBe(42);
+    await age(s.state);expect(await s.machine.tick()).toBe('busy');expect(s.cloud.stops).toBe(0);
+    await s.machine.acknowledgeSettled(input);expect(await s.state.status()).toMatchObject({active:0,uncertain:0});
+  });
+  it('yields startup between short steps and does not issue a second start RPC',async()=>{
+    const s=setup();s.cloud.instance.status='Stopped';s.cloud.instance.stoppedMode='StopCharging';const input={...request(),step:true},execute=vi.fn(async()=>42);
+    await expect(s.machine.withDocumentParser(input,execute)).rejects.toMatchObject({phase:'admitting'});expect(execute).not.toHaveBeenCalled();
+    expect(s.cloud.starts).toBe(1);expect(await s.state.status()).toMatchObject({active:1,uncertain:0});
+    expect(await s.other.withDocumentParser({...input,recoverAdmission:true},execute)).toBe(42);expect(s.cloud.starts).toBe(1);
+    expect(await s.state.status()).toMatchObject({active:0});
+  });
   it('keeps the machine running when the durable registry reports unresolved occupancy', async () => {
     const s=setup({canStop:async()=>false});await s.machine.withDocumentParser(request(),async()=>undefined);await age(s.state);
     expect(await s.machine.tick()).toBe('busy');expect(s.cloud.stops).toBe(0);

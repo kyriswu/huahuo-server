@@ -1,5 +1,45 @@
 # 当前容器与数据库状态
 
+## 冒烟脚本隔离验证（2026-11-15）
+
+本轮只创建并清理自有临时 PG/Redis 测试容器，既有六个容器的 ID/启动时间/重启次数不变。没有更新主栈、写实际 ENV 或迁移目标数据库；GitHub CI 和生产调用接口的代码完成不代表服务器部署已通过。见[验收](acceptance/release-smoke.md)。
+
+## 任务容量配置与本地构建更新（2026-11-15）
+
+当前四角色统一为 `huahuo-server:capacity-16c32g-20261115`，镜像ID `sha256:c47526d4664c7d605973e1ece623f9a0f180579949aac842e2709a06214ace04`，local-dev指向同镜像；均healthy/readiness200，HTML/JS200、匿名管理401、App管理路径404。DB策略revision5，节点仍revision7/名额16/不在线，云开关关闭。没有修改本地Compose资源限额，16核32GiB是策略的部署目标；没有Schema/基线/卷变更。镜像沿用现有Dockerfile的Node26.12.1，宿主检查为26.11.0；显式26.11.0镜像标签不存在的构建尝试已记录。详见[验收](acceptance/runtime-capacity-16c32g.md)，证据 `.local/runtime-16c32g/runtime-result.json`。
+
+## 轻量发布应用交接回归（2026-11-15）
+
+本专项只新增Worker优先交接测试和应用契约；243项真实独立PG/Redis通过（1项Milvus跳过），临时依赖已按owner清理。本专项未改主Compose、真实数据库/ENV/凭据/已有卷或部署应用；不覆盖下方其他专项的主栈部署记录。宿主入口继续独立管理，服务器切流、跨版本回退及重叠容量不由同代码测试推导通过，见[验收](acceptance/worker-first-release.md)。
+
+## 现有主栈更新：手动启动与正式异步回调（2026-11-15）
+
+四个本地角色已切到同一完整镜像 `huahuo-server:async-node-20261115`（ID `110e91ae…78d48`），healthy/readiness200；Redis及原有数据卷未重建。实际开发库先回滚演练，再单事务同步唯一基线差异；校验和与镜像一致、物理外键0、业务行数保留。CPU节点revision7/async/并发16，运行配置revision3，节点及云总开关仍关闭，未调用云服务。473项unit/contract、241项真实独立PG/Redis通过（1项Milvus跳过）。纯内存试跑及同期指标/排空/服务地址代码已一并部署，最新证据和现有RDS角色继承边界见[验收](acceptance/document-async-events.md)；下方“未部署”为此前记录。
+
+## 纯内存试跑代码验收，主环境未部署（2026-11-15）
+
+本轮只在随机独立PG/Redis容器验证简化代码和当前唯一基线；测试依赖已清理，未修改现有库、ENV、凭据、数据卷或主应用容器。新的基线移除试跑专用trial_id及Admin回调权限，不能把现有运行Schema视为已同步。实际云/解析/OSS未调用，浏览器预览使用只绑定回环的替身API与当前静态构建，见[验收](acceptance/admin-document-trial.md)。
+
+## Admin 分离地址代码（2026-11-15）
+
+Compose 公共环境注入 API_SERVICE_BASE_URL，不依赖 Admin/业务 API 同一容器网络。仅修改部署示例与调用侧回调 URL；现有业务容器未重建，实际 .env、数据库、缓存、OSS 和宿主端口未改。API/Worker/Scheduler 保持现有部署组，Admin 仍使用独立管理入口。
+
+## 真实容器分角色演练，主栈未替换（2026-11-15）
+
+新建专用PG/Redis、随机测试库/文件卷与独立应用容器，以真实HTTP完成当前镜像切换和回切；历史候选被基线不匹配门禁拒绝。最终轮14次应用停止exit0，已按run/owner清理临时容器、网络及本轮新建测试卷；主栈五个既有运行容器ID前后相同、仍healthy，实际ENV/RDS/卷未写。未部署新镜像或调用付费服务；不将本机组合部署当跨机验证。见[演练证据](acceptance/release-rehearsal.md)。
+
+## 应用排空能力代码验收，主栈未更新（2026-11-15）
+
+新增进程 SIGUSR2 排空契约与按角色退出预算；API/Admin/Worker 默认300秒、容器330秒，Scheduler 30秒、容器60秒。四角色与一次性 migrate 拓扑保持，无新业务端口；仅静态校验本地/云 Compose 示例。真实集成仅创建本次 owner 标识的 tmpfs PG/Redis 临时容器，237项通过后已清理，无现有卷删除。未重建主业务栈或修改实际ENV/RDS/云资源；[验收](acceptance/release-hardening.md)不代表线上切流通过。
+
+## Prometheus 抓取端口代码完成（2026-11-15）
+
+Compose 新增 API/Admin/Worker/Scheduler 专用指标映射 9464/9465/9466/9467，默认宿主 loopback；测试机可在自身 .env 以 METRICS_BIND_HOST 指定私网 IP。应用/后台业务监听及 migrate 角色保持原职责。已完成本地隔离 HTTP 与 PG/Redis 验证，当前业务容器未部署本轮指标，不能声称中心已经抓取。见[验收](acceptance/prometheus.md)。
+
+## 已部署 ECS 按节点调用与配置简化（2026-11-15）
+
+当前CPU ECS无需镜像名或提取JSON，按需唤醒后直接调用已有Xberg API，默认省略config沿用服务端配置。全局四项解析设置移除，同步/异步与可选覆盖随节点快照；核心页面仅名称/实例ID/地址/并发/空闲停机/在线状态，其余折叠，试用仍位于解析与模型Modal。436项unit/contract、223项真实隔离PG/Redis通过（1跳过），静态检查/构建和Chrome桌面/移动验证通过。现有开发库无损调整，四角色已更新且healthy/readiness200；不开云机，内网PDF/Office仍待部署后实测。见[配置验收](acceptance/runtime-configuration.md)。
+
 ## RAG参数与ENV清理部署（2026-11-15）
 
 现有开发库只更新原runtime_configuration的values JSON、revision1→2并记录导入审计；无DDL/checksum变化或业务表写入，原节点一条/revision3/并发16保留。当前RAG参数先导入再删除ENV，四角色同一完整rag-settings-20261115镜像且healthy/readiness200，实际环境不再注入退役项。没有启动解析机或调用模型，Admin仍127.0.0.1入口。证据在.local/env-cleanup，见[验收](acceptance/runtime-configuration.md)。

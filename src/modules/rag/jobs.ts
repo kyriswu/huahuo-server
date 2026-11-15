@@ -19,6 +19,7 @@ import { RagIngestionRepository, type RagVersionRow } from './repository.js';
 import { DocumentPreparationError, downloadSourceBytes, parseDownloadedText } from './document-preparation.js';
 import {ManagedDocumentExtractor,ManagedExtractionError,type SavedExtraction} from '../ingestion/document-extraction.js';
 import type {ExtractionDocument} from '../../integrations/document-extraction.js';
+import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 
 export class RagJobError extends Error {
   constructor(readonly code: string, message: string, readonly retryable = false, options?: { cause?: unknown }) { super(message, options); this.name = 'RagJobError'; }
@@ -57,7 +58,7 @@ export class RagIngestionJobs {
     if(version.status==='SUCCEEDED')await this.cleanupRetired(version,attempt);
     if (version.status === 'SUCCEEDED') return { digest: version.content_hash ?? version.id, bytes: Number(version.source_size ?? 0) };
 
-    await this.update(version.id, { attempt_count: version.attempt_count + 1, last_attempt_at: new Date() });
+    if(attempt.task.attempt_no-attempt.task.resume_count>version.attempt_count)await this.update(version.id, { attempt_count: attempt.task.attempt_no-attempt.task.resume_count, last_attempt_at: new Date() });
 
     try {
       const snapshot = version.processing_snapshot as FileProcessingSnapshot | null;
@@ -94,7 +95,7 @@ export class RagIngestionJobs {
       await this.mark(version.id, 'PARSING');
       if(version.mode==='structured_document'){
         if(!snapshot.parser)throw new RagJobError('DOCUMENT_EXTRACTION_SNAPSHOT_INVALID','Document parser snapshot is unavailable');
-        const parsed=await this.extractor.parse(attempt,{bytes:source,fileName:version.source_file_name,contentType:version.source_mime_type,finalUrl:version.source_url},snapshot.parser,
+        const parsed=await this.extractor.parse(attempt,{bytes:source,fileName:version.source_file_name,contentType:version.source_mime_type,finalUrl:version.source_url,cachedObjectKey:sourceKey??undefined},snapshot.parser,
           async(tx,saved)=>this.saveExtraction(tx,version,saved));
         canonical=parsed.content;canonicalHash=parsed.contentHash;
       }else{
@@ -140,6 +141,7 @@ export class RagIngestionJobs {
       await this.cleanupRetired(version,attempt);
       return {digest:canonicalHash,bytes:storedBytes};
     } catch (error) {
+      if(error instanceof ParserExecutionDeferred)throw error;
       const mapped = error instanceof RagJobError ? error : error instanceof DocumentPreparationError||error instanceof ManagedExtractionError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : error instanceof EmbeddingError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : error instanceof MilvusError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : new RagJobError('RAG_INGEST_FAILED', error instanceof Error ? error.message : 'RAG ingestion failed', true, { cause: error });
       const latest = await this.versions.byId(this.pool, version.id);
       if(mapped.code==='RAG_STALE_ATTEMPT'){
@@ -159,7 +161,7 @@ export class RagIngestionJobs {
       asset_manifest_uri=$5,parser_provider='xberg',parser_version='kb-markdown-v1',parser_config_hash=$6,
       parser_metadata=$7::jsonb,toc=NULL,toc_status='pending',toc_error=NULL WHERE id=$1`,
       [version.id,saved.canonicalUri,saved.contentHash,saved.artifactUri,saved.manifestUri,
-        (version.processing_snapshot as FileProcessingSnapshot).parser!.extraction.configHash,
+        saved.configHash,
         JSON.stringify({sourceResourceId:doc.source_resource_id,parseRunId:doc.parse_run_id,contentFormat:doc.content_format,requestId:saved.requestId,fingerprint:saved.fingerprint})]);
     for(const receipt of doc.kb.uploaded_resources){
       await tx.query(`INSERT INTO rag_document_assets(id,version_id,object_key,sha256,mime_type,byte_size,asset_type,page_no,metadata,

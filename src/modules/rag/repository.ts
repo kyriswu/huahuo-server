@@ -51,14 +51,14 @@ export class RagIngestionRepository {
     if(!this.config.enabled)throw new DomainError(503,'RAG_INGESTION_DISABLED');
     const normalized={ossUrl:hostAllowed(input.ossUrl,this.config.sourceAllowedHosts,this.appEnv==='production'),fileName:input.fileName.trim(),mimeType:input.mimeType.split(';',1)[0]!.trim().toLowerCase()};
     if(!normalized.fileName||normalized.fileName.length>255||/[\0\\/]/.test(normalized.fileName))throw new DomainError(400,'RAG_FILE_NAME_INVALID');
-    const mode = modeFor(normalized.fileName, normalized.mimeType,this.appConfig.documentExtraction.enabled);
+    const mode = modeFor(normalized.fileName, normalized.mimeType,this.appConfig.processingNodes.enabled);
     if((input.sourceResourceId!==undefined&&!validUuid(input.sourceResourceId))||(input.parseRunId!==undefined&&!validUuid(input.parseRunId)))throw new DomainError(400,'DOCUMENT_EXTRACTION_CONTEXT_INVALID');
     const format = mode==='structured_document'||isMarkdownSource(normalized) ? 'markdown' : 'text';
     const chunkConfigHash = sha256(canonical({
       format, rules: 'paragraph-2000-zero-overlap',
     }));
     const idem = input.idempotencyKey?.trim() || sha256(canonical({ ...normalized, chunkConfigHash, target: this.milvusCollection,
-      ...(mode==='structured_document'?{sourceResourceId:input.sourceResourceId??null,parseRunId:input.parseRunId??null,parser:this.appConfig.documentExtraction}:{}), }));
+      ...(mode==='structured_document'?{sourceResourceId:input.sourceResourceId??null,parseRunId:input.parseRunId??null}:{}), }));
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idem)) throw new DomainError(400, 'IDEMPOTENCY_KEY_INVALID');
 
     return transaction(this.pool, async tx => {
@@ -75,9 +75,7 @@ export class RagIngestionRepository {
           const same=(await tx.query<RagVersionRow>(`SELECT * FROM rag_ingestion_versions WHERE user_id=$1 AND workspace_id=$2
             AND processing_snapshot#>>'{parser,sourceResourceId}'=$3 AND processing_snapshot#>>'{parser,parseRunId}'=$4 FOR UPDATE`,[scope.userId,workspace.id,input.sourceResourceId,input.parseRunId])).rows[0];
           if(same){
-            const parser=(same.processing_snapshot as FileProcessingSnapshot).parser!;
-            if(same.source_file_name!==normalized.fileName||same.source_mime_type!==normalized.mimeType
-              ||!this.appConfig.documentExtraction.enabled||parser.extraction.configHash!==this.appConfig.documentExtraction.configHash)throw new DomainError(409,'DOCUMENT_EXTRACTION_BATCH_CONFLICT');
+            if(same.source_file_name!==normalized.fileName||same.source_mime_type!==normalized.mimeType)throw new DomainError(409,'DOCUMENT_EXTRACTION_BATCH_CONFLICT');
             return {jobId:same.task_id!,documentVersionId:same.id,status:same.status,reused:true};
           }
         }

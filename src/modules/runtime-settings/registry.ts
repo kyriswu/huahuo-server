@@ -1,13 +1,8 @@
-import {assertCompleteExtractionConfig,createDocumentExtractionConfig} from '../../config/document-extraction.js';
 import type {AppConfig} from '../../config/config.js';
 import {DomainError} from '../identity/store.js';
-export type Category='document'|'rag'|'tasks'|'storage'|'billing'|'features';
-export interface SettingDefinition {key:string;category:Category;label:string;description:string;type:'number'|'boolean'|'select'|'json'|'string';default:unknown;min?:number;max?:number;options?:string[];effect:string;}
+export type Category='rag'|'tasks'|'storage'|'billing'|'features';
+export interface SettingDefinition {key:string;category:Category;label:string;description:string;type:'number'|'boolean'|'select'|'string';default:unknown;min?:number;max?:number;options?:string[];effect:string;}
 export const settings:SettingDefinition[]=[
- {key:'document.mode',category:'document',label:'文档解析模式',description:'使用已登记的文档节点；开启前填写该服务的完整提取配置。',type:'select',options:['disabled','async','sync'],default:'disabled',effect:'新文档任务'},
- {key:'document.parameters',category:'document',label:'完整提取配置',description:'整体提交服务的JSON配置，包含OCR模型、设备、DPI和图片策略；不存放凭据。',type:'json',default:null,effect:'新文档任务快照'},
- {key:'document.pollMs',category:'document',label:'异步查询间隔（毫秒）',description:'只查询既有任务，完成后单独领取结果。',type:'number',min:100,max:60000,default:2000,effect:'新文档任务快照'},
- {key:'document.maxResponseBytes',category:'document',label:'解析响应上限（字节）',description:'超限明确失败，不截断正文。',type:'number',min:1024,max:67108864,default:67108864,effect:'新文档任务快照'},
  {key:'rag.denseCandidates',category:'rag',label:'向量召回候选数',description:'Note 混合检索中向量分支的候选数量。',type:'number',min:1,max:200,default:20,effect:'后续查询，执行中查询保持原参数'},
  {key:'rag.bm25Candidates',category:'rag',label:'关键词召回候选数',description:'BM25 关键词分支的候选数量；最终返回数量仍由请求 topK 决定。',type:'number',min:1,max:200,default:20,effect:'后续查询'},
  {key:'rag.hybridCandidates',category:'rag',label:'混合检索候选数',description:'融合后送入权限复核与可选重排的候选预算。',type:'number',min:1,max:200,default:30,effect:'后续查询'},
@@ -34,6 +29,8 @@ export const settings:SettingDefinition[]=[
  {key:'features.tagProvider',category:'features',label:'标签提取提供器',description:'生产禁用 deterministic；LLM/Dify 适配器尚未接入，选择后仍会明确失败。',type:'select',options:['disabled','llm','dify','deterministic'],default:'disabled',effect:'新执行批次'},
 ];
 export type Values=Record<string,unknown>;
+export const RUNTIME_CONFIGURATION_SCHEMA_KEY='$schemaVersion';
+export const RUNTIME_CONFIGURATION_SCHEMA_VERSION=1;
 export const defaults=():Values=>Object.fromEntries(settings.map(d=>[d.key,structuredClone(d.default)]));
 export function rejectSecrets(value:unknown):void{
  if(!value||typeof value!=='object')return;
@@ -48,27 +45,34 @@ export function rejectSecrets(value:unknown):void{
 }
 export function validateValues(values:Values,base:AppConfig):Values{
  if(!values||typeof values!=='object'||Array.isArray(values))throw new DomainError(400,'CONFIGURATION_INVALID');
+ rejectSecrets(values);
  const all=defaults();
  for(const[key,value]of Object.entries(values)){
   const d=settings.find(d=>d.key===key);if(!d)throw new DomainError(400,'CONFIGURATION_KEY_UNKNOWN');
   if(d.type==='number'&&(!Number.isSafeInteger(value)||Number(value)<d.min!||Number(value)>d.max!)
    ||d.type==='boolean'&&typeof value!=='boolean'||d.type==='select'&&!d.options!.includes(value as string)
    ||d.type==='string'&&(typeof value!=='string'||!/^[A-Za-z0-9._-]{1,64}$/.test(value)))throw new DomainError(400,'CONFIGURATION_INVALID');
-  if(d.type==='json'&&value!==null){try{rejectSecrets(value);assertCompleteExtractionConfig(value);}catch(e){if(e instanceof DomainError)throw e;throw new DomainError(400,'CONFIGURATION_DOCUMENT_INVALID');}}
   all[key]=structuredClone(value);
  }
- if(all['document.mode']!=='disabled'&&!all['document.parameters'])throw new DomainError(400,'CONFIGURATION_DOCUMENT_REQUIRED');
  if(Number(all['tasks.retryBaseMs'])>Number(all['tasks.retryMaxMs'])||Number(all['storage.maxUploadBytes'])>base.uploadHardMaxBytes)throw new DomainError(400,'CONFIGURATION_INVALID');
  if(base.appEnv==='production'&&all['features.tagProvider']==='deterministic')throw new DomainError(400,'CONFIGURATION_TEST_PROVIDER_FORBIDDEN');
  return all;
 }
+// Only optional, additive fields may share a schema version. Changes to existing
+// semantics or safety requirements must bump the stored contract before use.
+// Missing metadata always means v1, even when a future reader supports v2.
+export function validateStoredValues(values:Values,base:AppConfig):Values{
+ if(!values||typeof values!=='object'||Array.isArray(values))throw new DomainError(400,'CONFIGURATION_INVALID');
+ const version=Object.hasOwn(values,RUNTIME_CONFIGURATION_SCHEMA_KEY)?values[RUNTIME_CONFIGURATION_SCHEMA_KEY]:1;
+ if(version!==RUNTIME_CONFIGURATION_SCHEMA_VERSION)throw new DomainError(503,'CONFIGURATION_VERSION_UNSUPPORTED');
+ rejectSecrets(values);
+ // Unknown persisted fields are opaque: never apply or expose them through an
+ // older Admin. Known fields keep the same validation as strict Admin input.
+ return validateValues(Object.fromEntries(Object.entries(values).filter(([key])=>settings.some(d=>d.key===key))),base);
+}
 export function applyValues(base:AppConfig,values:Values,revision:number):AppConfig{
- const v=validateValues(values,base);let documentExtraction:AppConfig['documentExtraction']={enabled:false};
- if(v['document.mode']!=='disabled'){
-  const parameters=v['document.parameters'] as Record<string,unknown>;
-  documentExtraction=createDocumentExtractionConfig(v['document.mode'] as 'sync'|'async',parameters,Number(v['document.pollMs']),Number(v['document.maxResponseBytes']));
- }
- return {...base,runtimeRevision:revision,documentExtraction,maxUploadBytes:Number(v['storage.maxUploadBytes']),storageQuotaBytes:Number(v['storage.quotaBytes']),
+ const v=validateValues(values,base);
+ return {...base,runtimeRevision:revision,maxUploadBytes:Number(v['storage.maxUploadBytes']),storageQuotaBytes:Number(v['storage.quotaBytes']),
   billingPolicyVersion:v['billing.policyVersion'] as string,tagExtractorProvider:v['features.tagProvider'] as AppConfig['tagExtractorProvider'],
   rag:{...base.rag,enabled:v['features.documentIngestion'] as boolean,maxSourceBytes:Number(v['storage.maxSourceBytes']),downloadTimeoutMs:Number(v['tasks.downloadTimeoutMs']),
    plainTextMaxChars:Number(v['rag.plainTextMaxChars']),embeddingBatchSize:Number(v['rag.embeddingBatchSize']),indexingConcurrency:Number(v['rag.indexConcurrency']),

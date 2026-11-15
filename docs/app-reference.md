@@ -1,5 +1,29 @@
 # App 只读参照基线
 
+## 发布冒烟只读核对（2026-11-15）
+
+只读核对 App 的 `lib/core/network/api_endpoints.dart`（17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1）及 `lib/features/auth/data/http_auth_repository.dart`（d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5）。冒烟使用已有身份/工作区/任务路由，不新增 App 契约或写 App；证据 `.local/release-smoke/app-reference.json`，见[验收](acceptance/release-smoke.md)。
+
+## Worker 优先交接专项（2026-11-15）
+
+复用前述两份真实App源码参照，前后SHA-256一致；只读证据在 `.local/worker-first-release/app-reference.json`。未修改App或运行Flutter，本轮只补Server交接测试和部署约定，不更改公共协议或验证App长连接重连。见[验收](acceptance/worker-first-release.md)。
+
+## 手动启动与异步回调专项（2026-11-15）
+
+只读复核真实App的api_endpoints.dart及http_auth_repository.dart，SHA256仍分别为 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`、`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`。本轮仅Server编排、Admin启动入口与内部回调，不修改App或运行Flutter，不把本地后台检查当作移动端验收。见[验收](acceptance/document-async-events.md)。
+
+## 容器演练只读参照（2026-11-15）
+
+真实App的api_endpoints.dart和http_auth_repository.dart只读复核，哈希仍分别为`17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`、`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`，证据`.local/release-rehearsal/app-reference.json`。通用基线仍报告既有工作树差异，未覆盖基线/源码或运行Flutter。本轮容器HTTP、管理会话和文件验证不作为移动端验收。见[演练](acceptance/release-rehearsal.md)。
+
+## 发布基础专项只读参照（2026-11-15）
+
+只读核对真实 ../huahuo-ai 的 api_endpoints.dart（SHA256 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`）与 http_auth_repository.dart（`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`）；认证HTTP有15秒客户端超时，不能用服务端排空预算代替客户端体验验收。旧通用参照基线报告已有App工作树变化，本轮未覆盖该基线/源码，未运行Flutter。新证据 `.local/release-hardening/app-reference.json`，见[验收](acceptance/release-hardening.md)。
+
+## Prometheus 内部监控参照（2026-11-15）
+
+只读核对 `../huahuo-ai/lib/core/network/api_endpoints.dart` 与 `lib/features/auth/data/http_auth_repository.dart`，前后 SHA256 一致；原双 Base URL、认证 Header 与业务 Envelope 保持。新增指标端口只供 Prometheus 拉取，App 无新参数或接线要求。比对记录 `.local/prometheus/baseline.json` / `audit.json`，未写入 App。
+
 ## RAG配置与ENV清理复核（2026-11-15）
 
 仅调整Server配置来源、缓存参数生效及独立Admin分类。实际只读api_endpoints.dart/hash仍17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1，http_auth_repository.dart/hash仍d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5；未改App/运行Flutter，不将后端与浏览器验证当移动端验收。

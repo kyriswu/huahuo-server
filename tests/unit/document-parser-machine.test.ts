@@ -51,7 +51,7 @@ describe('document parser configuration (no live cloud calls)', () => {
     const settings={...env,DOCUMENT_PARSER_MODE:'ecs',DOCUMENT_PARSER_BASE_URL:'https://unused.invalid'};
     expect(loadConfig('worker', settings).processingNodes.enabled).toBe(false);
     expect(loadConfig('scheduler', {...settings,PROCESSING_NODES_ENABLED:'true'}).processingNodes.enabled).toBe(true);
-    expect(loadConfig('api-server', settings).documentExtraction.enabled).toBe(false);
+    expect(loadConfig('api-server', settings).processingNodes.enabled).toBe(false);
   });
 });
 

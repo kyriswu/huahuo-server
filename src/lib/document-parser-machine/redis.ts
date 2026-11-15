@@ -59,12 +59,12 @@ end
 for _, key in ipairs(redis.call('ZRANGE', waiting, 0, -1)) do
   local job = jobFor(key)
   if not job or job.stage ~= 'queued' then return result('STATE_INCONSISTENT') end
-  if job.expires <= now then redis.call('ZREM', waiting, key); redis.call('HDEL', jobs, key) end
+  if job.expires > 0 and job.expires <= now then redis.call('ZREM', waiting, key); redis.call('HDEL', jobs, key) end
 end
 local uncertain = 0
 for _, key in ipairs(redis.call('ZRANGE', active, 0, -1)) do
   local job = jobFor(key)
-  if not job or (job.stage ~= 'active' and job.stage ~= 'unknown') then return result('STATE_INCONSISTENT') end
+  if not job or (job.stage ~= 'active' and job.stage ~= 'unknown' and job.stage ~= 'external' and job.stage ~= 'admitting') then return result('STATE_INCONSISTENT') end
   if job.expires <= now and job.stage == 'active' then
     job.stage = 'unknown'; redis.call('HSET', jobs, key, cjson.encode(job)); notify()
   end
@@ -102,7 +102,10 @@ elseif op == 'register' or op == 'recover-admission' then
   if job then
     if job.fingerprint ~= fingerprint then return result('CONFLICT') end
     if op == 'recover-admission' then
-      if job.stage == 'unknown' then
+      if job.stage == 'queued' and job.expires == 0 then
+        job.owner=owner; job.expires=now+lease; redis.call('HSET',jobs,id,cjson.encode(job)); return result('OK')
+      end
+      if job.stage == 'unknown' or job.stage == 'admitting' then
         job.owner=owner; job.stage='active'; job.expires=now+lease
         redis.call('HSET',jobs,id,cjson.encode(job)); redis.call('ZADD',active,job.expires,id)
         return result('RESUMED')
@@ -131,7 +134,7 @@ elseif op == 'resume' then
   local job = jobFor(id)
   if not job or job.fingerprint ~= fingerprint then return result('LEASE_LOST') end
   if job.stage == 'active' then return result('WAIT') end
-  if job.stage ~= 'unknown' or phase == 'blocked' then return result('NOT_UNCERTAIN') end
+  if (job.stage ~= 'unknown' and job.stage ~= 'external') or phase == 'blocked' then return result('NOT_UNCERTAIN') end
   job.owner = owner; job.stage = 'active'; job.expires = now+lease
   redis.call('HSET', jobs, id, cjson.encode(job)); redis.call('ZADD', active, job.expires, id); notify()
   return result('OK')
@@ -145,8 +148,13 @@ elseif op == 'finish' or op == 'resolve' then
   local job = jobFor(id)
   if not job or job.fingerprint ~= fingerprint then return result('LEASE_LOST') end
   if op == 'resolve' then
-    if job.stage ~= 'unknown' and job.stage ~= 'active' then return result('NOT_UNCERTAIN') end
+    if job.stage ~= 'unknown' and job.stage ~= 'active' and job.stage ~= 'external' and job.stage ~= 'admitting' and job.stage ~= 'queued' then return result('NOT_UNCERTAIN') end
   elseif job.owner ~= owner then return result('LEASE_LOST') end
+  if value == 'external' or value == 'admitting' then
+    if value == 'external' and job.stage ~= 'active' then return result('STATE_INCONSISTENT') end
+    if job.stage ~= 'queued' then job.stage=value end
+    job.expires=0; redis.call('HSET',jobs,id,cjson.encode(job)); touch(); return result('OK')
+  end
   if value == 'unknown' then
     if job.stage == 'queued' then return result('STATE_INCONSISTENT') end
     job.stage = 'unknown'; redis.call('HSET', jobs, id, cjson.encode(job)); touch(); return result('OK')
@@ -249,7 +257,7 @@ export class ParserMachineRedis {
     if(r.code!=='OK')throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
     return true;
   }
-  async finish(id: string, owner: string, fingerprint: string, value: 'succeeded' | 'failed' | 'cancelled' | 'unknown'): Promise<void> {
+  async finish(id: string, owner: string, fingerprint: string, value: 'succeeded' | 'failed' | 'cancelled' | 'unknown'|'external'|'admitting'): Promise<void> {
     const r = await this.run('finish', { id, owner, fingerprint, value });
     if (r.code !== 'OK') throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
   }

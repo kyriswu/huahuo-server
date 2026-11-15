@@ -1,7 +1,7 @@
 import {extractionConfig} from '../support/extraction-config.js';
 import {describe,it,expect,vi} from 'vitest';
 import {DocumentExtractionClient,validateExtractionResponse,type ExtractionFile} from '../../src/integrations/document-extraction.js';
-import {assertCompleteExtractionConfig,type EnabledDocumentExtractionConfig} from '../../src/config/document-extraction.js';
+import {assertCompleteExtractionConfig,createDocumentExtractionConfig,type EnabledDocumentExtractionConfig} from '../../src/config/document-extraction.js';
 import {sampleContext,sampleExtraction,sampleImage} from '../support/document-extraction.js';
 const ctx={baseUrl:'http://172.18.102.101:8000',headers:{Authorization:'Bearer test-token'},signal:new AbortController().signal};
 const files:ExtractionFile[]=[{...sampleContext,bytes:Buffer.from('%PDF-1.7\n%%EOF'),fileName:'document.pdf',mimeType:'application/pdf'}];
@@ -12,7 +12,7 @@ function configuration(mode:'sync'|'async'='sync'):EnabledDocumentExtractionConf
 const json=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json'}});
 describe('document extraction protocol; fetch is mocked, no private-network calls',()=>{
  it('loads exactly the complete GPU/native-first configuration supplied by the user',()=>{
-  const p=configuration().parameters;
+  const p=configuration().parameters!;
   expect(p).toMatchObject({output_format:'markdown',use_cache:false,force_ocr:false,ocr:{language:['chi_sim'],paddle_ocr_settings:{model_version:'pp-ocrv5',model_tier:'server',rec_batch_num:6}},extraction_timeout_secs:3000,
    acceleration:{provider:'cuda',device_id:0},images:{target_dpi:150,max_images_per_page:16,include_data_base64:false,output_format:{type:'jpeg',quality:85}},native_first:{min_native_body_chars:80,min_image_dimension:32}});
   expect(()=>assertCompleteExtractionConfig({images:{target_dpi:150}})).toThrow('INVALID_CONFIG:');
@@ -26,6 +26,30 @@ describe('document extraction protocol; fetch is mocked, no private-network call
   expect(JSON.parse(form.get('config') as string)).toEqual(c.parameters);expect(JSON.parse(form.get('file_contexts') as string)).toEqual([sampleContext]);
   expect((form.get('files') as File).name).toBe('document.pdf');expect(await(form.get('files') as File).text()).toBe('%PDF-1.7\n%%EOF');
   expect(result).toEqual(body);expect(h.beforeSubmit).toHaveBeenCalledTimes(1);expect(h.submitted).not.toHaveBeenCalled();
+ });
+ it('omits multipart config entirely when invoking a deployed service with its own defaults',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json(sampleExtraction()));
+  const config=createDocumentExtractionConfig('sync',null);
+  await new DocumentExtractionClient(config,fetch).extract(files,ctx,hooks());
+  const form=fetch.mock.calls[0]![1]!.body as FormData;
+  expect(form.has('config')).toBe(false);expect(JSON.parse(String(form.get('file_contexts')))).toEqual([sampleContext]);
+  expect(String(fetch.mock.calls[0]![0])).toBe(ctx.baseUrl+'/extract');
+ });
+ it('uploads a file above the former 100 MiB ceiling within the configured source budget',async()=>{
+  const bytes=new Uint8Array(100*1024*1024+1),fetch=vi.fn<typeof globalThis.fetch>(async()=>json(sampleExtraction()));
+  await new DocumentExtractionClient(configuration(),fetch,200*1024*1024).extract([{...files[0]!,bytes}],ctx,hooks());
+  const form=fetch.mock.calls[0]![1]!.body as FormData;
+  expect((form.get('files') as File).size).toBe(bytes.byteLength);
+ });
+ it('accepts the exact file budget and rejects excess aggregate bytes before submission',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json(sampleExtraction())),h=hooks(),client=new DocumentExtractionClient(configuration(),fetch,10);
+  await client.extract([{...files[0]!,bytes:new Uint8Array(10)}],ctx,h);
+  expect(fetch).toHaveBeenCalledTimes(1);fetch.mockClear();h.beforeSubmit.mockClear();
+  await expect(client.extract([{...files[0]!,bytes:new Uint8Array(6)},{...files[0]!,bytes:new Uint8Array(5)}],ctx,h)).rejects.toMatchObject({code:'DOCUMENT_EXTRACTION_INPUT_TOO_LARGE',outcome:'settled'});
+  expect(fetch).not.toHaveBeenCalled();expect(h.beforeSubmit).not.toHaveBeenCalled();
+ });
+ it.each([0,1.5,2*1024*1024*1024+1])('rejects an invalid input budget %s',limit=>{
+  expect(()=>new DocumentExtractionClient(configuration(),fetch,limit)).toThrow('INVALID_CONFIG:DOCUMENT_EXTRACTION_INPUT_LIMIT');
  });
  it('preserves complete content, tables, pages, KB blocks and pre-adapter offset metadata without rewriting',()=>{
   const raw=sampleExtraction();const validated=validateExtractionResponse(raw,[sampleContext]);expect(validated).toBe(raw);
@@ -66,6 +90,17 @@ describe('document extraction protocol; fetch is mocked, no private-network call
   });
   const result=await new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,h);
   expect(order).toEqual(['POST','saved:job-1','GET-status','GET-result']);expect(result.results[0]!.content).toContain(sampleImage);expect(String(fetch.mock.calls[1]![0])).toMatch(/\/jobs\/job-1$/);
+ });
+ it('returns control after the async acceptance and sends the callback URL without a status GET',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({job_id:'detached-job'},202)),h=hooks();
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,{...h,singleStep:true,callbackUrl:'http://api.test/callback/test'})).rejects.toMatchObject({phase:'external'});
+  expect(fetch).toHaveBeenCalledTimes(1);expect(h.submitted).toHaveBeenCalledExactlyOnceWith('detached-job');
+  expect((fetch.mock.calls[0]![1]!.body as FormData).get('callback_url')).toBe('http://api.test/callback/test');
+ });
+ it('bounds a compensation check to one pending status GET',async()=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>json({job_id:'existing-job',state:'running'}));
+  await expect(new DocumentExtractionClient(configuration('async'),fetch).extract(files,ctx,{...hooks(),singleStep:true},'existing-job')).rejects.toMatchObject({phase:'external'});
+  expect(fetch).toHaveBeenCalledTimes(1);expect(fetch.mock.calls[0]![1]!.method).toBe('GET');
  });
  it('resumes a persisted async job using GET only',async()=>{
   const fetch=vi.fn<typeof globalThis.fetch>(async url=>json(String(url).endsWith('/result')?{job_id:'existing-job',state:'completed',result:sampleExtraction()}:{job_id:'existing-job',state:'completed',result_state:'available'})),h=hooks();

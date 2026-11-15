@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { EnabledDocumentExtractionConfig } from '../config/document-extraction.js';
 import { assertCompleteExtractionConfig } from '../config/document-extraction.js';
 import type { ParserContext } from '../lib/document-parser-machine/index.js';
-import { ParserExecutionError } from '../lib/document-parser-machine/index.js';
+import { ParserExecutionError,ParserExecutionDeferred } from '../lib/document-parser-machine/index.js';
 import MarkdownIt from 'markdown-it';
 
 export interface FileContext { source_resource_id: string; parse_run_id: string }
@@ -79,7 +79,10 @@ export function validateExtractionResponse(value: unknown, contexts: readonly (F
 }
 
 export class DocumentExtractionClient {
-  constructor(readonly config: EnabledDocumentExtractionConfig, private readonly fetchImpl: typeof fetch = fetch) { assertCompleteExtractionConfig(config.parameters); }
+  constructor(readonly config: EnabledDocumentExtractionConfig, private readonly fetchImpl: typeof fetch = fetch,private readonly maxInputBytes=200*1024*1024) {
+    if(config.parameters!==null)assertCompleteExtractionConfig(config.parameters);
+    if(!Number.isSafeInteger(maxInputBytes)||maxInputBytes<1||maxInputBytes>2*1024*1024*1024)throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_INPUT_LIMIT');
+  }
   private url(baseUrl: string, path: string): URL { return new URL(baseUrl.replace(/\/$/, '') + path); }
   private async request(url: URL, init: RequestInit, signal: AbortSignal, submitting: boolean, allowPending = false): Promise<{status:number;body:unknown}> {
     let response: Response;
@@ -105,7 +108,7 @@ export class DocumentExtractionClient {
       throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE', 'unknown');
     } finally { void reader.cancel().catch(() => undefined); }
   }
-  async extract(files: readonly ExtractionFile[], context: ParserContext, hooks: { beforeSubmit: () => Promise<void>; submitted: (jobId: string) => Promise<void>;cancellation?:()=>Promise<'send'|'wait'|false> }, resumeJobId?: string): Promise<ExtractionResponse> {
+  async extract(files: readonly ExtractionFile[], context: ParserContext, hooks: { beforeSubmit: () => Promise<void>; submitted: (jobId: string) => Promise<void>;cancellation?:()=>Promise<'send'|'wait'|false>;callbackUrl?:string;singleStep?:boolean;received?:(jobId:string,response:ExtractionResponse)=>Promise<void> }, resumeJobId?: string): Promise<ExtractionResponse> {
     if (!files.length || files.length > 16) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_INVALID', 'settled');
     let total = 0;
     const contexts:Array<FileContext|null>=[];
@@ -115,19 +118,22 @@ export class DocumentExtractionClient {
       total += file.bytes.byteLength;
       contexts.push(independent?null:{source_resource_id:file.source_resource_id!.toLowerCase(),parse_run_id:file.parse_run_id!.toLowerCase()});
     }
-    if (total > 100 * 1024 * 1024 - 128 * 1024) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_TOO_LARGE', 'settled');
+    if (total > this.maxInputBytes) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_TOO_LARGE', 'settled');
     const signal = AbortSignal.any([context.signal, AbortSignal.timeout(this.config.timeoutMs)]);
     let jobId = resumeJobId;
     if (!jobId) {
       const form = new FormData();
       for (const file of files) form.append('files', new Blob([new Uint8Array(file.bytes)], { type: file.mimeType }), file.fileName);
-      form.append('config', JSON.stringify(this.config.parameters)); form.append('file_contexts', JSON.stringify(contexts));
+      if(this.config.parameters!==null)form.append('config', JSON.stringify(this.config.parameters));
+      form.append('file_contexts', JSON.stringify(contexts));
+      if(hooks.callbackUrl)form.append('callback_url',hooks.callbackUrl);
       try{await hooks.beforeSubmit();}catch(error){if(error instanceof DocumentExtractionError)throw error;throw new DocumentExtractionError('DOCUMENT_EXTRACTION_PRE_SUBMISSION_FAILED','settled',true);}
       const response = await this.request(this.url(context.baseUrl, this.config.mode === 'sync' ? '/extract' : '/extract-async'), { method: 'POST', headers: context.headers, body: form }, signal, true);
       if (this.config.mode === 'sync') return validateExtractionResponse(response.body, contexts);
       const id = object(response.body).job_id;
       if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_ID_UNKNOWN', 'unknown');
       jobId = id; await hooks.submitted(id);
+      if(hooks.singleStep)throw new ParserExecutionDeferred('external');
     }
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(jobId)) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_ID_INVALID', 'unknown');
     let cancelling=false;
@@ -160,10 +166,12 @@ export class DocumentExtractionClient {
         if(terminal.job_id!==jobId)throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_MISMATCH','unknown');
         if(received.status===200){
           if(terminal.state!=='completed')throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN','unknown');
-          return validateExtractionResponse(terminal.result,contexts);
+          const result=validateExtractionResponse(terminal.result,contexts);
+          await hooks.received?.(jobId,result);return result;
         }
         if(!['pending','running'].includes(String(terminal.state)))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN','unknown');
       } else if (!['pending', 'running'].includes(String(job.state))) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_STATE_UNKNOWN', 'unknown');
+      if(hooks.singleStep)throw new ParserExecutionDeferred('external');
       try { await sleep(this.config.pollMs, undefined, { signal }); }
       catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN', 'unknown', true); }
     }

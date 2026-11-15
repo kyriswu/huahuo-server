@@ -6,22 +6,26 @@ import type { AppConfig } from '../config/config.js';
 import { createDependencies, isReady, type Dependencies } from '../plugins/dependencies.js';
 import { success, failure, requestTrace, ErrorSchema, HealthSchema } from '../contracts/envelope.js';
 import { DomainError } from '../modules/identity/store.js';
-export interface BuildOptions { config: AppConfig; dependencies?: Dependencies; backgroundHealthy?:()=>boolean; }
-export async function buildBase({ config, dependencies, backgroundHealthy }: BuildOptions) {
+import {closeStateStreams} from '../lib/state-stream.js';
+import { registerMetrics, type ApplicationMetrics } from '../plugins/metrics.js';
+import { registerLifecycle } from '../plugins/lifecycle.js';
+import { RuntimeSettings } from '../modules/runtime-settings/service.js';
+export interface BuildOptions { config: AppConfig; dependencies?: Dependencies; backgroundHealthy?:()=>boolean; backgroundActive?:()=>number; metrics?:ApplicationMetrics; }
+export async function buildBase({ config, dependencies, backgroundHealthy, backgroundActive, metrics }: BuildOptions) {
   const deps = dependencies ?? createDependencies(config);
   const app = Fastify({ logger: {
     level: config.logLevel, base: { service: config.role, instanceId: config.instanceId },
     redact: { paths: ['req.headers.authorization','req.headers.cookie','res.headers.set-cookie','password','token','secret'], censor: '[REDACTED]' },
     serializers: { req: req => ({ method: req.method, route: req.routeOptions?.url }), err: () => ({ type: 'Error', message: 'Internal failure', stack: '' }) },
   }, genReqId: req => requestTrace(req.headers), logController: new LogController({ requestIdLogLabel: 'traceId' }),
-  // RAG queries wait on external embedding/rerank providers and Milvus before
-  // the first response byte. Keep the socket alive longer than the request
-  // deadline so a valid, slow query is not reset as `fetch failed`.
+  // Request timeout bounds receiving the request, not the handler's total work.
   requestTimeout: config.httpRequestTimeoutMs,
   connectionTimeout: config.httpConnectionTimeoutMs,
   bodyLimit: 1048576,
   ajv: { customOptions: { removeAdditional: false } }, forceCloseConnections: 'idle' }).withTypeProvider<TypeBoxTypeProvider>();
-  let stopping = false;
+  registerMetrics(app, config, metrics);
+  const lifecycle = registerLifecycle(app, backgroundActive);
+  const runtimeSettings = deps.pool ? new RuntimeSettings(deps.pool, config) : undefined;
   // App buildCommonHeaders sends JSON Content-Type even for body-less POSTs.
   // Route schemas still reject an absent body wherever fields are required.
   const jsonParser = app.getDefaultJsonParser('error', 'error');
@@ -32,7 +36,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy }: Bui
   });
   await app.register(swagger, { openapi: { info: { title: `Huahuo ${config.role}`, version: '0.1.0' } } });
   app.addHook('onRequest', async (req, reply) => { reply.header('X-Trace-Id', req.id).header('Cache-Control', 'no-store'); });
-  app.addHook('preClose', async () => { stopping = true; });
+  app.addHook('preClose', async () => { closeStateStreams(app);await lifecycle.close(); });
   app.addHook('onClose', async () => { await deps.close(); });
   app.setErrorHandler<FastifyError>((error, req, reply) => {
     if (error instanceof DomainError) {
@@ -47,13 +51,17 @@ export async function buildBase({ config, dependencies, backgroundHealthy }: Bui
   app.setNotFoundHandler((req, reply) => reply.code(404).send(failure('NOT_FOUND', 'Resource not found', req.id)));
   const querystring = Type.Object({}, { additionalProperties: false });
   const response = { 200: HealthSchema, 400: ErrorSchema, 503: ErrorSchema };
-  app.get('/health/live', { schema: { querystring, response } }, async (req, reply) => {
-    if (stopping) return reply.code(503).send(failure('STOPPING', 'Service stopping', req.id, true));
+  app.get('/health/live', { schema: { querystring, response } }, async req => {
     return success({ service: config.role, status: 'live' as const, stage: 'P06' as const, mode: 'asset-knowledge' as const }, req.id);
   });
   app.get('/health/ready', { schema: { querystring, response } }, async (req, reply) => {
-    let ready = false;
-    try { ready = !stopping && (backgroundHealthy?.()??true) && isReady(await deps.check()); } catch { /* fail closed */ }
+    let ready: boolean;
+    try {
+      ready = lifecycle.phase === 'serving' && (backgroundHealthy?.()??true) && isReady(await deps.check());
+      if (ready) await runtimeSettings?.load();
+      // A signal can start draining while dependency/configuration probes await I/O.
+      ready &&= lifecycle.phase === 'serving';
+    } catch { ready = false; }
     if (!ready) return reply.code(503).send(failure('DEPENDENCY_NOT_READY', 'Service dependencies are not ready', req.id, true));
     return success({ service: config.role, status: 'ready' as const, stage: 'P06' as const, mode: 'asset-knowledge' as const }, req.id);
   });

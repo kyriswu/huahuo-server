@@ -100,4 +100,22 @@ pnpm rag:consistency
 
 集成 runner 只启动本项目独立 tmpfs PostgreSQL/Redis/Milvus，不读取开发 `.env`；用真实 BGE tokenizer、确定性 Embedding 替身验证两条正常业务入口、中文/英文/混合检索、App/Agent 契约、局部编辑、部分失败、租约丢失、恢复、删除与越权。真实模型和真实解析供应商没有通过 Mock 测试被声称验证。
 
+### 使用云端 Milvus 验收
+
+本地 Docker 资源不足时，可明确选择已有云端 Milvus。PostgreSQL/Redis 仍由 runner 创建独立临时容器；不会改用 `.env` 中的 SQL 数据库或 OSS/模型服务。
+
+```bash
+# 显式加载连接配置；runner 仅取 MILVUS_ADDRESS/USERNAME/PASSWORD/TLS。
+node --env-file=.env scripts/integration.mjs --milvus-cloud
+# 本机需要 HTTP CONNECT 代理时，单独指定测试进程使用的地址。
+TEST_MILVUS_GRPC_PROXY=http://127.0.0.1:1082 \
+  node --env-file=.env scripts/integration.mjs --milvus-cloud
+```
+
+此模式忽略业务的 MILVUS_DATABASE 和集合绑定，随机创建 `huahuo_test_<32位十六进制>` database 及同批次两个专用 collection。账号需具备新建/删除测试 database 和集合的权限。连接、快照、写入、检索、Schema 检查均使用该测试目标；缺少云端隔离参数会失败，不回退到业务集合。
+
+测试结束后，先核对 database 的服务端 ID、创建时间和集合白名单，再删除本轮新建目标并确认消失；发现身份不符或额外集合则保留并报清理失败。异常退出的本轮库名会留在日志，不自动接管或清理历史测试库。`--milvus` 与 `--milvus-cloud` 互斥。
+
+测试进程不继承普通 gRPC/HTTP 代理；仅使用显式 `TEST_MILVUS_GRPC_PROXY`。容器里的 `host.docker.internal:1082` 与宿主机的 `127.0.0.1:1082` 地址含义不同，不为测试修改真实 `.env`。远端模式输出详细用例进度，单用例上限 30 秒；业务 SQL 和 SDK 超时没有放宽。
+
 本阶段验收与实际重置结果见 `docs/acceptance/knowledge-base.md`；运行和命令原始证据在忽略提交的 `.local/kb-refactor/`。旧切片表、旧视图、旧 Collection 路由与旧分路索引实现均已由新代码替换，不双写、不兼容回读、不补算旧向量。

@@ -10,6 +10,7 @@ import {TextIngestionSourceType} from './types.js';
 import {assertTextEncoding} from './policy.js';
 import {ManagedDocumentExtractor,ManagedExtractionError} from '../ingestion/document-extraction.js';
 import {storageFor} from '../storage/port.js';
+import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 export class TextIngestionError extends Error{constructor(readonly code:string,readonly retryable=false){super(code);}}
 export interface TextIngestionJobRow{id:string;workspace_id:string;created_by:string;source_type:TextIngestionSourceType;raw_content:string|null;origin_resource_uri:string|null;current_task_id:string;content_hash:string|null;artifact_uri:string|null;}
 export interface PreparedTextSource{content:string;format:'text'|'markdown';artifactUri?:string;}
@@ -61,6 +62,6 @@ export class TextIngestionJobs {
    await transaction(this.pool,async tx=>{await this.current(tx,jobId,a);await tx.query("UPDATE text_ingestion_jobs SET ingest_status='chunking' WHERE id=$1",[jobId]);});
    const result=await new KnowledgeIndexJobs(this.pool,this.config,this.dependencies).indexSource({type:'text',id:job.id,revision:job.content_hash!,userId:job.created_by,workspaceId:job.workspace_id,content:job.raw_content!,format:snapshot.format},a,snapshot.keyword);
    await transaction(this.pool,async tx=>{await this.current(tx,jobId,a);await tx.query("UPDATE text_ingestion_jobs SET ingest_status='success',error_msg=NULL,updated_at=now() WHERE id=$1",[jobId]);});return result;
-  }catch(e){await this.pool.query("UPDATE text_ingestion_jobs SET ingest_status='failed',error_msg=$3 WHERE id=$1 AND current_task_id=$2",[jobId,a.task.id,e instanceof TextIngestionError||e instanceof ManagedExtractionError?e.code:'TEXT_INGESTION_FAILED']);throw e;}
+  }catch(e){if(e instanceof ParserExecutionDeferred)throw e;await this.pool.query("UPDATE text_ingestion_jobs SET ingest_status='failed',error_msg=$3 WHERE id=$1 AND current_task_id=$2",[jobId,a.task.id,e instanceof TextIngestionError||e instanceof ManagedExtractionError?e.code:'TEXT_INGESTION_FAILED']);throw e;}
  }
 }

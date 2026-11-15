@@ -15,12 +15,16 @@ for(const role of roles){
  assert(!vars.DATABASE_MIGRATION_URL && !vars.POSTGRES_BOOTSTRAP_PASSWORD,'MIGRATION_SECRET_EXPOSED');
  assert(new URL(vars.DATABASE_URL).username===`huahuo_${role==='api-server'?'api':role}`,'ROLE_DATABASE_MISMATCH');
  assert(!c.Mounts.some(m=>['huahuo-ai','huahuo-app'].some(name=>m.Source.includes(name))),'APP_MOUNTED');
- if(['worker','scheduler'].includes(role)) assert(Object.keys(c.HostConfig.PortBindings??{}).length===0,'BACKGROUND_PORT_PUBLISHED');
+ if(['worker','scheduler'].includes(role)) {
+  const bindings=c.HostConfig.PortBindings??{};
+  assert(Object.keys(bindings).every(port=>port==='9464/tcp'),'BACKGROUND_BUSINESS_PORT_PUBLISHED');
+  assert((bindings['9464/tcp']??[]).every(binding=>binding.HostIp===(env.METRICS_BIND_HOST??'127.0.0.1')),'METRICS_BIND_HOST_MISMATCH');
+ }
  if(['admin','scheduler'].includes(role)) assert(!c.Mounts.some(m=>m.Destination==='/app/var/storage'),'UNEXPECTED_STORAGE_MOUNT');
 }
 const pg=inspect('postgres'),redis=inspect('redis');for(const c of [pg,redis])assert(Object.keys(c.HostConfig.PortBindings??{}).length===0,'DATASTORE_PORT_PUBLISHED');
 assert(inspect('migrate').State.ExitCode===0 && inspect('migrate').State.Status==='exited','MIGRATION_NOT_COMPLETE');
-evidence.push('4 distinct nonroot role containers; dedicated DB users; no datastore/background host ports; migrate Exited(0)');
+evidence.push('4 distinct nonroot role containers; dedicated DB users; no datastore/background business host ports; optional dedicated metrics ports; migrate Exited(0)');
 // Verify each stop affects only that role and graceful exit actually completes.
 for(const role of roles){
  try {

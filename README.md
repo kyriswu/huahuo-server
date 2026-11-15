@@ -71,3 +71,7 @@ ECI GPU 抢占式实例底层模块位于 `src/integrations/gpu-spot/`，默认�
 文档解析运行库位于 `src/lib/document-parser-machine/`，已连接现有文件Worker和FILE_UPLOAD：节点由Admin管理，Redis统一去重、排队和并发，空闲后由Scheduler节省停机；也支持常驻API。部署总开关默认关闭，配置参考主 `.env.example`；`pnpm document-parser:machine status` 只读查询协调状态，操作见[解析机手册](docs/runbooks/document-parser-machine.md)。本机不在解析节点内网，真实PDF/Office验证由内网测试机完成。
 
 北京 T4 单卡的四档有序候选、指定 Nginx 镜像与三交换机配置已保存在本地 `.env.gpu-spot`；一次申请由 ECI 按规格优先级和多可用区策略调度，目标一台实例。凭据按用户指定读取根 `.env` 的 `ALIYUN_RAM_ACCESS_KEY_ID/SECRET`。构建后 `pnpm gpu:preflight` 只读核对网络归属，配置仍可保持 disabled；真实网络预检通过不代表 GPU 库存、镜像运行或计算已验证。
+
+Prometheus 使用独立指标端口 9464–9467，环境标签读取现有 `.env` 的 `APP_ENV`；测试机设 `APP_ENV=test` 和私网 `METRICS_BIND_HOST`。抓取配置及成功率/P95 查询见 [指标接入手册](docs/runbooks/prometheus.md)。
+
+发布冒烟与 GitHub Actions 调用方式见[发布冒烟手册](docs/runbooks/release-smoke.md)；`Server CI` 在 PR、main push 或手动运行时执行隔离检查，生产验收由部署完成后调用。

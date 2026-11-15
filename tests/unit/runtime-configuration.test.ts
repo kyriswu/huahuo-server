@@ -1,19 +1,23 @@
 import {describe,it,expect,vi} from 'vitest';
 import {config} from '../helpers.js';
-import {defaults,validateValues,applyValues,rejectSecrets} from '../../src/modules/runtime-settings/registry.js';
+import {defaults,validateValues,validateStoredValues,applyValues,rejectSecrets,RUNTIME_CONFIGURATION_SCHEMA_KEY,RUNTIME_CONFIGURATION_SCHEMA_VERSION} from '../../src/modules/runtime-settings/registry.js';
 import {extractionConfig} from '../support/extraction-config.js';
-import {nodeConfig,type ProcessingNode} from '../../src/modules/processing-nodes/model.js';
+import {nodeConfig,nodeDocumentConfig,type ProcessingNode} from '../../src/modules/processing-nodes/model.js';
 import {loadProcessingNodesConfig} from '../../src/config/processing-nodes.js';
 import {kbSnapshot,kbEmbedding} from '../../src/modules/kb/profile.js';
 
 const node:ProcessingNode={id:'11111111-1111-4111-8111-111111111111',name:'GPU node',capabilities:['document'],resourceClass:'gpu',mode:'ecs',regionId:'cn-beijing',instanceId:'i-unit12345678',privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:false,revision:1};
 describe('typed runtime registry (no database/cloud)',()=>{
- it('validates the complete document override and freezes its hash/mode',()=>{
-  const extraction=extractionConfig('async');if(!extraction.enabled)throw Error('fixture');
-  const c=applyValues(config(),{'document.mode':'async','document.parameters':extraction.parameters,'document.pollMs':100},8);
-  expect(c.documentExtraction).toMatchObject({enabled:true,configHash:extraction.configHash,pollMs:100});expect(c.runtimeRevision).toBe(8);
-  expect(()=>validateValues({'document.mode':'async'},config())).toThrow('CONFIGURATION_DOCUMENT_REQUIRED');
-  expect(()=>validateValues({'document.parameters':{output_format:'markdown'}},config())).toThrow('CONFIGURATION_DOCUMENT_INVALID');
+ it('uses service defaults for deployed ECS and keeps overrides local to each node',()=>{
+  const cpu={...node,resourceClass:'cpu' as const},defaults=nodeDocumentConfig(cpu);
+  expect(defaults).toMatchObject({parameters:null,mode:'async',timeoutMs:3120000});
+  const extraction=extractionConfig('async');
+  const gpu={...node,documentApi:{mode:'async' as const,parameters:extraction.parameters,timeoutSeconds:3200,pollMs:100,maxResponseBytes:67108864}};
+  expect(nodeDocumentConfig(gpu)).toMatchObject({parameters:extraction.parameters,mode:'async',pollMs:100,timeoutMs:3200000});
+  expect(nodeDocumentConfig(cpu)).toEqual(defaults);
+  expect(()=>nodeConfig({...gpu,documentApi:{...gpu.documentApi,parameters:{output_format:'markdown'}}},loadProcessingNodesConfig({}))).toThrow('PROCESSING_NODE_INVALID');
+  expect(()=>nodeDocumentConfig({...gpu,documentApi:{...gpu.documentApi,parameters:{api_key:'must-not-persist'}}})).toThrow('CONFIGURATION_SECRET_FORBIDDEN');
+  expect(()=>validateValues({'document.mode':'async'},config())).toThrow('CONFIGURATION_KEY_UNKNOWN');
  });
  it('rejects secret field variants, signed URLs, unknown keys, production fixtures and inconsistent bounds',()=>{
   for(const value of [{ocr:{ALIYUN_RAM_ACCESS_KEY_SECRET:'no'}},{ocr:{apiKey:'no'}},{url:'https://a:b@host.test/'},{url:'https://host.test/a?Signature=no'}])expect(()=>rejectSecrets(value)).toThrow('CONFIGURATION_SECRET_FORBIDDEN');
@@ -22,6 +26,32 @@ describe('typed runtime registry (no database/cloud)',()=>{
   expect(()=>validateValues({'storage.maxUploadBytes':2000},{...config(),uploadHardMaxBytes:1000})).toThrow('CONFIGURATION_INVALID');
  });
  it('creates independent default JSON snapshots',()=>{const a=defaults(),b=defaults();a['tasks.maxAttempts']=9;expect(b['tasks.maxAttempts']).toBe(3);});
+ it('projects only supported stored fields within the same schema while keeping Admin input strict',()=>{
+  const base=config(),stored={[RUNTIME_CONFIGURATION_SCHEMA_KEY]:RUNTIME_CONFIGURATION_SCHEMA_VERSION,'tasks.maxAttempts':5,'tasks.futureOptional':{enabled:false,weights:[1,2]}};
+  const before=structuredClone(stored),values=validateStoredValues(stored,base);
+  expect(values['tasks.maxAttempts']).toBe(5);expect(values['tasks.retryBaseMs']).toBe(1000);
+  expect(Object.hasOwn(values,'tasks.futureOptional')).toBe(false);expect(values).not.toHaveProperty(RUNTIME_CONFIGURATION_SCHEMA_KEY);
+  expect(applyValues(base,values,17).taskPolicy.maxAttempts).toBe(5);expect(stored).toEqual(before);
+  expect(()=>validateValues({'tasks.futureOptional':false},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
+  expect(()=>validateValues({[RUNTIME_CONFIGURATION_SCHEMA_KEY]:1},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
+ });
+ it('treats absent schema metadata as v1 and refuses unsupported or malformed versions',()=>{
+  const base=config();expect(validateStoredValues({},base)).toEqual(defaults());
+  for(const version of [0,2,1.5,'1',null,true,undefined]){
+   expect(()=>validateStoredValues({[RUNTIME_CONFIGURATION_SCHEMA_KEY]:version},base)).toThrow('CONFIGURATION_VERSION_UNSUPPORTED');
+  }
+ });
+ it('keeps security and known-value validation on forward-compatible stored reads',()=>{
+  const base=config(),future={'tasks.futureOptional':{enabled:false}};
+  for(const invalid of [{'tasks.maxAttempts':99},{'tasks.maxAttempts':'3'},{'tasks.retryBaseMs':5000,'tasks.retryMaxMs':1000},{'storage.maxUploadBytes':2147483649}]){
+   expect(()=>validateStoredValues({...future,...invalid},base)).toThrow('CONFIGURATION_INVALID');
+  }
+  expect(()=>validateStoredValues({...future,'features.tagProvider':'deterministic'},{...base,appEnv:'production'})).toThrow('CONFIGURATION_TEST_PROVIDER_FORBIDDEN');
+  expect(()=>validateStoredValues({...future,'storage.maxUploadBytes':2000},{...base,uploadHardMaxBytes:1000})).toThrow('CONFIGURATION_INVALID');
+  for(const unknown of [{apiKey:'must-not-persist'},{nested:[{url:'https://example.test/file?Signature=must-not-persist'}]}]){
+   expect(()=>validateStoredValues({'tasks.futureOptional':unknown},base)).toThrow('CONFIGURATION_SECRET_FORBIDDEN');
+  }
+ });
  it('keeps the embedding timeout bound to its build snapshot after a configuration change',async()=>{
   const base=config();Object.assign(base.rag,{providerMode:'live',embeddingBaseUrl:'https://embedding.test/v1',embeddingApiKey:'synthetic-fixture-key'});
   const snapshot=kbSnapshot(applyValues(base,{'rag.embeddingTimeoutMs':2000},1),'note-hybrid','markdown');

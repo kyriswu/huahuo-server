@@ -32,8 +32,13 @@ export class AssetService {
  async getNote(scope:Scope,wid:string,id:string,revisionId?:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);const row=(await tx.query('SELECT note_revision_id,state FROM notes WHERE note_id=$1 AND workspace_id=$2 FOR SHARE',[id,wid])).rows[0];if(!row)throw new DomainError(404,'NOTE_NOT_FOUND');if(revisionId&&(row.note_revision_id!==revisionId||row.state!=='active'))throw new DomainError(409,'NOTE_REVISION_MISMATCH');return this.noteDto(tx,wid,id);});}
  private async task(tx:pg.PoolClient,scope:Scope,wid:string,noteId:string,revisionId:string){
   const tagSetVersion=Number((await tx.query('SELECT tag_set_version FROM notes WHERE note_id=$1 AND workspace_id=$2',[noteId,wid])).rows[0]?.tag_set_version??0);
-  const existing=(await tx.query(`SELECT c.task_id FROM content_jobs c JOIN tasks t ON t.id=c.task_id JOIN task_inputs i ON i.id=t.input_id
-    WHERE c.note_id=$1 AND c.note_revision_id=$2 AND c.operation='tag_extract' AND t.state IN ('queued','running','retry_scheduled') AND (i.body::jsonb->>'tagSetVersion')::bigint=$3 LIMIT 1`,[noteId,revisionId,tagSetVersion])).rows[0];
+  // task_inputs also contains plain text. Materialize the scoped tag jobs before
+  // parsing their JSON so the planner cannot cast an unrelated task's body.
+  const existing=(await tx.query(`WITH eligible AS MATERIALIZED (
+    SELECT c.task_id,i.body FROM content_jobs c JOIN tasks t ON t.id=c.task_id JOIN task_inputs i ON i.id=t.input_id
+    WHERE c.note_id=$1 AND c.note_revision_id=$2 AND c.operation='tag_extract' AND t.kind='asset.tag-extract'
+      AND t.state IN ('queued','running','retry_scheduled') AND t.user_id=$4 AND t.workspace_id=$5
+  ) SELECT task_id FROM eligible WHERE (body::jsonb->>'tagSetVersion')::bigint=$3 LIMIT 1`,[noteId,revisionId,tagSetVersion,scope.userId,wid])).rows[0];
   if(existing)return existing.task_id as string;
   const inputId=randomUUID(),taskId=randomUUID();
   await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,scope.userId,wid,JSON.stringify({noteId,revisionId,tagSetVersion})]);
