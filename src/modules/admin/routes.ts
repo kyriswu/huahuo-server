@@ -76,7 +76,7 @@ export function registerAdminRoutes(
  app.get('/admin/api/v1/resources/:resourceId',{preHandler:auth,schema:{params:Type.Object({resourceId:Id},Strict),response:{200:Envelope(Type.Object({resourceId:Id,userId:Id,workspaceId:Id,fileName:Type.String(),mimeType:Type.String(),sizeBytes:Type.Integer(),status:Type.String(),processingStatus:Type.String(),createdAt:Type.String()})),...errors}}},async req=>success(await service.resource(scope(req),(req.params as {resourceId:string}).resourceId,req.id),req.id));
  app.get('/admin/api/v1/configuration',{preHandler:auth,schema:{response:{200:Envelope(ConfigurationResponse),...errors}}},async req=>success(await configuration.settings.view(),req.id));
  app.put('/admin/api/v1/configuration/:category',{preHandler:[auth,csrf],bodyLimit:262144,schema:{
-  params:Type.Object({category:Type.Union(['rag','tasks','storage','billing','features'].map(c=>Type.Literal(c)))},Strict),
+  params:Type.Object({category:Type.Union(['rag','tasks','storage','billing','features','deployment'].map(c=>Type.Literal(c)))},Strict),
   body:Type.Object({revision:Type.Integer({minimum:1}),values:Type.Record(Type.String(),Type.Unknown())},Strict),
   response:{200:Envelope(Type.Object({revision:Type.Integer(),values:Type.Record(Type.String(),Type.Unknown()),updatedAt:Type.String()})),...errors},
  }},async req=>{const b=req.body as {revision:number;values:Values};return success(await configuration.settings.save((req.params as {category:Category}).category,b.values,b.revision,scope(req),req.id),req.id);});

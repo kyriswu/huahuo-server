@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../../src/config/config.js';
@@ -8,6 +8,7 @@ import { migrate } from '../../src/db/migrate.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { checkReleaseHistory, runDatabaseAssertions, verifyReleaseDatabase } from '../../src/release/gates.js';
 import { readReleasePlan, type ReleasePlan } from '../../src/release/plan.js';
+import { loadMigrationFiles } from '../../src/db/migration-files.js';
 
 const migrationUrl = process.env.TEST_DATABASE_MIGRATION_URL;
 const apiUrl = process.env.TEST_DATABASE_API_URL;
@@ -23,6 +24,8 @@ const pool = poolFor(migrator);
 const suffix = randomBytes(8).toString('hex');
 const table = `release_gate_probe_${suffix}`;
 const historyBackup = `release_gate_history_${suffix}`;
+const files = loadMigrationFiles(), current = files.at(-1)!.version, next = current + 1;
+const expectedHistory = files.map(file => ({ version: file.version }));
 let directory: string;
 let plan: ReleasePlan;
 async function loadFixture(): Promise<ReleasePlan> {
@@ -36,7 +39,7 @@ describe('release database gates on real isolated PostgreSQL', () => {
     directory = await mkdtemp(join(tmpdir(), 'huahuo-release-gate-pg-'));
     await mkdir(join(directory, 'migrations'));
     await mkdir(join(directory, 'scripts/release/changes/gate-test'), { recursive: true });
-    await writeFile(join(directory, 'migrations/0001_initial_schema.sql'), await readFile('migrations/0001_initial_schema.sql'));
+    for (const file of files) await writeFile(join(directory, 'migrations', file.name), file.sql);
     plan = { version: 1, id: 'gate-test', baseRevision: '1'.repeat(40), services: ['api-server', 'worker', 'scheduler', 'admin'],
       database: { migrations: [], verifySql: null, dataChange: { mode: 'none', reason: '' } },
       configuration: { mode: 'reuse', changes: [], reviewedFiles: [] }, dependencies: [],
@@ -99,24 +102,25 @@ describe('release database gates on real isolated PostgreSQL', () => {
       await expect(checkReleaseHistory(migrator, await loadFixture(), directory)).rejects.toThrow('RELEASE_DATABASE_NOT_INITIALIZED');
       expect((await pool.query("SELECT to_regclass('public.schema_migrations')::text AS name")).rows[0]?.name).toBeNull();
     } finally { await pool.query(`ALTER TABLE public.${historyBackup} RENAME TO schema_migrations`); }
-    expect((await pool.query('SELECT version FROM public.schema_migrations ORDER BY version')).rows).toEqual([{ version: 1 }]);
+    expect((await pool.query('SELECT version FROM public.schema_migrations ORDER BY version')).rows).toEqual(expectedHistory);
   });
   it('blocks undeclared pending migrations and post-migration verification until they are applied', async () => {
-    const path = join(directory, 'migrations/0002_pending.sql');
+    const filename = `${String(next).padStart(4, '0')}_pending.sql`;
+    const path = join(directory, 'migrations', filename);
     await writeFile(path, `CREATE TABLE release_gate_never_created_${suffix}(id integer);`);
     try {
       await expect(checkReleaseHistory(migrator, await loadFixture(), directory)).rejects.toThrow('RELEASE_UNDECLARED_MIGRATION');
-      plan.database.migrations = ['0002_pending.sql'];
-      await expect(checkReleaseHistory(migrator, await loadFixture(), directory)).resolves.toMatchObject({ applied: [1], pending: [2], current: 1, target: 2 });
+      plan.database.migrations = [filename];
+      await expect(checkReleaseHistory(migrator, await loadFixture(), directory)).resolves.toMatchObject({ applied: files.map(file => file.version), pending: [next], current, target: next });
       await expect(verifyReleaseDatabase(migrator, await loadFixture(), directory)).rejects.toThrow('RELEASE_MIGRATIONS_PENDING');
       expect((await pool.query("SELECT to_regclass($1)::text AS name", [`public.release_gate_never_created_${suffix}`])).rows[0]?.name).toBeNull();
-      expect((await pool.query('SELECT version FROM public.schema_migrations ORDER BY version')).rows).toEqual([{ version: 1 }]);
+      expect((await pool.query('SELECT version FROM public.schema_migrations ORDER BY version')).rows).toEqual(expectedHistory);
     } finally { plan.database.migrations = []; await rm(path); }
   });
   it('runs the fixed zero-foreign-key assertion and the declared SQL with the actual application account', async () => {
     plan.database.verifySql = 'scripts/release/changes/gate-test/verify-db.sql';
     await writeFile(join(directory, plan.database.verifySql), `SELECT 'fixture_read' AS check_name,count(*)=1 AS ok FROM public.${table}`);
-    try { await expect(verifyReleaseDatabase(applicationRole, await loadFixture(), directory)).resolves.toEqual({ assertionCount: 2, current: 1 }); }
+    try { await expect(verifyReleaseDatabase(applicationRole, await loadFixture(), directory)).resolves.toEqual({ assertionCount: 2, current }); }
     finally { plan.database.verifySql = null; }
   });
 });

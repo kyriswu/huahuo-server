@@ -31,7 +31,15 @@ export async function checkReleaseHistory(config: AppConfig, plan: ReleasePlan, 
   if (history.current === 0) fail('RELEASE_DATABASE_NOT_INITIALIZED');
   const declared = new Set(plan.database.migrations.map(file => Number(file.slice(0, 4))));
   if (history.pending.some(version => !declared.has(version))) fail('RELEASE_UNDECLARED_MIGRATION');
-  return history;
+  // This is a read-only policy lookup, before the new migrations are required.
+  // Missing optional keys use the candidate's reviewed registry defaults.
+  const pool = poolFor(config); pool.on('error', () => undefined);
+  try {
+    const state = await new RuntimeSettings(pool, config).load();
+    const drainTimeoutMs = Number(state.values['deployment.drainTimeoutMs']);
+    if (!Number.isSafeInteger(drainTimeoutMs) || drainTimeoutMs < 600000 || drainTimeoutMs > 3600000) fail('RELEASE_DRAIN_POLICY_INVALID');
+    return { ...history, drainTimeoutMs };
+  } finally { await pool.end(); }
 }
 
 /** One prepared SELECT in a read-only transaction; false/empty assertions fail. */
@@ -81,7 +89,8 @@ export async function checkReleaseRuntime(config: AppConfig, root = process.cwd(
       await new Promise(done => setTimeout(done, 250));
     }
     if (!ready) fail('RELEASE_RUNTIME_NOT_READY');
-    await new RuntimeSettings(dependencies.pool as pg.Pool, config).load();
+    const state = await new RuntimeSettings(dependencies.pool as pg.Pool, config).load();
+    return { drainTimeoutMs: Number(state.values['deployment.drainTimeoutMs']) };
   } finally { await dependencies.close(); }
 }
 

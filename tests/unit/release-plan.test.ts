@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -94,6 +94,33 @@ describe('reviewed release plan', () => {
     await expect(validateReleasePlan(plan, root)).resolves.toMatchObject({ id: plan.id });
     plan.configuration.changes[0]!.operation = 'change';
     await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+  });
+  it('reuses the successful ENV snapshot after reviewed code stops reading optional retired keys', async () => {
+    await put('src/config/config.ts', 'export const timeout = process.env.SHUTDOWN_TIMEOUT_MS;\n');
+    await put('compose.yaml', 'services:\n  worker:\n    stop_grace_period: ${STOP_GRACE_PERIOD}\n');
+    const snapshot = 'SHUTDOWN_TIMEOUT_MS=300000\nSTOP_GRACE_PERIOD=330s\n';
+    await put('successful.env', snapshot);
+    plan.baseRevision = commit();
+    await put('src/config/config.ts', "export const timeoutSource = 'database-setting';\n");
+    await put('compose.yaml', 'services:\n  worker: {}\n');
+    commit();
+    plan.configuration.changes = ['SHUTDOWN_TIMEOUT_MS', 'STOP_GRACE_PERIOD'].map(key => ({
+      key, operation: 'remove', roles: ['worker'], required: false, hasDefault: false,
+    }));
+    await save();
+    await expect(validateReleasePlan(await readReleasePlan(root), root)).rejects.toThrow('RELEASE_PLAN_CONFIG_REVIEW_REQUIRED');
+    plan.configuration.reviewedFiles = ['src/config/config.ts', 'compose.yaml'];
+    await save();
+    await expect(validateReleasePlan(await readReleasePlan(root), root)).resolves.toMatchObject({ id: plan.id });
+    expect(await readFile(join(root, 'successful.env'), 'utf8')).toBe(snapshot);
+  });
+  it.each([false, true])('still requires candidate ENV for a required removal, hasDefault=%s', async hasDefault => {
+    plan.configuration.changes = [{ key: 'REQUIRED_VALUE', operation: 'remove', roles: ['worker'], required: true, hasDefault }];
+    await save();
+    await expect(readReleasePlan(root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+    plan.configuration.mode = 'candidate';
+    await save();
+    await expect(validateReleasePlan(await readReleasePlan(root), root)).resolves.toMatchObject({ id: plan.id });
   });
   it('accepts reviewed small inline data changes without a blanket SQL/DML ban', async () => {
     await put('migrations/0002_config_fix.sql', 'UPDATE fixture SET id=2 WHERE id=1;'); await verifyFile(); commit();

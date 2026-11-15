@@ -80,7 +80,8 @@ function parsePlan(input: unknown): ReleasePlan {
     const requiredRoles = uniqueStrings(change.roles, 5);
     if (!requiredRoles.length || requiredRoles.some(role => ![...runtimeRoles, 'migrate'].includes(role))) fail();
   }
-  if (configuration.mode !== 'candidate' && configuration.changes.some(item => item.operation !== 'add' || !item.hasDefault)) fail();
+  if (configuration.mode !== 'candidate' && configuration.changes.some(item =>
+    !((item.operation === 'add' && item.hasDefault) || (item.operation === 'remove' && !item.required)))) fail();
   if (uniqueStrings(configuration.reviewedFiles, 512).some(path => !repositoryPath(path))) fail();
   if (!Array.isArray(plan.dependencies) || plan.dependencies.length > 64) fail();
   const names = new Set<string>();

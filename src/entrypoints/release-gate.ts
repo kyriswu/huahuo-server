@@ -14,7 +14,7 @@ try {
     if (role !== 'migrate') throw new Error('RELEASE_MIGRATOR_REQUIRED');
     result = await checkReleaseHistory(config, plan);
   } else if (mode === 'db-verify') result = await verifyReleaseDatabase(config, plan);
-  else if (mode === 'runtime') await checkReleaseRuntime(config);
+  else if (mode === 'runtime') result = await checkReleaseRuntime(config);
   else if (mode === 'external') {
     if (role !== 'api-server') throw new Error('RELEASE_API_ROLE_REQUIRED');
     result = await checkReleaseExternal(plan);

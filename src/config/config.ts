@@ -17,7 +17,6 @@ export interface AppConfig {
   queuePrefix:string; workerQueues:QueueName[]; taskLeaseMs:number; taskRedeliveryMs:number; schedulerIntervalMs:number; demoTasks:boolean; testTaskDelayMs:number;
   role: Role; host: string; port: number; databaseUrl: string; poolMax: number;
   httpRequestTimeoutMs: number; httpConnectionTimeoutMs: number;
-  shutdownTimeoutMs: number;
   ssl: false | { rejectUnauthorized: true; ca?: string };
   statementTimeout: number; redisCacheUrl: string; redisQueueUrl: string;
   schemaMinVersion: number; instanceId: string; logLevel: string;
@@ -224,7 +223,6 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     port: integer('PORT', ['worker','scheduler'].includes(role) ? 3100 : 3000, 1, 65535),
     databaseUrl, poolMax: integer('DATABASE_POOL_MAX', role === 'migrate' ? 1 : 5, 1, 30),
     httpRequestTimeoutMs, httpConnectionTimeoutMs,
-    shutdownTimeoutMs: integer('SHUTDOWN_TIMEOUT_MS', role === 'scheduler' ? 30000 : 300000, 1000, 3600000),
     ssl: sslMode === 'verify-full' ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false,
     statementTimeout: integer('DATABASE_STATEMENT_TIMEOUT_MS', role === 'migrate' ? 30000 : 5000, 100, 60000),
     redisCacheUrl: role === 'migrate' ? '' : url('REDIS_CACHE_URL', ['redis:', 'rediss:']),

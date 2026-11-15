@@ -18,4 +18,12 @@ UNION ALL
 SELECT 'task_owner_lookup_index', EXISTS (
   SELECT 1 FROM pg_index
   WHERE indexrelid=to_regclass('public.tasks_scope') AND indisvalid AND indisready
+)
+UNION ALL
+SELECT 'deployment_drain_budget', EXISTS (
+  SELECT 1 FROM public.runtime_configuration
+  WHERE singleton=true
+    AND jsonb_typeof("values"->'deployment.drainTimeoutMs')='number'
+    AND ("values"->>'deployment.drainTimeoutMs')::numeric BETWEEN 600000 AND 3600000
+    AND mod(("values"->>'deployment.drainTimeoutMs')::numeric,1)=0
 );

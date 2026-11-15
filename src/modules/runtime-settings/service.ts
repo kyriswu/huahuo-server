@@ -3,10 +3,14 @@ import {AsyncLocalStorage} from 'node:async_hooks';
 import {randomUUID} from 'node:crypto';
 import type {AppConfig} from '../../config/config.js';
 import {DomainError,transaction} from '../identity/store.js';
-import {applyValues,settings,validateValues,validateStoredValues,type Values,type Category} from './registry.js';
+import {applyValues,settings,validateValues,validateStoredValues,DEFAULT_DRAIN_TIMEOUT_MS,DRAIN_TIMEOUT_KEY,type Values,type Category} from './registry.js';
 import {assertSuperadmin,type AdminScope} from '../admin/service.js';
 const context=new AsyncLocalStorage<AppConfig>();
 const bases=new WeakMap<AppConfig,AppConfig>();
+const drainSnapshots=new WeakMap<AppConfig,{revision:number;timeoutMs:number}>();
+const rememberDrainSnapshot=(base:AppConfig,values:Values,revision:number)=>{
+ if(revision>=(drainSnapshots.get(base)?.revision??-1))drainSnapshots.set(base,{revision,timeoutMs:Number(values[DRAIN_TIMEOUT_KEY])});
+};
 export const currentRuntimeConfig=()=>context.getStore();
 const dynamicKeys=new Set<PropertyKey>(['runtimeRevision','maxUploadBytes','storageQuotaBytes','billingPolicyVersion','tagExtractorProvider','taskPolicy']);
 const ragKeys=['enabled','maxSourceBytes','downloadTimeoutMs','plainTextMaxChars','embeddingBatchSize','indexingConcurrency','embeddingTimeoutMs','embeddingMaxRetries','rerankTimeoutMs','noteRerankBudgetMs'] as const;
@@ -21,10 +25,20 @@ export const scopedConfig=(base:AppConfig):AppConfig=>{const proxy=new Proxy(bas
 export class RuntimeSettings {
  private readonly base:AppConfig;
  constructor(private readonly pool:pg.Pool,base:AppConfig){this.base=bases.get(base)??base;}
+ drainTimeoutSnapshotMs(){return drainSnapshots.get(this.base)?.timeoutMs??DEFAULT_DRAIN_TIMEOUT_MS;}
+ async readDrainTimeoutMs():Promise<number>{
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try{return await Promise.race([
+   this.load().then(()=>this.drainTimeoutSnapshotMs()),
+   new Promise<number>(resolve=>{timer=setTimeout(()=>resolve(this.drainTimeoutSnapshotMs()),1000);}),
+  ]);}catch(error){return error instanceof DomainError&&error.code==='CONFIGURATION_UNAVAILABLE'?DEFAULT_DRAIN_TIMEOUT_MS:this.drainTimeoutSnapshotMs();}
+  finally{if(timer)clearTimeout(timer);}
+ }
  async load(){
   const row=(await this.pool.query('SELECT revision,"values",updated_at FROM runtime_configuration WHERE singleton=true')).rows[0];
   if(!row)throw new DomainError(503,'CONFIGURATION_UNAVAILABLE');
   const values=validateStoredValues(row.values,this.base);
+  rememberDrainSnapshot(this.base,values,Number(row.revision));
   return {revision:Number(row.revision),values,updatedAt:(row.updated_at as Date).toISOString()};
  }
  async run<T>(execute:()=>Promise<T>):Promise<T>{const loaded=await this.load();return context.run(applyValues(this.base,loaded.values,loaded.revision),execute);}
@@ -38,7 +52,7 @@ export class RuntimeSettings {
  async save(category:Category,patch:Values,expectedRevision:number,scope:AdminScope,traceId:string){
   if(!patch||typeof patch!=='object'||Array.isArray(patch))throw new DomainError(400,'CONFIGURATION_INVALID');
   if(!Object.keys(patch).length||Object.keys(patch).some(key=>settings.find(d=>d.key===key)?.category!==category))throw new DomainError(400,'CONFIGURATION_CATEGORY_INVALID');
-  return transaction(this.pool,async tx=>{
+  const result=await transaction(this.pool,async tx=>{
    await assertSuperadmin(tx,scope);
    const row=(await tx.query('SELECT * FROM runtime_configuration WHERE singleton=true FOR UPDATE')).rows[0];
    if(!row||Number(row.revision)!==expectedRevision)throw new DomainError(409,'CONFIGURATION_CONFLICT');
@@ -55,5 +69,7 @@ export class RuntimeSettings {
    await tx.query('INSERT INTO admin_audit_events(id,admin_id,action,reason,trace_id) VALUES($1,$2,$3,$4,$5)',[randomUUID(),scope.adminId,'configuration.update',JSON.stringify({category,before,after:patch,revision:result.rows[0].revision}),traceId]);
    return {revision:Number(result.rows[0].revision),values,updatedAt:result.rows[0].updated_at.toISOString()};
   });
+  rememberDrainSnapshot(this.base,result.values,result.revision);
+  return result;
  }
 }

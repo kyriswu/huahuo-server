@@ -2,22 +2,147 @@
   "version": 1,
   "id": "20261115-standard-release",
   "baseRevision": "1f7adfdaf02dd6d0733f7afa7f87a25a7c3f07da",
-  "services": ["api-server", "admin", "worker", "scheduler"],
+  "services": [
+    "api-server",
+    "admin",
+    "worker",
+    "scheduler"
+  ],
   "database": {
-    "migrations": [],
+    "migrations": [
+      "0002_deployment_drain_timeout.sql"
+    ],
     "verifySql": "scripts/release/changes/20261115-standard-release/verify-db.sql",
-    "dataChange": { "mode": "none", "reason": "本期改进发布执行与校验，不改变业务数据库结构或数据。" }
+    "dataChange": {
+      "mode": "inline",
+      "reason": "只在 runtime_configuration 的既有单行中补入缺失的部署排空时长默认值；最多更新一行，保留已有值，逐文件事务且有锁和 SQL 预算。"
+    }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [
-      { "key": "MIGRATION_STATEMENT_TIMEOUT_MS", "operation": "add", "roles": ["migrate"], "required": false, "hasDefault": true },
-      { "key": "MIGRATION_LOCK_TIMEOUT_MS", "operation": "add", "roles": ["migrate"], "required": false, "hasDefault": true }
+      {
+        "key": "MIGRATION_STATEMENT_TIMEOUT_MS",
+        "operation": "add",
+        "roles": [
+          "migrate"
+        ],
+        "required": false,
+        "hasDefault": true
+      },
+      {
+        "key": "MIGRATION_LOCK_TIMEOUT_MS",
+        "operation": "add",
+        "roles": [
+          "migrate"
+        ],
+        "required": false,
+        "hasDefault": true
+      },
+      {
+        "key": "SHUTDOWN_TIMEOUT_MS",
+        "operation": "remove",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "API_SHUTDOWN_TIMEOUT_MS",
+        "operation": "remove",
+        "roles": [
+          "api-server"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "API_STOP_GRACE_PERIOD",
+        "operation": "remove",
+        "roles": [
+          "api-server"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "ADMIN_SHUTDOWN_TIMEOUT_MS",
+        "operation": "remove",
+        "roles": [
+          "admin"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "ADMIN_STOP_GRACE_PERIOD",
+        "operation": "remove",
+        "roles": [
+          "admin"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "WORKER_SHUTDOWN_TIMEOUT_MS",
+        "operation": "remove",
+        "roles": [
+          "worker"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "WORKER_STOP_GRACE_PERIOD",
+        "operation": "remove",
+        "roles": [
+          "worker"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "SCHEDULER_SHUTDOWN_TIMEOUT_MS",
+        "operation": "remove",
+        "roles": [
+          "scheduler"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "SCHEDULER_STOP_GRACE_PERIOD",
+        "operation": "remove",
+        "roles": [
+          "scheduler"
+        ],
+        "required": false,
+        "hasDefault": false
+      }
     ],
-    "reviewedFiles": [".env.example", "compose.yaml", "src/config/config.ts"]
+    "reviewedFiles": [
+      ".env.example",
+      ".env.host.example",
+      ".env.compose.cloud.example",
+      ".env.compose.local.example",
+      "compose.yaml",
+      "src/config/config.ts"
+    ]
   },
   "dependencies": [],
-  "backfill": { "required": false, "reference": null },
-  "compatibility": { "database": true, "api": true, "tasks": true, "configuration": true },
+  "backfill": {
+    "required": false,
+    "reference": null
+  },
+  "compatibility": {
+    "database": true,
+    "api": true,
+    "tasks": true,
+    "configuration": true
+  },
   "smoke": "health"
 }

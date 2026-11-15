@@ -10,7 +10,7 @@ import { RetryOptions, RuntimeOptions } from '@darabonba/typescript';
 
 // This is the explicitly authorized test ECS, never an arbitrary deployment target.
 const TARGET = Object.freeze({ regionId: 'cn-beijing', instanceId: 'i-2zegtoygiiked53yntmj' });
-const MAX_POLLS = 240;
+const MAX_POLLS = 1080;
 const STAGES = ['preflight', 'checkout', 'build', 'migrate', 'deploy', 'health', 'cleanup', 'complete'];
 const ERROR_CODES = new Set(['TEST_RELEASE_TARGET_DENIED', 'TEST_RELEASE_COMMAND_INVALID', 'TEST_RELEASE_SHA_INVALID',
   'TEST_RELEASE_STS_REQUIRED', 'TEST_RELEASE_TIMEOUT_INVALID', 'TEST_RELEASE_ACTION_DENIED', 'TEST_RELEASE_CLOUD_RESPONSE_INVALID',
@@ -42,7 +42,7 @@ export function readCloudReleaseConfig(env = process.env) {
   };
   return Object.freeze({ ...TARGET, commandId: env.TEST_RELEASE_COMMAND_ID, sha: env.TEST_RELEASE_SHA,
     accessKeyId, accessKeySecret, securityToken,
-    totalTimeoutMs: budget('TEST_RELEASE_TOTAL_TIMEOUT_MS', 100, 1200000),
+    totalTimeoutMs: budget('TEST_RELEASE_TOTAL_TIMEOUT_MS', 100, 5400000),
     pollIntervalMs: budget('TEST_RELEASE_POLL_INTERVAL_MS', 10, 5000) });
 }
 
@@ -97,10 +97,12 @@ function completion(item, config) {
   try { result = JSON.parse(item.Output); } catch { fail('TEST_RELEASE_OUTPUT_INVALID'); }
   if (!object(result) || Object.keys(result).sort().join(',') !== 'code,sha,stage,status,version'
     || result.version !== 1 || result.sha !== config.sha || !STAGES.includes(result.stage)
-    || !['passed', 'failed'].includes(result.status) || !['OK', 'FAILED'].includes(result.code)) fail('TEST_RELEASE_OUTPUT_INVALID');
+    || !['passed', 'failed'].includes(result.status) || !['OK', 'OK_WITH_FORCED_DRAIN', 'FAILED'].includes(result.code)) fail('TEST_RELEASE_OUTPUT_INVALID');
   const passed = item.InvocationStatus === 'Success' && item.ExitCode === 0 && !item.ErrorCode
-    && result.stage === 'complete' && result.status === 'passed' && result.code === 'OK';
-  return { status: passed ? 'passed' : 'failed', stage: result.stage, code: passed ? 'TEST_RELEASE_OK' : 'TEST_RELEASE_REMOTE_FAILED' };
+    && result.stage === 'complete' && result.status === 'passed' && ['OK', 'OK_WITH_FORCED_DRAIN'].includes(result.code);
+  return { status: passed ? 'passed' : 'failed', stage: result.stage, code: passed
+    ? (result.code === 'OK_WITH_FORCED_DRAIN' ? 'TEST_RELEASE_OK_WITH_FORCED_DRAIN' : 'TEST_RELEASE_OK')
+    : 'TEST_RELEASE_REMOTE_FAILED' };
 }
 
 export async function runCloudRelease(config, { call, wait = delay, now = () => performance.now() } = {}) {
@@ -158,6 +160,7 @@ async function main() {
   try { result = await runCloudRelease(readCloudReleaseConfig()); }
   catch (error) { result = { status: 'failed', stage: 'configuration', code: error instanceof CloudReleaseError ? error.code : 'TEST_RELEASE_FAILED', requestCount: 0, durationMs: 0 }; }
   let exitCode = result.status === 'passed' ? 0 : 1;
+  if (result.code === 'TEST_RELEASE_OK_WITH_FORCED_DRAIN') console.warn('::warning::Deployment completed after the configured drain deadline forced old services to stop.');
   try {
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
       'Test server release: **' + result.status + '**\n\nStage: ' + result.stage + '\n\nCode: ' + result.code + '\n');

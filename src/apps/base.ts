@@ -10,6 +10,11 @@ import {closeStateStreams} from '../lib/state-stream.js';
 import { registerMetrics, type ApplicationMetrics } from '../plugins/metrics.js';
 import { registerLifecycle } from '../plugins/lifecycle.js';
 import { RuntimeSettings } from '../modules/runtime-settings/service.js';
+import { DEFAULT_DRAIN_TIMEOUT_MS } from '../modules/runtime-settings/registry.js';
+declare module 'fastify' { interface FastifyInstance {
+  drainTimeoutSnapshotMs(): number;
+  readDrainTimeoutMs(): Promise<number>;
+} }
 export interface BuildOptions { config: AppConfig; dependencies?: Dependencies; backgroundHealthy?:()=>boolean; backgroundActive?:()=>number; metrics?:ApplicationMetrics; }
 export async function buildBase({ config, dependencies, backgroundHealthy, backgroundActive, metrics }: BuildOptions) {
   const deps = dependencies ?? createDependencies(config);
@@ -26,6 +31,8 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   registerMetrics(app, config, metrics);
   const lifecycle = registerLifecycle(app, backgroundActive);
   const runtimeSettings = deps.pool ? new RuntimeSettings(deps.pool, config) : undefined;
+  app.decorate('drainTimeoutSnapshotMs', () => runtimeSettings?.drainTimeoutSnapshotMs() ?? DEFAULT_DRAIN_TIMEOUT_MS);
+  app.decorate('readDrainTimeoutMs', async () => runtimeSettings ? runtimeSettings.readDrainTimeoutMs() : DEFAULT_DRAIN_TIMEOUT_MS);
   // App buildCommonHeaders sends JSON Content-Type even for body-less POSTs.
   // Route schemas still reject an absent body wherever fields are required.
   const jsonParser = app.getDefaultJsonParser('error', 'error');
