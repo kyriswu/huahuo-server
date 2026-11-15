@@ -14,7 +14,7 @@
 
 ## 触发与身份
 
-`test-server-release.yml` 仅 workflow_dispatch，从受保护 main 手动启动。main 提供控制代码/调用器/依赖与 Compose；test 提供业务代码及发布清单，需同 SHA 的 test push CI 成功。选择后固定双方完整 SHA，获取身份后及调用前复核；宿主锁内和迁移前也复核，变化就停止，不自动替换候选。合并和 CI 不自动发布。
+`test-server-release.yml` 仅 workflow_dispatch，从受保护 main 由 AI／脚本触发；保留人工按钮作为操作入口，但测试不再要求用户逐次点击。main 提供控制代码/调用器/依赖与 Compose；test 提供业务代码及发布清单，需同 SHA 的 test push CI 成功。选择后固定双方完整 SHA，获取身份后及调用前复核；宿主锁内和迁移前也复核，变化就停止，不自动替换候选。合并及 CI 本身不会改变容器；发布执行者在检查通过后自动触发该 workflow 并跟踪结果。
 
 GitHub test/production 两个 environment 已实际保存为仅允许 main 分支、0 个标签，并关闭管理员绕过。production reviewer 只有 `kyriswu`，关闭 prevent-self-review，允许 owner 本人发起后本人批准。RAM 使用此仓库的 `environment:test` subject，旧分支 subject 已移除；5400 秒会话上限和原权限 Policy 保持不变。工作流另核对 `ref=main`、`event_name=workflow_dispatch` 和控制 SHA。该身份已用于首轮真实手动发布；本次来源调整复用它，不创建新的生产身份，production 环境配置不代表正式生产已接入。
 

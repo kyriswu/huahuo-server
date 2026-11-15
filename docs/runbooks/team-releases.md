@@ -8,14 +8,14 @@
 
 操作示例：GitHub Action 选择 **main** → 运行 main 的 workflow → 校验 **test** 的提交与 CI → 将该 test 版本部署到测试服务器。业务 SHA 与流程控制 SHA 分别记录。
 
-`main` 是受保护的发布流程来源，`test` 是测试服务器的业务代码来源。团队通过 PR 合入 test，等待 test 的同 SHA push CI，通过 main 中的手动 Action 发布该 test SHA。main/test 同步通过 PR 完成，不强推受保护分支；本地开发使用 test。
+`main` 是受保护的发布流程来源，`test` 是测试服务器的业务代码来源。团队通过 PR 合入 test，等待 test 的同 SHA push CI，通过 main 中的 workflow_dispatch 发布该 test SHA；AI／脚本可自动完成测试合并和触发，无需逐次人工点击。main/test 同步通过 PR 完成，不强推受保护分支；本地开发使用 test。
 
 ## 权限与当前状态
 
 | 操作 | 已保存的权限限制 |
 | --- | --- |
 | 合入 `test` | 团队按已配置的 PR 和 CI 规则合并并部署 |
-| 人工发布测试 | 从 main 手动发起，部署已通过 CI 的 test SHA |
+| 发布测试 | AI／脚本可从 main 自动触发，部署已通过 CI 的 test SHA |
 | 合入 `main` | 只有 owner |
 | 生产发布 | 人工发起，必须 owner 批准 |
 | 测试 Action 的来源与目标 | 从 `main` 发起，使用 `test` environment；继续部署原测试机 |
@@ -35,8 +35,8 @@ test/production 两个 environment 均只允许 main 分支、0 个标签，管�
 ## 发布测试版本
 
 1. 从测试环境实际成功 SHA 整理代码、配置和迁移影响，使用发布技能和 PR 模板提交上线清单。
-2. 流程变更先由 owner 合入 main；业务变更合入 test。需要同步时先 main → test 的 PR，等待 test push CI 成功。
-3. Actions 选择 `Test server release`，分支 main，人工 Run workflow。主分支提供调用器、依赖及 Compose，test 提供业务候选与清单；分别固定完整 SHA。
+2. 流程变更先由 owner 合入 main；业务检查通过后可由 AI／脚本锁定 PR head 自动合入 test。owner 已审 main 内容同步到 test 可自动合并，等待 test push CI 成功。
+3. AI／脚本触发 `Test server release` 的 workflow_dispatch，流程来源 main，无需用户逐次点击；人工操作时也选择 main。主分支提供调用器、依赖及 Compose，test 提供业务候选与清单；分别固定完整 SHA。
 4. 调用前与宿主锁内核对双方未移动，失败停止，不自动换候选。查看五阶段结果后才记录该测试环境成功版本。
 
 正式生产尚未接入，成功部署基准为“未初始化”（null），不拿 main Git HEAD 或测试成功记录冒充生产部署。测试成功记录仍保留实际 SHA、配置及迁移历史；分支同步不会重置环境或数据库。
