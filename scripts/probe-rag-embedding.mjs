@@ -10,6 +10,13 @@ const { OpenAICompatibleEmbeddingClient } = await import(pathToFileURL(resolve('
 // environment; reports contain only synthetic request hashes and timing data.
 const env = process.env;
 if (env.APP_ENV === 'production' || env.EMBEDDING_PROBE_ALLOW !== 'true') throw new Error('NON_PRODUCTION_PROBE_AUTHORIZATION_REQUIRED');
+const {loadConfig}=await import(pathToFileURL(resolve('dist/config/config.js')).href);
+const {poolFor}=await import(pathToFileURL(resolve('dist/plugins/dependencies.js')).href);
+const {RuntimeSettings}=await import(pathToFileURL(resolve('dist/modules/runtime-settings/service.js')).href);
+const {applyValues}=await import(pathToFileURL(resolve('dist/modules/runtime-settings/registry.js')).href);
+const base=loadConfig('api-server',env),pool=poolFor(base);
+let runtime;
+try{const state=await new RuntimeSettings(pool,base).load();runtime=applyValues(base,state.values,state.revision);}finally{await pool.end();}
 const endpoint = new URL(`${env.RAG_EMBEDDING_BASE_URL?.replace(/\/$/u, '')}/embeddings`);
 if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || !env.RAG_EMBEDDING_API_KEY) throw new Error('EMBEDDING_PROBE_CONFIG_REQUIRED');
 const input = 'PostgreSQL MVCC 花火 Note latency probe';
@@ -40,7 +47,7 @@ try {
         socket.once('connect', () => { tcpAt = performance.now(); timing.connectMs = tcpAt - dnsAt; });
         socket.once('secureConnect', () => { timing.tlsMs = performance.now() - tcpAt; });
       });
-      request.setTimeout(30000, () => request.destroy(new Error('PROBE_TIMEOUT')));
+      request.setTimeout(runtime.rag.embeddingTimeoutMs, () => request.destroy(new Error('PROBE_TIMEOUT')));
       request.on('error', error => { timing.totalMs = performance.now() - start; timing.error = error.code ?? 'TRANSPORT_FAILED'; console.log(JSON.stringify(timing)); resolve(); });
       request.end(body);
     });
@@ -49,7 +56,7 @@ try {
 for (let call = 0; call < count; call++) {
   const start = performance.now();
   let attempt = 0;
-  const client = new OpenAICompatibleEmbeddingClient({ baseUrl: env.RAG_EMBEDDING_BASE_URL, apiKey: env.RAG_EMBEDDING_API_KEY, model: env.RAG_EMBEDDING_MODEL, dimensions: Number(env.RAG_EMBEDDING_DIMENSIONS), sendDimensions: false, timeoutMs: Number(env.RAG_EMBEDDING_TIMEOUT_MS ?? 30000), maxRetries: Number(env.RAG_EMBEDDING_MAX_RETRIES ?? 2), fetchImpl: async (...args) => {
+  const client = new OpenAICompatibleEmbeddingClient({ baseUrl: env.RAG_EMBEDDING_BASE_URL, apiKey: env.RAG_EMBEDDING_API_KEY, model: env.RAG_EMBEDDING_MODEL, dimensions: Number(env.RAG_EMBEDDING_DIMENSIONS), sendDimensions: false, timeoutMs: runtime.rag.embeddingTimeoutMs, maxRetries: runtime.rag.embeddingMaxRetries, fetchImpl: async (...args) => {
     const at = performance.now();
     try {
       const response = await fetch(...args);

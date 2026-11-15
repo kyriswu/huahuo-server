@@ -12,6 +12,7 @@ import { BillingService } from '../billing/service.js';
 import { tagExtractorFor } from '../assets/tag-extractor.js';
 import { RagIngestionJobs, type RagJobError } from '../rag/jobs.js';
 import { NoteIndexJobs } from '../ingestion/jobs.js';
+import {RuntimeSettings} from '../runtime-settings/service.js';
 export const concurrency:Record<QueueName,number>={content:2,ai:1,commercial:1,maintenance:1};
 export class QueuePublisher implements TaskPublisher {
  readonly connection:Redis;readonly queues:Map<QueueName,Queue>;
@@ -24,12 +25,14 @@ export class QueuePublisher implements TaskPublisher {
  async close(){await Promise.all([...this.queues.values()].map(q=>q.close()));this.connection.disconnect();}
 }
 export class TaskWorkers {
+ private refreshTimer?:NodeJS.Timeout;private refresh?:Promise<void>;
  readonly connection:Redis;readonly workers:Worker[];private stopping=false;private readonly rag: RagIngestionJobs;private readonly noteIndex:NoteIndexJobs;private readonly textIngestion:TextIngestionJobs;
  constructor(pool:pg.Pool,config:AppConfig){
   this.connection=new Redis(config.redisQueueUrl,{maxRetriesPerRequest:null,connectTimeout:1500,retryStrategy:n=>Math.min(n*200,2000)});
-  this.connection.on('error',()=>undefined);this.rag=new RagIngestionJobs(pool,config,storageFor(config));this.noteIndex=new NoteIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config)),tagExtractorFor(config.tagExtractorProvider),this.rag,this.noteIndex,this.textIngestion);
+  this.connection.on('error',()=>undefined);this.rag=new RagIngestionJobs(pool,config,storageFor(config));this.noteIndex=new NoteIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const settings=new RuntimeSettings(pool,config);
   this.workers=config.workerQueues.map(name=>{
-   const w=new Worker(name,async job=>{
+   const w=new Worker(name,async job=>settings.run(async()=>{
+    const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config)),tagExtractorFor(config.tagExtractorProvider),this.rag,this.noteIndex,this.textIngestion);
     if(typeof job.data.taskId!=='string'||!/^[a-f0-9-]{36}$/.test(job.data.taskId))return;
     const a=await engine.claim(job.data.taskId,config.instanceId);if(!a)return;
     let lost=false;let heartbeatRunning=false;const controller=new AbortController();a.signal=controller.signal;
@@ -40,10 +43,12 @@ export class TaskWorkers {
      if(!lost)await engine.execute(a);
     }catch(error){const ragError=error as Partial<RagJobError>;await engine.fail(a,typeof ragError.code==='string'?ragError.code:'TASK_EXECUTION_FAILED',ragError.retryable!==false);}
     finally{clearInterval(timer);}
-   },{connection:this.connection,prefix:config.queuePrefix,concurrency:concurrency[name],lockDuration:config.taskLeaseMs*2,maxStalledCount:1});
+   }),{connection:this.connection,prefix:config.queuePrefix,autorun:false,concurrency:config.taskPolicy.concurrency[name],lockDuration:config.taskLeaseMs*2,maxStalledCount:1});
    w.on('error',()=>undefined);return w;
   });
+  const refresh=async()=>{try{await settings.run(async()=>{for(const w of this.workers){w.concurrency=config.taskPolicy.concurrency[w.name as QueueName];if(!w.isRunning()&&!this.stopping)void w.run().catch(()=>undefined);}});}catch{/* Keep last validated limits; task execution still requires a current DB snapshot. */}finally{if(!this.stopping){this.refreshTimer=setTimeout(()=>{this.refresh=refresh();},5000);this.refreshTimer.unref();}}};
+  this.refresh=refresh();
  }
  healthy(){return !this.stopping&&this.workers.every(w=>w.isRunning());}
- async close(){this.stopping=true;await Promise.all(this.workers.map(w=>w.close()));await this.rag.close();await this.textIngestion.close();this.connection.disconnect();}
+ async close(){this.stopping=true;if(this.refreshTimer)clearTimeout(this.refreshTimer);await this.refresh;await Promise.all(this.workers.map(w=>w.close()));await this.rag.close();await this.textIngestion.close();this.connection.disconnect();}
 }

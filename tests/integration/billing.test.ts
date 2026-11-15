@@ -7,7 +7,7 @@ import { insertFixtureUser, insertFixtureSession } from './jwt-fixture.js';
 import { BillingService } from '../../src/modules/billing/service.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!migrationUrl||!/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('TEST_DB_REQUIRED');
-const env={...process.env,APP_ENV:'test',BILLING_MODE:'development',BILLING_POLICY_VERSION:'credit-policy-v1',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),APP_PUBLIC_BASE_URL:'http://localhost:3000'};
+const env={...process.env,APP_ENV:'test',BILLING_MODE:'development',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),APP_PUBLIC_BASE_URL:'http://localhost:3000'};
 const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL});
 const root=poolFor(loadConfig('migrate',{...env,DATABASE_URL:migrationUrl}));
 const pool=poolFor(cfg);const billing=new BillingService(pool,cfg);

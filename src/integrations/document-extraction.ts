@@ -122,7 +122,7 @@ export class DocumentExtractionClient {
       const form = new FormData();
       for (const file of files) form.append('files', new Blob([new Uint8Array(file.bytes)], { type: file.mimeType }), file.fileName);
       form.append('config', JSON.stringify(this.config.parameters)); form.append('file_contexts', JSON.stringify(contexts));
-      try{await hooks.beforeSubmit();}catch{throw new DocumentExtractionError('DOCUMENT_EXTRACTION_PRE_SUBMISSION_FAILED','settled',true);}
+      try{await hooks.beforeSubmit();}catch(error){if(error instanceof DocumentExtractionError)throw error;throw new DocumentExtractionError('DOCUMENT_EXTRACTION_PRE_SUBMISSION_FAILED','settled',true);}
       const response = await this.request(this.url(context.baseUrl, this.config.mode === 'sync' ? '/extract' : '/extract-async'), { method: 'POST', headers: context.headers, body: form }, signal, true);
       if (this.config.mode === 'sync') return validateExtractionResponse(response.body, contexts);
       const id = object(response.body).job_id;

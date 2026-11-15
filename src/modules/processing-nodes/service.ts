@@ -1,0 +1,127 @@
+import type pg from 'pg';
+import {createHash,randomUUID} from 'node:crypto';
+import {canonical} from '../../lib/crypto.js';
+import type {AppConfig} from '../../config/config.js';
+import {createDocumentParserMachine,type ParserContext,type ParserRequest} from '../../lib/document-parser-machine/index.js';
+import {DomainError,lock,transaction} from '../identity/store.js';
+import {nodeConfig,nodeFromRow,type Capability,type ProcessingNode} from './model.js';
+import {assertSuperadmin,type AdminScope} from '../admin/service.js';
+type Runtime=ReturnType<typeof createDocumentParserMachine>;
+type Factory=(config:ReturnType<typeof nodeConfig>)=>Runtime;
+const routing=(node:ProcessingNode)=>canonical({...node,name:'',enabled:false,revision:0,capabilities:[...node.capabilities].sort(),eciFallback:node.eciFallback??null});
+export class ProcessingNodes {
+ private runtimes=new Map<string,{key:string;runtime:Runtime;connected:Promise<void>}>();
+ private timer?:NodeJS.Timeout;private refresh?:Promise<void>;private closed=false;
+ constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly factory:Factory=cfg=>createDocumentParserMachine(cfg,config.redisQueueUrl,config.queuePrefix)){ }
+ async list():Promise<ProcessingNode[]>{return (await this.pool.query('SELECT * FROM processing_nodes ORDER BY created_at,id')).rows.map(nodeFromRow);}
+ async runtime(node:ProcessingNode):Promise<Runtime>{
+  const cfg={...nodeConfig(node,this.config.processingNodes),canStop:async()=>!(await this.pool.query('SELECT 1 FROM processing_node_assignments WHERE node_id=$1 AND NOT settled LIMIT 1',[node.id])).rowCount},key=JSON.stringify({...cfg,apiToken:cfg.apiToken?createHash('sha256').update(cfg.apiToken).digest('hex'):undefined});
+  let entry=this.runtimes.get(node.id);
+  if(entry&&entry.key!==key){await entry.connected;await entry.runtime.close();this.runtimes.delete(node.id);entry=undefined;}
+  if(!entry){const runtime=this.factory(cfg);entry={key,runtime,connected:runtime.connect()};this.runtimes.set(node.id,entry);}
+  try{await entry.connected;return entry.runtime;}catch(error){if(this.runtimes.get(node.id)===entry)this.runtimes.delete(node.id);await entry.runtime.close().catch(()=>undefined);throw error;}
+ }
+ async bind(requestId:string,capability:Capability,recoverAdmission=false):Promise<ProcessingNode>{
+  if(!this.config.processingNodes.enabled)throw new DomainError(503,'PROCESSING_NODES_DISABLED');
+  if(!requestId||requestId.length>256||!['document','audio'].includes(capability))throw new DomainError(400,'PROCESSING_ASSIGNMENT_INVALID');
+  return transaction(this.pool,async tx=>{
+   await lock(tx,'processing-nodes');
+   const old=(await tx.query('SELECT * FROM processing_node_assignments WHERE request_id=$1',[requestId])).rows[0];
+   if(old){
+    if(old.capability!==capability)throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
+    if(old.settled){
+     if(!recoverAdmission)throw new DomainError(409,'PROCESSING_ASSIGNMENT_SETTLED');
+     const current=(await tx.query('SELECT * FROM processing_nodes WHERE id=$1',[old.node_id])).rows[0];
+     if(!current||routing(nodeFromRow(current))!==routing(old.snapshot))throw new DomainError(409,'PROCESSING_NODE_CONFIGURATION_CHANGED');
+     await tx.query('UPDATE processing_node_assignments SET settled=false,settled_at=NULL WHERE request_id=$1',[requestId]);
+    }
+    return old.snapshot as ProcessingNode;
+   }
+   const row=(await tx.query(`SELECT n.* FROM processing_nodes n
+    WHERE n.config @> jsonb_build_object('enabled',true,'capabilities',jsonb_build_array($1::text))
+    ORDER BY (SELECT count(*)::float/(n.config->>'concurrency')::integer FROM processing_node_assignments a WHERE a.node_id=n.id AND NOT a.settled),n.created_at,n.id
+    LIMIT 1`,[capability])).rows[0];
+   if(!row)throw new DomainError(503,'PROCESSING_NODE_UNAVAILABLE');
+   const node=nodeFromRow(row);nodeConfig(node,this.config.processingNodes);
+   await tx.query('INSERT INTO processing_node_assignments(request_id,node_id,capability,snapshot) VALUES($1,$2,$3,$4)',[requestId,node.id,capability,JSON.stringify(node)]);
+   return node;
+  });
+ }
+ async assigned(requestId:string):Promise<ProcessingNode>{
+  const row=(await this.pool.query('SELECT snapshot,settled FROM processing_node_assignments WHERE request_id=$1',[requestId])).rows[0];
+  if(!row)throw new DomainError(409,'PROCESSING_ASSIGNMENT_MISSING');if(row.settled)throw new DomainError(409,'PROCESSING_ASSIGNMENT_SETTLED');return row.snapshot as ProcessingNode;
+ }
+ async settle(requestId:string){await this.pool.query('UPDATE processing_node_assignments SET settled=true,settled_at=coalesce(settled_at,now()) WHERE request_id=$1',[requestId]);}
+ async withNode<T>(capability:Capability,input:ParserRequest,execute:(context:ParserContext)=>Promise<T>):Promise<T>{
+  if(!this.config.processingNodes.enabled)throw new DomainError(503,'PROCESSING_NODES_DISABLED');
+  const node=input.resume?await this.assigned(input.requestId):await this.bind(input.requestId,capability,input.recoverAdmission);
+  if(!node.capabilities.includes(capability))throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
+  const runtime=await this.runtime(node);
+  try{
+   // Lost Redis must not erase durable remote occupancy or turn an uncertain old run into a new POST.
+   const count=Number((await this.pool.query('SELECT count(*) AS n FROM processing_node_assignments WHERE node_id=$1 AND NOT settled AND started AND request_id<>$2',[node.id,input.requestId])).rows[0].n);
+   const state=await runtime.machine.state.status();
+   if(count>(state?.active??0))throw new DomainError(503,'PROCESSING_NODE_COORDINATION_UNCERTAIN');
+   return await runtime.machine.withDocumentParser(input,async context=>{
+    await this.pool.query('UPDATE processing_node_assignments SET started=true WHERE request_id=$1',[input.requestId]);
+    return execute(context);
+   });
+  }
+  finally{
+   // A missing Redis database is not evidence of completion. Require its settled receipt.
+   try{const outcome=await runtime.machine.state.requestOutcome(createHash('sha256').update(input.requestId).digest('hex'));
+    if(outcome&&['succeeded','failed','cancelled','settled'].includes(outcome))await this.settle(input.requestId);
+   }catch{/* Preserve the durable assignment on ambiguous coordination/storage failure. */}
+  }
+ }
+ async acknowledgeSettled(input:ParserRequest){
+  const row=(await this.pool.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',[input.requestId])).rows[0];if(row?.settled)return;
+  const runtime=await this.runtime(await this.assigned(input.requestId));
+  try{await runtime.machine.acknowledgeSettled(input);}catch(error){if(!['DOCUMENT_PARSER_LEASE_LOST','DOCUMENT_PARSER_NOT_UNCERTAIN'].includes((error as {code:string}).code))throw error;}
+  await this.settle(input.requestId);
+ }
+ async startMonitors(onError:(error:unknown)=>void=()=>undefined){
+  if(!this.config.processingNodes.enabled)return;
+  const update=async()=>{
+   try{for(const node of await this.list()){
+    try{const runtime=await this.runtime(node);await runtime.startIdleMonitor({onError});}catch(error){onError(error);}
+   }}catch(error){onError(error);}
+   finally{if(!this.closed){this.timer=setTimeout(()=>{this.refresh=update();},30000);this.timer.unref();}}
+  };this.refresh=update();await this.refresh;
+ }
+ async close(){this.closed=true;if(this.timer)clearTimeout(this.timer);await this.refresh;await Promise.all([...this.runtimes.values()].map(async e=>{await e.connected.catch(()=>undefined);await e.runtime.close();}));this.runtimes.clear();}
+ async upsert(input:ProcessingNode,expectedRevision:number,scope:AdminScope,traceId:string):Promise<ProcessingNode>{
+  return transaction(this.pool,async tx=>{
+   await assertSuperadmin(tx,scope);
+   const validated=nodeConfig(input,this.config.processingNodes);
+   input={...input,name:input.name.trim(),baseUrl:validated.baseUrl,eciFallback:input.eciFallback??null};
+   await lock(tx,'processing-nodes');
+   const oldRow=(await tx.query('SELECT * FROM processing_nodes WHERE id=$1 FOR UPDATE',[input.id])).rows[0];
+   const old=oldRow?nodeFromRow(oldRow):undefined;
+   if((old?.revision??0)!==expectedRevision)throw new DomainError(409,'CONFIGURATION_CONFLICT');
+   const changed=old&&routing(old)!==routing(input);
+   let release:(()=>Promise<void>)|undefined;
+   try{
+    if(changed){
+     if((await tx.query('SELECT 1 FROM processing_node_assignments WHERE node_id=$1 AND NOT settled LIMIT 1',[input.id])).rowCount)throw new DomainError(409,'PROCESSING_NODE_BUSY');
+     const runtime=await this.runtime(old),status=await runtime.machine.state.status();
+     if(status){
+      if(status.phase!=='ready'||status.active||status.queued||status.uncertain||status.eciTarget||(old.mode==='ecs'&&!status.economicallyStopped))throw new DomainError(409,'PROCESSING_NODE_NOT_DRAINED');
+      const token=randomUUID();if(!await runtime.machine.state.lock(token,'configure'))throw new DomainError(409,'PROCESSING_NODE_BUSY');
+      release=()=>runtime.machine.state.unlock(token);
+      // Freeze old runtimes before publishing the DB revision. DB rollback after this fails closed.
+      const nextRuntime=this.factory(nodeConfig(input,this.config.processingNodes));
+      try{await nextRuntime.connect();await nextRuntime.machine.state.configureLocked(token,old.mode);}finally{await nextRuntime.close();}
+     }
+    }
+    const revision=expectedRevision+1;
+    const config=Object.fromEntries(Object.entries(input).filter(([key])=>key!=='id'&&key!=='revision'));
+    await tx.query(`INSERT INTO processing_nodes(id,config,revision) VALUES($1,$2,$3)
+     ON CONFLICT(id) DO UPDATE SET config=excluded.config,revision=excluded.revision,updated_at=now()`,[input.id,JSON.stringify(config),revision]);
+    await tx.query('INSERT INTO admin_audit_events(id,admin_id,action,target_id,reason,trace_id) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),scope.adminId,'processing-node.update',input.id,JSON.stringify({before:old??null,after:{...input,revision}}),traceId]);
+    return {...input,revision};
+   }catch(error){if((error as {code:string}).code==='23505')throw new DomainError(409,'PROCESSING_NODE_IDENTITY_EXISTS');throw error;}
+   finally{await release?.();}
+  });
+ }
+}

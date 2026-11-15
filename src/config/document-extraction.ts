@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { canonical, digest } from '../lib/crypto.js';
 
 export type ExtractionParameters = Record<string, unknown>;
@@ -34,24 +32,9 @@ export function assertCompleteExtractionConfig(value: unknown): asserts value is
   if (config.output_format !== 'markdown' || images.include_data_base64 !== false
     || typeof config.extraction_timeout_secs !== 'number' || config.extraction_timeout_secs < 1 || config.extraction_timeout_secs > 86400) fail();
 }
-export function loadDocumentExtractionConfig(env: Readonly<Record<string, string | undefined>> = process.env): DocumentExtractionConfig {
-  const mode = env.DOCUMENT_EXTRACTION_MODE ?? 'disabled';
-  if (!['disabled', 'sync', 'async'].includes(mode)) throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_MODE');
-  if (mode === 'disabled') return { enabled: false };
-  let parameters: unknown;
-  try { parameters = JSON.parse(readFileSync(resolve(env.DOCUMENT_EXTRACTION_CONFIG_PATH || 'resources/document-extraction/kbxml-request.json'), 'utf8')); }
-  catch { throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_CONFIG_PATH'); }
+export function createDocumentExtractionConfig(mode:'sync'|'async',parameters:ExtractionParameters,pollMs=2000,maxResponseBytes=64*1024*1024):EnabledDocumentExtractionConfig {
+  if(!['sync','async'].includes(mode))throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_MODE');
   assertCompleteExtractionConfig(parameters);
-  const number = (key: string, fallback: number, min: number, max: number) => {
-    const n = Number(env[key]?.trim() || fallback);
-    if (!Number.isSafeInteger(n) || n < min || n > max) throw new Error(`INVALID_CONFIG:${key}`);
-    return n;
-  };
-  const minimum = (parameters.extraction_timeout_secs as number) * 1000 + 60_000;
-  return {
-    enabled: true, mode: mode as 'sync' | 'async', parameters, configHash: digest(canonical(parameters)),
-    timeoutMs: number('DOCUMENT_EXTRACTION_TIMEOUT_MS', minimum + 60_000, minimum, 86_520_000),
-    pollMs: number('DOCUMENT_EXTRACTION_POLL_MS', 2000, 100, 60_000),
-    maxResponseBytes: number('DOCUMENT_EXTRACTION_MAX_RESPONSE_BYTES', 64 * 1024 * 1024, 1024, 64 * 1024 * 1024),
-  };
+  if(!Number.isSafeInteger(pollMs)||pollMs<100||pollMs>60000||!Number.isSafeInteger(maxResponseBytes)||maxResponseBytes<1024||maxResponseBytes>64*1024*1024)throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_LIMITS');
+  return {enabled:true,mode,parameters,configHash:digest(canonical(parameters)),timeoutMs:Number(parameters.extraction_timeout_secs)*1000+120000,pollMs,maxResponseBytes};
 }

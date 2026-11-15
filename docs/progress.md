@@ -1,5 +1,32 @@
 # 当前开发进度
 
+## ENV清理与RAG后台参数（2026-11-15）
+
+清理主ENV、旧本地ENV和6份示例的已迁DB/失效项，删除重复解析机模板；现用凭据与其他设置保留。后台新增“RAG 与检索”12项参数，Note开关归功能分类；先将当前值导入原JSON记录再删ENV，配置revision2、节点与业务数据不变。执行快照、构建时限和检索客户端换参已接线，无ENV回退。435项unit/contract、222项真实隔离PG/Redis通过（1项Milvus跳过），静态检查/构建及Compose展开通过。未调用云资源或付费模型，见[验收](acceptance/runtime-configuration.md)。
+
+## 试用弹窗与节点单条JSON配置（2026-11-15）
+
+文档试用入口收进“运行配置 → 解析与模型”的Modal，取消独立菜单/页面；关闭重开保留状态并刷新已保存的配置。节点16项参数收拢为config jsonb，同一行原地更新、revision只递增，不建版本表或旧列兼容路径。现有开发库无损转换保留原CPU节点1条、版本3/并发16/文档音频能力，业务数据不变、物理外键0。434项unit/contract与220项真实隔离PG/Redis通过（1项Milvus跳过），静态检查/构建通过。Chrome已连接验证真实主后台Modal；文件自动上传被扩展文件访问设置阻止，CPU实机仍StopCharging，未开始PDF/Office解析。见[试用验收](acceptance/admin-document-trial.md)和[配置验收](acceptance/runtime-configuration.md)。
+
+## Admin文档试用与旧入口清理（2026-11-15）
+
+现有后台新增文档试用，复用业务解析配置/客户端/节点占用，只展示Markdown/JSON和阶段耗时，不创建笔记、资料、入库任务或索引。节点状态按用户要求显示“在线 / 不在线”。旧ENV加载器、假AK校验、无用参数与未使用旁路已清理；构建清除旧生成产物。434项unit/contract、219项隔离PG/Redis通过（1项Milvus跳过），typecheck/lint/build通过。现有主环境按原账号/数据更新，PDF/Office仍需CPU完整配置及可用节点。见[验收](acceptance/admin-document-trial.md)。
+
+
+## 现有本地环境已启动（2026-11-15）
+
+用户随后明确要求不用隔离环境，启动当前项目。已核对原RDS基线与HEAD一致、新基线仅追加3张配置表，在事务内新增表/索引/授权并导入5项原非秘密业务配置，最后CAS更新基线校验；没有重跑整份0001、清库、修改原账号或重置凭据。用户、会话、工作区、笔记、资源及任务行数前后一致，物理外键仍为0。
+
+现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。CPU节点及PROCESSING_NODES_ENABLED保持关闭，未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
+
+
+## 分类运行配置与 Admin 页面（2026-11-15）
+
+处理节点与解析/任务/上传容量/计费策略/功能开关改由数据库管理，Admin按类型展示，参考4111登录页的黑白灰风格。机器唯一登记、任务节点快照、文档/音频共享占用、排空改配置、未知占用阻断、可选A10 ECI回退及修改审计已接线。CPU节点/提取模式/部署总开关保持关闭，音频协议未接入。
+
+435项unit/contract、215项真实隔离PG/Redis通过（1项Milvus跳过），typecheck/lint/build通过；Chrome工具仍不可连接，未作渲染/交互验收。仅更新代码/唯一初始化基线及本机ENV项整理，未写实际RDS、重建主Compose或调用付费服务。App只读哈希一致，停在本轮代码/API验收点，不推进Pxx。见[验收](acceptance/runtime-configuration.md)与[手册](runbooks/runtime-configuration.md)。
+
+
 ## 通用文档解析CPU ECS目标替换（2026-11-15）
 
 按用户要求改为 `i-2zejbbo2svjieb44tqy8`，cn-beijing、64核/128GiB，私网 `172.18.102.103`。本机目标/示例/手册同步，实际触发开关仍默认disabled；A10回退关闭，CPU完整提取参数待提供，未发送旧CUDA配置。正式适配器真实只读校验与Compose静态展开通过，既有29项mock单元通过；未执行开停机、解析、部署或迁移。新实例末次查询Running，非本轮启动。App只读，不推进Pxx。见[验收](acceptance/document-parser-cpu-target.md)。

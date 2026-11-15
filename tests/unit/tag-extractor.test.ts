@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { extractBoundedTags, validateTagLabels, tagExtractorFor, type TagExtractor } from '../../src/modules/assets/tag-extractor.js';
 import { loadConfig } from '../../src/config/config.js';
+import {validateValues} from '../../src/modules/runtime-settings/registry.js';
+import {config} from '../helpers.js';
 const input={noteId:'material',noteRevisionId:'revision',title:'title',rawText:'body'};
 describe('tag provider boundary',()=>{
  it('normalizes only literal labels, validates types/count/Unicode/controls',()=>{
@@ -10,9 +12,9 @@ describe('tag provider boundary',()=>{
   for(const invalid of [null,{},['ok',1],[''],['x'.repeat(25)],Array(6).fill('same'),['bad\nlabel'],['İ'.repeat(24)]])expect(()=>validateTagLabels(invalid)).toThrow();
  });
  it('defaults to unavailable and never replaces missing live providers with fixtures',async()=>{
-  expect(loadConfig('worker',{...process.env,DATABASE_URL:'postgres://x:y@localhost/x',REDIS_CACHE_URL:'redis://localhost:6379',REDIS_QUEUE_URL:'redis://localhost:6379',APP_TOKEN_SECRET:'x'.repeat(32),TAG_EXTRACTOR_PROVIDER:undefined}).tagExtractorProvider).toBe('disabled');
+  expect(loadConfig('worker',{...process.env,DATABASE_URL:'postgres://x:y@localhost/x',REDIS_CACHE_URL:'redis://localhost:6379',REDIS_QUEUE_URL:'redis://localhost:6379',APP_TOKEN_SECRET:'x'.repeat(32)}).tagExtractorProvider).toBe('disabled');
   for(const name of ['disabled','llm','dify'] as const)await expect(tagExtractorFor(name).extract(input)).rejects.toThrow('TAG_PROVIDER_UNAVAILABLE');
-  expect(()=>loadConfig('worker',{...process.env,DATABASE_URL:'postgres://x:y@localhost/x',REDIS_CACHE_URL:'redis://localhost:6379',REDIS_QUEUE_URL:'redis://localhost:6379',APP_TOKEN_SECRET:'x'.repeat(32),APP_ENV:'production',TAG_EXTRACTOR_PROVIDER:'deterministic',ALLOW_MOCK_PROVIDERS:'true'})).toThrow();
+  expect(()=>validateValues({'features.tagProvider':'deterministic'},{...config('worker'),appEnv:'production'})).toThrow('CONFIGURATION_TEST_PROVIDER_FORBIDDEN');
  });
  it('reads every bounded segment, merges repeated labels and enforces total call budget',async()=>{
   const seen:string[]=[];

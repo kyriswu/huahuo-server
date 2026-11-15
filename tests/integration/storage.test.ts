@@ -17,7 +17,8 @@ import { insertFixtureUser,insertFixtureSession,testJwtEnv } from './jwt-fixture
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!migrationUrl||!/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('TEST_DB_REQUIRED');
 const dir=`/tmp/huahuo-p05-${randomUUID()}`;
-const cfg=loadConfig('api-server',{...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),APP_PUBLIC_BASE_URL:'http://storage.test',DATABASE_URL:process.env.TEST_DATABASE_API_URL,STORAGE_LOCAL_ROOT:dir,MAX_UPLOAD_BYTES:'1024'});
+const cfg=loadConfig('api-server',{...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),APP_PUBLIC_BASE_URL:'http://storage.test',DATABASE_URL:process.env.TEST_DATABASE_API_URL,STORAGE_LOCAL_ROOT:dir});
+cfg.maxUploadBytes=1024;
 const migrator=loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl});const root=poolFor(migrator),pool=poolFor(cfg);
 const worker=poolFor({...cfg,role:'worker',databaseUrl:process.env.TEST_DATABASE_WORKER_URL!});
 const scheduler=poolFor({...cfg,role:'scheduler',databaseUrl:process.env.TEST_DATABASE_SCHEDULER_URL!});
@@ -34,7 +35,7 @@ async function uploaded(){const u=await fixture();const t=await storage.createUp
 async function work(id:string){const a=await engine.claim(id,randomUUID());expect(a).not.toBeNull();await engine.execute(a!);}
 async function read(stream:Readable){const chunks:Buffer[]=[];for await(const c of stream)chunks.push(c);return Buffer.concat(chunks);}
 describe('P05 real scoped resource lifecycle',()=>{
- beforeAll(async()=>{await migrate(migrator);});afterAll(async()=>{await Promise.all([pool.end(),root.end(),worker.end(),scheduler.end()]);await rm(dir,{recursive:true,force:true});});
+ beforeAll(async()=>{await migrate(migrator);await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1',[JSON.stringify({'storage.maxUploadBytes':1024})]);});afterAll(async()=>{await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await Promise.all([pool.end(),root.end(),worker.end(),scheduler.end()]);await rm(dir,{recursive:true,force:true});});
  it('stable IDs, concurrent complete, one resource/reservation/task and persistent Range bytes',async()=>{
   const {u,t}=await uploaded();const results=await Promise.all([storage.complete(u.scope,t.uploadId,randomUUID()),storage.complete(u.scope,t.uploadId,randomUUID())]);expect(results[0]!.resource.resourceId).toBe(t.resourceId);expect(results[1]).toEqual(results[0]);
   const s=await storage.recover(u.scope,t.uploadId);expect(s.status).toBe('completed');const playback=await storage.playback(u.scope,t.resourceId);const cap=new URL(playback.url).searchParams.get('playbackToken')!;

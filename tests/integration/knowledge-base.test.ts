@@ -23,11 +23,13 @@ import {TaskEngine} from '../../src/modules/tasks/engine.js';
 import {MilvusRepository,createMilvusClient} from '../../src/modules/rag/adapters/milvus.js';
 import {buildApiServer} from '../../src/apps/api-server.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
+import {RuntimeSettings} from '../../src/modules/runtime-settings/service.js';
 const url=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!url||!/^huahuo_test_/.test(new URL(url).pathname.slice(1)))throw new Error('ISOLATED_TEST_DB_REQUIRED');
 const temp=await mkdtemp(join(tmpdir(),'kb-integration-'));
-const env={...process.env,APP_ENV:'test',APP_PUBLIC_BASE_URL:'http://kb.test',ADMIN_PUBLIC_BASE_URL:'http://admin.kb.test',HUAHUO_AGENT_TO_SERVER_API_KEY:'a'.repeat(43),HUAHUO_SERVER_TO_AGENT_API_KEY:'b'.repeat(43),LOG_LEVEL:'silent',DATABASE_URL:process.env.TEST_DATABASE_API_URL,APP_TOKEN_SECRET:'kb-test-secret-'.repeat(4),ALLOW_MOCK_PROVIDERS:'true',RAG_PROVIDER_MODE:'mock',RAG_RERANK_PROVIDER:'disabled',KB_NOTE_INDEXING_ENABLED:'true',STORAGE_DRIVER:'local',STORAGE_LOCAL_ROOT:temp,RAG_INGEST_BATCH_SIZE:'2',RAG_EMBEDDING_MAX_RETRIES:'0',RAG_SOURCE_ALLOWED_HOSTS:'fixture.test',...testJwtEnv};
+const env={...process.env,APP_ENV:'test',APP_PUBLIC_BASE_URL:'http://kb.test',ADMIN_PUBLIC_BASE_URL:'http://admin.kb.test',HUAHUO_AGENT_TO_SERVER_API_KEY:'a'.repeat(43),HUAHUO_SERVER_TO_AGENT_API_KEY:'b'.repeat(43),LOG_LEVEL:'silent',DATABASE_URL:process.env.TEST_DATABASE_API_URL,APP_TOKEN_SECRET:'kb-test-secret-'.repeat(4),ALLOW_MOCK_PROVIDERS:'true',RAG_PROVIDER_MODE:'mock',RAG_RERANK_PROVIDER:'disabled',STORAGE_DRIVER:'local',STORAGE_LOCAL_ROOT:temp,RAG_SOURCE_ALLOWED_HOSTS:'fixture.test',...testJwtEnv};
 const config=loadConfig('api-server',env),workerConfig=loadConfig('worker',{...env,DATABASE_URL:process.env.TEST_DATABASE_WORKER_URL});
+for(const cfg of [config,workerConfig]){cfg.kb.noteEnabled=true;Object.assign(cfg.rag,{embeddingBatchSize:2,embeddingMaxRetries:0});}
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:url})),pool=poolFor(config),wp=poolFor(workerConfig);
 const memory=mockKnowledgeIndex();
 const targets:string[]=[];
@@ -42,11 +44,30 @@ const assets=new AssetService(pool,config.appTokenSecret!,config,queries);
 const notes=new NoteIndexService(pool,config),jobs=new NoteIndexJobs(wp,workerConfig,deps),engine=new TaskEngine(wp,120000);
 async function fixture(){const userId=await insertFixtureUser(root),sessionId=randomUUID(),workspaceId=randomUUID();const bearer=await insertFixtureSession(root,userId,sessionId);await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'KB',true,$3)",[workspaceId,userId,randomUUID()]);return {bearer,workspaceId,scope:{userId,sessionId,traceId:randomUUID()}};}
 async function latest(id:string){return (await root.query<KbBuild>(`SELECT * FROM kb_note_hybrid_builds WHERE source_id=$1 AND source_revision=(SELECT part_revision_id::text FROM note_part_revisions WHERE note_id=$1 AND part='raw' ORDER BY revision DESC LIMIT 1) ORDER BY created_at DESC LIMIT 1`,[id])).rows[0]!;}
-async function runNote(id:string){const b=await latest(id);const a=await engine.claim(b.task_id,randomUUID());expect(a).toBeTruthy();const r=await jobs.execute(a!);expect(await engine.finish(a!,r.digest,r.bytes)).toBe(true);return b;}
+async function runNote(id:string){const b=await latest(id);const a=await vi.waitFor(async()=>{const claim=await engine.claim(b.task_id,randomUUID());expect(claim).toBeTruthy();return claim!;},{interval:20,timeout:3000});const r=await jobs.execute(a);expect(await engine.finish(a,r.digest,r.bytes)).toBe(true);return b;}
 async function create(body='PostgreSQL 数据库支持 MVCC 和 B-tree 索引。'){const f=await fixture();const note=await assets.createNote(f.scope,f.workspaceId,{title:'KB fixture',parts:{raw:body}},randomUUID());return {...f,note};}
-beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:url}));});
-afterAll(async()=>{await queries.close();await Promise.all([pool.end(),wp.end(),root.end()]);await rm(temp,{recursive:true,force:true});});
+beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:url}));await root.query(`UPDATE runtime_configuration SET "values"="values"||'{"features.noteIndexing":true,"rag.embeddingBatchSize":2,"rag.embeddingMaxRetries":0}'::jsonb,revision=revision+1`);});
+afterAll(async()=>{await queries.close();await root.query(`UPDATE runtime_configuration SET "values"="values"-'features.noteIndexing'-'rag.embeddingBatchSize'-'rag.embeddingMaxRetries',revision=revision+1`);await Promise.all([pool.end(),wp.end(),root.end()]);await rm(temp,{recursive:true,force:true});});
 describe('two-mode knowledge indexing with real dependencies and deterministic model',()=>{
+ it('refreshes cached recall parameters without closing a client still used by an earlier query',async()=>{
+  const f=await create('runtimecache fixture body');await runNote(f.note.noteId);
+  const original=(await root.query('SELECT "values" FROM runtime_configuration')).rows[0].values;
+  const settings=new RuntimeSettings(pool,config),seen:{rrfK:number;closed:ReturnType<typeof vi.fn>}[]=[];
+  let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(r=>release=r),start=new Promise<void>(r=>entered=r);
+  const q=new RagQueryService(pool,config,{index:()=>{
+   const closed=vi.fn(async()=>{}),ordinal=seen.length;seen.push({rrfK:config.milvus.rrfK,closed});
+   return {...memory,close:closed,searchKeyword:async(query,options)=>{if(ordinal===0){entered();await gate;}return memory.searchKeyword(query,options);}};
+  }});
+  const patch=async(rrfK:number)=>root.query(`UPDATE runtime_configuration SET "values"="values"||$1::jsonb,revision=revision+1`,[JSON.stringify({'rag.rrfK':rrfK})]);
+  let first:Promise<unknown>|undefined;
+  try{
+   await patch(41);first=settings.run(()=>q.query(f.scope,{query:'runtimecache',mode:'keyword',topK:1,documentKey:f.note.noteId}));await start;
+   await patch(73);expect((await settings.run(()=>q.query(f.scope,{query:'runtimecache',mode:'keyword',topK:1,documentKey:f.note.noteId}))).results).toHaveLength(1);
+   expect(seen.map(s=>s.rrfK)).toEqual([41,73]);expect(seen[0]!.closed).not.toHaveBeenCalled();
+   release();await first;expect(seen[0]!.closed).toHaveBeenCalledTimes(1);
+   await settings.run(()=>q.query(f.scope,{query:'runtimecache',mode:'keyword',topK:1,documentKey:f.note.noteId}));expect(seen).toHaveLength(2);
+  }finally{release();await first;await q.close();await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1',[JSON.stringify(original)]);}
+ });
  it('keeps canonical rerank evidence and hydrates only deduplicated images of final topK on explicit request',async()=>{
   const f=await fixture(),a=randomUUID(),b=randomUUID();
   for(const id of [a,b])await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,source_scene,file_name,mime_type,size_bytes,duration_seconds,sha256,object_key,object_version,storage_driver,status)
@@ -174,7 +195,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   }finally{await api.close();}
  });
  it('uses the native Markdown file entry and saves the original body before keyword indexing',async()=>{
-  const f=await fixture();const repo=new RagIngestionRepository(pool,config.rag,config.appEnv,config.kb.documentCollection,config);
+  const f=await fixture();const repo=new RagIngestionRepository(pool,config);
   const created=await repo.create(f.scope,{ossUrl:'https://fixture.test/document.md',fileName:'document.md',mimeType:'text/markdown'});
   const source=storageFor(config);const data=Buffer.from('# Document\n\nPostgreSQL MVCC 资料关键词。\n');await source.put('fixture-source.md',await import('node:stream').then(m=>m.Readable.from([data])),'text/markdown',1000);
   const sha=await import('node:crypto').then(m=>m.createHash('sha256').update(data).digest('hex'));

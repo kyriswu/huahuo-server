@@ -25,7 +25,8 @@ if (!url || !/^huahuo_test_/u.test(new URL(url).pathname.slice(1))) throw new Er
 const directory = await mkdtemp(join(tmpdir(), 'note-images-'));
 const config = loadConfig('api-server', { ...process.env, ...testJwtEnv, APP_ENV: 'test', LOG_LEVEL: 'silent', DATABASE_URL: process.env.TEST_DATABASE_API_URL,
   APP_TOKEN_SECRET: 'note-image-test-'.repeat(5), APP_PUBLIC_BASE_URL: 'https://notes.test', ALLOW_MOCK_PROVIDERS: 'true', RAG_PROVIDER_MODE: 'mock',
-  RAG_RERANK_PROVIDER: 'disabled', KB_NOTE_INDEXING_ENABLED: 'true', RAG_SOURCE_ALLOWED_HOSTS: 'fixture.test', STORAGE_DRIVER: 'local', STORAGE_LOCAL_ROOT: directory });
+  RAG_RERANK_PROVIDER: 'disabled', RAG_SOURCE_ALLOWED_HOSTS: 'fixture.test', STORAGE_DRIVER: 'local', STORAGE_LOCAL_ROOT: directory });
+config.kb.noteEnabled=true;
 const root = poolFor(loadConfig('migrate', { DATABASE_URL: url })), pool = poolFor(config);
 const adapter = new LocalStorageAdapter(directory), storage = new StorageService(pool, config, adapter), assets = new AssetService(pool, config.appTokenSecret!, config);
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aYa0AAAAASUVORK5CYII=', 'base64');
@@ -47,8 +48,8 @@ const counts = async (id: string, workspaceId: string) => (await root.query(`SEL
   (SELECT count(*)::int FROM content_jobs WHERE note_id=$1) tags,
   (SELECT count(*)::int FROM kb_note_hybrid_builds WHERE source_id=$1) builds,
   (SELECT next_cursor FROM workspace_content_state WHERE workspace_id=$2) cursor`, [id, workspaceId])).rows[0];
-beforeAll(() => migrate(loadConfig('migrate', { DATABASE_URL: url })));
-afterAll(async () => { await Promise.all([pool.end(), root.end()]); await rm(directory, { recursive: true, force: true }); });
+beforeAll(async () => {await migrate(loadConfig('migrate', { DATABASE_URL: url }));await root.query(`UPDATE runtime_configuration SET "values"="values"||'{"features.noteIndexing":true}'::jsonb,revision=revision+1`);});
+afterAll(async () => { await root.query(`UPDATE runtime_configuration SET "values"="values"-'features.noteIndexing',revision=revision+1`);await Promise.all([pool.end(), root.end()]); await rm(directory, { recursive: true, force: true }); });
 
 describe('canonical Note images with real isolated PostgreSQL and local storage', () => {
   it('normalizes owned playback URLs before hashing/idempotency and derives references without a client list', async () => {
@@ -126,7 +127,7 @@ describe('canonical Note images with real isolated PostgreSQL and local storage'
   });
   it('signs only selected owned file receipts and strips the OSS root prefix exactly once', async () => {
     const f = await fixture(), other = await fixture(), id = randomUUID(), unused = randomUUID(), revision = sha('canonical');
-    const created = await new RagIngestionRepository(pool, config.rag, config.appEnv, config.kb.documentCollection, config).create(f.scope, { ossUrl: 'https://fixture.test/a.md', fileName: 'a.md', mimeType: 'text/markdown' });
+    const created = await new RagIngestionRepository(pool,config).create(f.scope, { ossUrl: 'https://fixture.test/a.md', fileName: 'a.md', mimeType: 'text/markdown' });
     await root.query("UPDATE rag_ingestion_versions SET status='SUCCEEDED',content_hash=$2 WHERE id=$1", [created.documentVersionId, revision]);
     for (const assetId of [id, unused]) await root.query(`INSERT INTO rag_document_assets(id,version_id,object_key,sha256,mime_type,byte_size,asset_type,source_asset_key,asset_ref,source_path,upload_status,metadata)
       VALUES($1::uuid,$2,$3,$4,'image/png',1,'image',$1::text,$1::text,$3,'ready',$5::jsonb)`, [assetId, created.documentVersionId, `private/dev/images/${assetId}.png`, sha(assetId), JSON.stringify({ bucket: 'fixture-assets' })]);

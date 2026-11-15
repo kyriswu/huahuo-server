@@ -1,5 +1,19 @@
 # 本机环境与 P01 证据
 
+## ENV与RAG配置整理（2026-11-15）
+
+日常仍使用主.env；已清理迁入DB的RAG参数和失效项，主.env现75项、旧.env.compose.local现84项，均保持0600与其余原值。主模板与部署示例同步，重复解析机模板删除；仍需的服务连接/凭据/模型规格/路径/集合与部署总开关保留。RAG参数在当前Admin管理，现有值先无损导入原JSON行再删ENV。当前本机不在解析机内网，不开云机；见[验收](acceptance/runtime-configuration.md)。
+
+## 当前本地后台（2026-11-15）
+
+按用户后续授权，现有RDS已无损新增3张配置表，保留原数据/账号/凭据；主Compose四角色更新且全部healthy，地址为 http://127.0.0.1:3001/admin#configuration ，使用原管理员账号。PROCESSING_NODES_ENABLED=false，CPU节点停用。先前“未写RDS/未部署”记录是当时的代码验收状态，已由本次实际启动替代。见[验收](acceptance/runtime-configuration.md)。
+
+
+## ENV 与数据库运行配置边界（2026-11-15）
+
+本机旧DOCUMENT_PARSER/DOCUMENT_EXTRACTION目标与业务项已整理移除，非秘密旧值私有备份在 .local/runtime-config/previous-nonsecret-settings.json。业务参数改为Admin/DB，RAM等密钥未重置；保留PROCESSING_NODES_ENABLED=false、部署连接/提供器开关、HTTP硬上限和协调租约。Compose/模板同步，未操作实际RDS或主容器。新空库使用唯一0001基线；已有库部署前须单独审阅无损结构和配置映射，禁止清库或自动改checksum。详见[手册](runbooks/runtime-configuration.md)。
+
+
 ## 当前 App 与短信配置（2026-11-12）
 
 App 只读根目录已改为 `../huahuo-ai`，源码在 `lib/`；`pnpm app:reference`、`pnpm app:reference:diff` 及本机路径预检通过，当前 Git 为没有 commit/origin 的新仓库。实际源码和工作树哈希纳入本轮基线，未向 App 写入。

@@ -54,7 +54,9 @@ export class BillingService {
   await tx.query("INSERT INTO account_memberships(membership_id,user_id,level_code,status,policy_version,source) VALUES($1,$2,'free','active',$3,'development_fixture') ON CONFLICT(user_id) DO NOTHING", [randomUUID(), userId, policy.policy_version]);
   await tx.query('SELECT user_id FROM account_memberships WHERE user_id=$1 FOR UPDATE', [userId]);
   const start = monthStart(), end = nextMonth(start), key = `${userId}:${policy.policy_version}:${dateOnly(start)}`;
-  await tx.query(`INSERT INTO credit_lots(lot_id,user_id,lot_kind,policy_version,period_start,period_end,expires_at,granted_credits,available_credits,source,grant_key)
+  // The account row serializes grants. A policy switch must not grant the same month twice.
+  const granted=await tx.query("SELECT lot_id FROM credit_lots WHERE user_id=$1 AND lot_kind='monthly' AND period_start=$2 LIMIT 1",[userId,dateOnly(start)]);
+  if(!granted.rowCount)await tx.query(`INSERT INTO credit_lots(lot_id,user_id,lot_kind,policy_version,period_start,period_end,expires_at,granted_credits,available_credits,source,grant_key)
    VALUES($1,$2,'monthly',$3,$4,$5,$5::date,$6,$6,'development_fixture',$7) ON CONFLICT(grant_key) DO NOTHING`, [randomUUID(), userId, policy.policy_version, dateOnly(start), dateOnly(end), asBig(policy.monthly_credit_limit), key]);
   await tx.query(`INSERT INTO usage_periods(user_id,period_start,period_end,credit_limit) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,period_start) DO NOTHING`, [userId, dateOnly(start), dateOnly(end), asBig(policy.monthly_credit_limit)]);
   return policy;

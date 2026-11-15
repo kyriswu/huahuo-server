@@ -2,7 +2,7 @@
 
 仅对已存在的真实 Note 原文建立混合索引。用户保存 `parts.raw` 后，业务事务固定真实 raw part 修订和授权归属，并创建 `kb_note_hybrid_builds`、Task 与 Outbox。标题等不改变 raw 正文的编辑不重新向量化。来源可以是手写、ASR、图片识别或链接解析，但必须先由业务创建 Note；未产生 Note 的导入资料使用关键词流程。
 
-`KB_NOTE_INDEXING_ENABLED=true` 启用该流程。旧的“单独提交任意 content 覆盖 Note 索引”接口和 `MANUAL_TEXT_*` 配置已删除。正文只保留在 `note_part_revisions`，不复制到索引任务或 chunk 表。
+在Admin「功能开关」启用 `features.noteIndexing` 后，后续正文变更创建索引任务；旧KB_NOTE_INDEXING_ENABLED环境项已移除。旧的“单独提交任意content覆盖Note索引”接口和MANUAL_TEXT配置已删除。正文只保留在note_part_revisions，不复制到索引任务或chunk表。
 
 Worker 使用 H1–H6 或自然段临时范围切分，上限 500 Unicode 码点，同范围重叠目标约 50 字，最终输入由固定 BGE-M3 tokenizer 校验。`kb_note_hybrid_chunks` 仅保存范围、核心范围、哈希和点 ID。完整构建发布前不可召回；编辑后旧正文立即退出查询，未变点可复用，失效点在准确目标中清理。
 

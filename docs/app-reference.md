@@ -1,5 +1,18 @@
 # App 只读参照基线
 
+## RAG配置与ENV清理复核（2026-11-15）
+
+仅调整Server配置来源、缓存参数生效及独立Admin分类。实际只读api_endpoints.dart/hash仍17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1，http_auth_repository.dart/hash仍d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5；未改App/运行Flutter，不将后端与浏览器验证当移动端验收。
+
+## 试用弹窗与JSON配置复核（2026-11-15）
+
+本轮只调整Server内部节点持久化和独立Admin界面。只读复核api_endpoints.dart与http_auth_repository.dart，SHA256仍分别为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1、d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5；未写App或运行Flutter，不推进Pxx。
+
+## 分类运行配置只读复核（2026-11-15）
+
+本轮新增独立Admin运行配置，不改变App登录/接口envelope。只读实际 ../huahuo-ai 的 api_endpoints.dart（17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1）及 http_auth_repository.dart（d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5），与开始参照一致。未写App或运行Flutter，后端测试不冒充移动端验收。见[验收](acceptance/runtime-configuration.md)。
+
+
 ## CPU解析机目标切换（2026-11-15）
 
 只读核对实际`../huahuo-ai`的api_endpoints.dart（SHA256 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`）与http_auth_repository.dart（`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`），内容与前次一致。本轮只换Server内部ECS ID/IP，不改App合约、不写App或运行Flutter。见[验收](acceptance/document-parser-cpu-target.md)。

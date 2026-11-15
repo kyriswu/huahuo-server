@@ -1707,3 +1707,44 @@ CREATE INDEX kb_note_hybrid_builds_source ON public.kb_note_hybrid_builds(source
 CREATE INDEX kb_note_hybrid_builds_workspace ON public.kb_note_hybrid_builds(workspace_id);
 CREATE INDEX kb_document_keyword_builds_source ON public.kb_document_keyword_builds(source_id,source_revision);
 CREATE INDEX kb_document_keyword_builds_workspace ON public.kb_document_keyword_builds(workspace_id);
+
+-- Infrastructure configuration is global; relationships are checked by services, without physical FKs.
+CREATE TABLE public.processing_nodes (
+ id uuid PRIMARY KEY, config jsonb NOT NULL CHECK(jsonb_typeof(config)='object'),
+ revision integer NOT NULL DEFAULT 1 CHECK(revision>0),
+ created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK((jsonb_typeof(config->'enabled')='boolean'
+    AND jsonb_typeof(config->'capabilities')='array'
+    AND jsonb_array_length(config->'capabilities') BETWEEN 1 AND 2
+    AND config->'capabilities' <@ '["document","audio"]'::jsonb
+    AND jsonb_typeof(config->'concurrency')='number' AND (config->>'concurrency')::integer BETWEEN 1 AND 16
+    AND ((config->>'mode'='ecs' AND config->>'regionId' IS NOT NULL AND config->>'instanceId' IS NOT NULL AND config->>'privateIp' IS NOT NULL)
+      OR (config->>'mode'='always-on' AND config->>'regionId' IS NULL AND config->>'instanceId' IS NULL AND config->>'privateIp' IS NULL AND config->>'baseUrl' IS NOT NULL))) IS TRUE)
+);
+CREATE UNIQUE INDEX processing_nodes_ecs_identity ON public.processing_nodes((config->>'regionId'),(config->>'instanceId')) WHERE config->>'mode'='ecs';
+CREATE UNIQUE INDEX processing_nodes_api_identity ON public.processing_nodes((config->>'baseUrl')) WHERE config->>'mode'='always-on';
+CREATE INDEX processing_nodes_config ON public.processing_nodes USING gin(config);
+INSERT INTO public.processing_nodes(id,config)
+ VALUES('ca9e1931-f4ed-4e52-8c2e-5cc316f91501','{"name":"智能文档解析 · CPU","capabilities":["document"],"resourceClass":"cpu","mode":"ecs","regionId":"cn-beijing","instanceId":"i-2zejbbo2svjieb44tqy8","privateIp":"172.18.102.103","baseUrl":"http://172.18.102.103:8000","healthPath":"/health","tokenEnv":null,"eciFallback":null,"concurrency":1,"idleSeconds":60,"startupSeconds":600,"queueSeconds":3600,"enabled":false}');
+CREATE TABLE public.processing_node_assignments (
+ request_id text PRIMARY KEY CHECK(length(request_id) BETWEEN 1 AND 256), node_id uuid NOT NULL,
+ capability text NOT NULL CHECK(capability IN ('document','audio')), snapshot jsonb NOT NULL,
+ settled boolean NOT NULL DEFAULT false, started boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(), settled_at timestamptz,
+ CHECK(settled=(settled_at IS NOT NULL))
+);
+CREATE INDEX processing_node_assignments_active ON public.processing_node_assignments(node_id,created_at) WHERE NOT settled;
+CREATE INDEX processing_node_assignments_node ON public.processing_node_assignments(node_id);
+GRANT SELECT ON public.processing_nodes TO huahuo_api,huahuo_worker,huahuo_scheduler;
+GRANT SELECT,INSERT,UPDATE ON public.processing_nodes TO huahuo_admin;
+GRANT SELECT,INSERT,UPDATE ON public.processing_node_assignments TO huahuo_worker;
+GRANT SELECT,INSERT,UPDATE ON public.processing_node_assignments TO huahuo_admin;
+GRANT SELECT ON public.processing_node_assignments TO huahuo_scheduler;
+
+CREATE TABLE public.runtime_configuration (
+ singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), revision integer NOT NULL DEFAULT 1 CHECK(revision>0),
+ "values" jsonb NOT NULL DEFAULT '{}'::jsonb CHECK(jsonb_typeof("values")='object'),
+ updated_by uuid, updated_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO public.runtime_configuration(singleton) VALUES(true);
+GRANT SELECT ON public.runtime_configuration TO huahuo_api,huahuo_worker,huahuo_scheduler;
+GRANT SELECT,UPDATE ON public.runtime_configuration TO huahuo_admin;

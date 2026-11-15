@@ -6,7 +6,7 @@
 
 | 内容 | 当前实现 | 对套餐容量的影响 |
 | --- | --- | --- |
-| 普通图片、音频和文件上传 | `StorageService` 生成 resource UUID，`resources.object_key` 是 UUID 类型；适配器叠加配置的 Key Prefix，没有文件后缀 | 上传受理时按用户汇总 `storage_reservations` 的 reserved/confirmed requested_bytes，与全局 `STORAGE_QUOTA_BYTES` 比较 |
+| 普通图片、音频和文件上传 | `StorageService` 生成 resource UUID，`resources.object_key` 是 UUID 类型；适配器叠加配置的 Key Prefix，没有文件后缀 | 上传受理时按用户汇总 `storage_reservations` 的 reserved/confirmed requested_bytes，与Admin「上传与容量」中的 `storage.quotaBytes` 比较 |
 | 用户头像 | 复用普通资源，以 `resource_refs.ref_kind=avatar` 关联用户 | 不应另存一份或重复计量 |
 | Note 正文图片／导入附件 | 正文在 PG revision 表；图片稳定引用资源 UUID，当前关联和历史 revision pin 分开 | 正文移除引用不等于原文件可删；历史仍可读则仍保留文件 |
 | 文件入口的原始文档 | 能复用自有上传资源；其他来源可保存到 `rag/{versionId}/source/...` | 尚未统一接入普通上传的容量受理入口 |

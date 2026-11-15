@@ -1,5 +1,18 @@
 # 契约兼容性（P01 历史与 P02 增量）
 
+## RAG后台分类与ENV退役（2026-11-15）
+
+独立Admin配置分类增加rag，沿用Session/superadmin/Origin/CSRF/revision及同事务审计；App DTO/路径不变。原RAG调参ENV不再读取或注入，后台修改影响后续请求，构建保留持久快照，服务及固定模型/集合身份仍是部署配置。435项unit/contract、222项隔离集成通过，模型/Milvus为替身，见[验收](acceptance/runtime-configuration.md)。
+
+## 试用入口与节点JSON（2026-11-15）
+
+节点数据库配置合入单个config jsonb，Admin节点API仍接收/返回原类型化对象和递增revision；编辑不新建节点版本行。试用API、角色/CSRF、请求与结果归属保持，UI入口改为运行配置的解析与模型tab内Modal。App路径/envelope和任务快照协议未变；测试见[配置验收](acceptance/runtime-configuration.md)。
+
+## 分类运行配置与管理 API（2026-11-15）
+
+App既有路径/响应/鉴权不变，内部业务限额和解析参数改读DB快照；新路由只在独立Admin。GET configuration/processing-nodes 需要管理员Session；PUT分类配置/节点要求superadmin、Origin、CSRF及revision，事务内复核角色并审计。API-server不装载这些路由。215项隔离集成和435项unit/contract通过，非浏览器/移动端通过。见[验收](acceptance/runtime-configuration.md)。
+
+
 ## 通用文档解析ECS目标替换（2026-11-15）
 
 仅内部电源目标切到CPU实例 `i-2zejbbo2svjieb44tqy8`，私网与配置基址同步103；无App DTO/路由/Task协议变更。原GPU请求JSON不改成未经验证的CPU配置，示例提取模式disabled；A10回退保持关闭。后续若已有旧Redis协调状态，仍按原排空/configure-idle规则切换，不清空或迁移活动请求。见[验收](acceptance/document-parser-cpu-target.md)。

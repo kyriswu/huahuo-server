@@ -16,6 +16,6 @@ for (const role of ['bootstrap','migrator','api','admin','worker','scheduler']) 
  const password=randomBytes(32).toString('hex');env[`POSTGRES_${role.toUpperCase()}_PASSWORD`]=password;
  if(role!=='bootstrap') env[`DATABASE_${role==='migrator'?'MIGRATION':role.toUpperCase()}_URL`]=`postgresql://huahuo_${role}:${password}@postgres:5432/huahuo`;
 }
-for(const name of ['APP_TOKEN_SECRET','ADMIN_SESSION_SECRET','TOOL_TOKEN_SECRET']) env[name]=randomBytes(32).toString('hex');
+for(const name of ['APP_TOKEN_SECRET','ADMIN_SESSION_SECRET']) env[name]=randomBytes(32).toString('hex');
 writeFileSync('.env.compose.local',Object.entries(env).map(([k,v])=>`${k}=${v}`).join('\n')+'\n',{flag:'wx',mode:0o600});
 console.log('Created .env.compose.local (0600); credentials not printed.');

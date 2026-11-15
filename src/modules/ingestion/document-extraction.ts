@@ -5,9 +5,10 @@ import {gzip} from 'node:zlib';
 import {promisify} from 'node:util';
 import type { AppConfig } from '../../config/config.js';
 import { canonical, digest } from '../../lib/crypto.js';
-import { createDocumentParserMachine, ParserMachineError } from '../../lib/document-parser-machine/index.js';
+import { ParserMachineError } from '../../lib/document-parser-machine/index.js';
+import {ProcessingNodes} from '../processing-nodes/service.js';
 import { DocumentExtractionClient, DocumentExtractionError, type ExtractionResponse,type ExtractionDocument } from '../../integrations/document-extraction.js';
-import { transaction } from '../identity/store.js';
+import { transaction,DomainError } from '../identity/store.js';
 import {event} from '../tasks/model.js';
 import type { Attempt } from '../tasks/engine.js';
 import type { StoragePort } from '../storage/port.js';
@@ -16,7 +17,7 @@ import { verifyStructuredSource } from '../rag/document-preparation.js';
 import type { DocumentParserSnapshot } from '../rag/processing-profile.js';
 
 interface ParseState {
-  phase:'intent'|'job'|'cancelling'|'cancelled'|'complete'|'failed'; requestId:string; fingerprint:string;
+  phase:'bound'|'intent'|'job'|'cancelling'|'cancelled'|'complete'|'failed'; requestId:string; fingerprint:string;
   jobId?:string; artifactUri?:string; canonicalUri?:string; manifestUri?:string;
   fileName?:string;mimeType?:string;
 }
@@ -27,7 +28,7 @@ export interface SavedExtraction {
 export class ManagedExtractionError extends Error {constructor(readonly code:string,readonly retryable=false){super(code);}}
 function decode(value:string|null):ParseState|undefined{
   if(!value?.startsWith('xberg-'))return;
-  const match=/^xberg-(intent|job|cancelling|cancelled|complete|failed):([A-Za-z0-9_-]+)$/.exec(value);
+  const match=/^xberg-(bound|intent|job|cancelling|cancelled|complete|failed):([A-Za-z0-9_-]+)$/.exec(value);
   if(!match)throw new ManagedExtractionError('DOCUMENT_EXTRACTION_STATE_INVALID');
   try{
     const state=JSON.parse(Buffer.from(match[2]!,'base64url').toString()) as ParseState;
@@ -37,16 +38,10 @@ function decode(value:string|null):ParseState|undefined{
   }catch{throw new ManagedExtractionError('DOCUMENT_EXTRACTION_STATE_INVALID');}
 }
 export class ManagedDocumentExtractor {
-  private runtime?:ReturnType<typeof createDocumentParserMachine>;
-  private connecting?:Promise<void>;
+  private readonly nodes:ProcessingNodes;
   constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly storage:StoragePort,
-    private readonly fetchImpl:typeof fetch=fetch){}
-  private async module(){
-    if(!this.config.documentParserMachine.enabled)throw new ManagedExtractionError('DOCUMENT_PARSER_DISABLED');
-    this.runtime??=createDocumentParserMachine(this.config.documentParserMachine,this.config.redisQueueUrl,this.config.queuePrefix);
-    this.connecting??=this.runtime!.connect();await this.connecting;return this.runtime!;
-  }
-  async close(){await this.runtime?.close();}
+    private readonly fetchImpl:typeof fetch=fetch){this.nodes=new ProcessingNodes(pool,config);}
+  async close(){await this.nodes.close();}
   private async fence(tx:pg.PoolClient,a:Attempt){
     if(!(await tx.query(`SELECT id FROM tasks WHERE id=$1 AND user_id=$2 AND workspace_id=$3 AND state='running'
       AND lease_owner=$4 AND version=$5 AND attempt_no=$6 AND lease_until>clock_timestamp() FOR UPDATE`,
@@ -103,8 +98,7 @@ export class ManagedDocumentExtractor {
   }
   async acknowledgeCompleted(a:Attempt){
     const state=await this.state(a);if(state?.phase!=='complete')return;
-    const runtime=await this.module();
-    try{await runtime.machine.acknowledgeSettled({requestId:state.requestId,fingerprint:state.fingerprint});}
+    try{await this.nodes.acknowledgeSettled({requestId:state.requestId,fingerprint:state.fingerprint});}
     catch(error){if(!(error instanceof ParserMachineError&&['DOCUMENT_PARSER_LEASE_LOST','DOCUMENT_PARSER_NOT_UNCERTAIN'].includes(error.code)))throw error;}
   }
   async parse(a:Attempt,source:DownloadedSource,snapshot:DocumentParserSnapshot,
@@ -114,18 +108,27 @@ export class ManagedDocumentExtractor {
     if(previous?.phase==='intent')throw new ManagedExtractionError('DOCUMENT_EXTRACTION_SUBMISSION_UNKNOWN');
     const fingerprint=resume&&source.bytes.length===0?previous!.fingerprint:digest(canonical({sourceHash:createHash('sha256').update(source.bytes).digest('hex'),fileName:source.fileName,
       mime:source.contentType,sourceResourceId:snapshot.sourceResourceId,parseRunId:snapshot.parseRunId,config:snapshot.extraction.parameters}));
-    if(resume&&previous.fingerprint!==fingerprint)throw new ManagedExtractionError('DOCUMENT_EXTRACTION_SOURCE_CHANGED');
-    const state:ParseState=resume?previous!:{phase:'intent',requestId:`${a.task.id}:parse:${a.attempt}`,fingerprint,fileName:source.fileName,mimeType:source.contentType??'application/octet-stream'};
-    const runtime=await this.module();let providerFailure:DocumentExtractionError|undefined;
+    if((resume||previous?.phase==='bound')&&previous!.fingerprint!==fingerprint)throw new ManagedExtractionError('DOCUMENT_EXTRACTION_SOURCE_CHANGED');
+    const state:ParseState=resume||previous?.phase==='bound'?previous!:{phase:'bound',requestId:`${a.task.id}:parse:${a.attempt}`,fingerprint,fileName:source.fileName,mimeType:source.contentType??'application/octet-stream'};
+    // Persist admission identity before assignment/startup so redelivery cannot select a second machine.
+    if(!resume&&previous?.phase!=='bound')await this.setState(a,state);
+    let providerFailure:DocumentExtractionError|undefined;
     try{
-      return await runtime.machine.withDocumentParser({requestId:state.requestId,fingerprint,resume,admissionSignal:a.signal},async context=>{
+      return await this.nodes.withNode('document',{requestId:state.requestId,fingerprint,resume,recoverAdmission:previous?.phase==='bound',admissionSignal:a.signal},async context=>{
         let response:ExtractionResponse;
         try{
           response=await new DocumentExtractionClient(snapshot.extraction,this.fetchImpl).extract([{
             bytes:source.bytes,fileName:state.fileName??source.fileName,mimeType:state.mimeType??source.contentType??'application/octet-stream',
             source_resource_id:snapshot.sourceResourceId,parse_run_id:snapshot.parseRunId,
           }],context,{
-            beforeSubmit:async()=>{await this.setState(a,state);},
+            beforeSubmit:async()=>{await transaction(this.pool,async tx=>{
+              await this.fence(tx,a);
+              const row=(await tx.query('SELECT external_reference FROM tasks WHERE id=$1',[a.task.id])).rows[0];
+              const current=decode(row?.external_reference);
+              if(current?.phase!=='bound'||current.requestId!==state.requestId||current.fingerprint!==state.fingerprint)
+                throw new DocumentExtractionError('DOCUMENT_EXTRACTION_SUBMISSION_UNKNOWN','unknown');
+              state.phase='intent';await this.saveState(tx,a,state);
+            });},
             submitted:async jobId=>{state.phase='job';state.jobId=jobId;await this.recordJob(a,state);},
             cancellation:()=>this.cancellation(a,state),
           },resume?state.jobId:undefined);
@@ -152,6 +155,7 @@ export class ManagedDocumentExtractor {
         throw new ManagedExtractionError(providerFailure.code,providerFailure.retryable);
       }
       if(error instanceof ManagedExtractionError)throw error;
+      if(error instanceof DomainError)throw new ManagedExtractionError(error.code,error.statusCode===503);
       if(error instanceof ParserMachineError)throw new ManagedExtractionError(error.code,!['DOCUMENT_PARSER_DUPLICATE','DOCUMENT_PARSER_CONFLICT'].includes(error.code));
       throw new ManagedExtractionError('DOCUMENT_EXTRACTION_UNKNOWN',true);
     }

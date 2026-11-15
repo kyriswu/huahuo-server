@@ -28,7 +28,7 @@
 
 创建/修改先提交正文与 Outbox，Worker 才提取。只有标签版本为 0 且未人工修改的首次提取可自动应用。已有有效集合或人工修改后的新提取为建议；旧集合版本、旧正文、删除/恢复生命周期及旧 attempt/lease 均不能覆盖。标签写入、任务结果和既有账本结算在同一事务，幂等完成不重复计数。
 
-默认 `TAG_EXTRACTOR_PROVIDER=disabled`，可读材料任务失败为 TAG_PROVIDER_UNAVAILABLE；无正文任务完成 outcome=needs-readable-text，不调用 provider。获取文章/图谱/聊天不会触发提取。开发 fixture 显式开启，真实 LLM/Dify transport 在 P08 才接入；P08 必须结合现有调用意图/用量/未知消耗恢复机制，不能仅打开配置就付费调用。
+默认Admin「功能开关」中的 `features.tagProvider=disabled`，不再读取旧TAG_EXTRACTOR_PROVIDER环境项；可读材料任务失败为TAG_PROVIDER_UNAVAILABLE，无正文任务完成outcome=needs-readable-text，不调用provider。获取文章/图谱/聊天不会触发提取。开发fixture显式开启，真实LLM/Dify transport在P08才接入；P08必须结合现有调用意图/用量/未知消耗恢复机制，不能仅打开配置就付费调用。
 
 分段协调输入身份/版本/标题/正文，最多 32 段、每段 16,000 UTF-16 单元，逐段输出严格校验后按频次稳定合并最多 5 标签。超预算/不合法结果拒绝整个结果，不写部分标签；分段临时内存处理，无向量切片表。
 

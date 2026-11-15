@@ -1,5 +1,30 @@
 # 当前容器与数据库状态
 
+## RAG参数与ENV清理部署（2026-11-15）
+
+现有开发库只更新原runtime_configuration的values JSON、revision1→2并记录导入审计；无DDL/checksum变化或业务表写入，原节点一条/revision3/并发16保留。当前RAG参数先导入再删除ENV，四角色同一完整rag-settings-20261115镜像且healthy/readiness200，实际环境不再注入退役项。没有启动解析机或调用模型，Admin仍127.0.0.1入口。证据在.local/env-cleanup，见[验收](acceptance/runtime-configuration.md)。
+
+## 节点JSON与试用弹窗更新（2026-11-15）
+
+现有开发RDS只将processing_nodes的16个配置列无损合为config jsonb，保留id/revision/时间、节点和业务数据；先回滚演练、逐项比对再提交及CAS更新基线。未重跑0001或更改卷/账号；仍只有原节点1条、revision3、并发16，物理外键0。四角色同一完整镜像更新且healthy/readiness200，主后台试用改为解析与模型tab内Modal。用户确认本机不在解析机内网，实测等其部署内网测试机；本轮不开云机。证据在.local/runtime-config/node-json-modal，详见[验收](acceptance/runtime-configuration.md)。
+
+## Admin文档试用与旧入口清理（2026-11-15）
+
+现有后台新增文档试用，复用业务解析配置/客户端/节点占用，只展示Markdown/JSON和阶段耗时，不创建笔记、资料、入库任务或索引。节点状态按用户要求显示“在线 / 不在线”。旧ENV加载器、假AK校验、无用参数与未使用旁路已清理；构建清除旧生成产物。434项unit/contract、219项隔离PG/Redis通过（1项Milvus跳过），typecheck/lint/build通过。现有主环境按原账号/数据更新，PDF/Office仍需CPU完整配置及可用节点。见[验收](acceptance/admin-document-trial.md)。
+
+
+## 现有本地环境已启动（2026-11-15）
+
+用户随后明确要求不用隔离环境，启动当前项目。已核对原RDS基线与HEAD一致、新基线仅追加3张配置表，在事务内新增表/索引/授权并导入5项原非秘密业务配置，最后CAS更新基线校验；没有重跑整份0001、清库、修改原账号或重置凭据。用户、会话、工作区、笔记、资源及任务行数前后一致，物理外键仍为0。
+
+现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。CPU节点及PROCESSING_NODES_ENABLED保持关闭，未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
+
+
+## 分类配置代码验收（2026-11-15）
+
+只运行随机命名、回环端口、tmpfs的本轮隔离PG/Redis测试容器，215项通过（1项Milvus跳过），已由执行器核对owner后清理。主Compose未重建，现有卷/开发库/云资源未操作。四独立角色+一次性migrate拓扑保留，Admin监听边界未扩大。现有RDS尚未应用新增配置表，不能宣称新页面已部署。见[验收](acceptance/runtime-configuration.md)。
+
+
 ## 文档解析CPU ECS目标配置已替换（2026-11-15）
 
 本机与示例目标改为 `i-2zejbbo2svjieb44tqy8` / `172.18.102.103`，仅配置和只读身份核对；实际触发模式仍默认disabled，主业务容器未重建、Redis状态/数据卷/业务数据库未改。首次Describe为Stopped+StopCharging，末次为Running，本轮没有调用Start/Stop。未验证CPU服务HTTP或文件解析。见[验收](acceptance/document-parser-cpu-target.md)。

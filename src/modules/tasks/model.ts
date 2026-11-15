@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { randomUUID, createHash } from 'node:crypto';
+import {currentRuntimeConfig} from '../runtime-settings/service.js';
 export const queues = ['content','ai','commercial','maintenance'] as const;
 export type QueueName = typeof queues[number];
 export type TaskState = 'queued'|'running'|'retry_scheduled'|'waiting_external'|'reconciling'|'cancel_requested'|'succeeded'|'failed'|'cancelled';
@@ -11,13 +12,15 @@ export interface TaskRow {
  error_code:string|null; retryable:boolean; event_sequence:number; created_at:Date; updated_at:Date;
 }
 export const terminal = (s:TaskState) => ['succeeded','failed','cancelled'].includes(s);
-export const retryDelay = (attempt:number, random=Math.random) => Math.min(60000,1000*2**Math.min(attempt,6))*(0.75+random()*0.5);
+export const retryDelay = (attempt:number, random=Math.random) => {const p=currentRuntimeConfig()?.taskPolicy;return Math.min(p?.retryMaxMs??60000,(p?.retryBaseMs??1000)*2**Math.min(attempt,20))*(0.75+random()*0.5);};
 export const hash = (text:string) => createHash('sha256').update(text).digest('hex');
 export async function event(tx:pg.PoolClient,id:string) {
  const r=await tx.query('UPDATE tasks SET event_sequence=event_sequence+1,updated_at=now() WHERE id=$1 RETURNING event_sequence,state',[id]);
  if(r.rows[0])await tx.query('INSERT INTO task_events(task_id,sequence,state) VALUES($1,$2,$3)',[id,r.rows[0].event_sequence,r.rows[0].state]);
 }
 export async function enqueueIntent(tx:pg.PoolClient,id:string,delayMs=0) {
+ const policy=currentRuntimeConfig()?.taskPolicy;
+ if(policy)await tx.query('UPDATE tasks SET max_attempts=$2 WHERE id=$1 AND version=1 AND attempt_no=0',[id,policy.maxAttempts]);
  await tx.query("INSERT INTO task_outbox(id,task_id,available_at) VALUES($1,$2,now()+$3*interval '1 millisecond') ON CONFLICT DO NOTHING",[randomUUID(),id,delayMs]);
 }
 // WorkAiTaskInfo only treats succeeded/failed as terminal. Preserve raw state separately.

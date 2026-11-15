@@ -19,3 +19,5 @@
 
 !resources/
 !resources/**
+
+!scripts/clean-build.mjs

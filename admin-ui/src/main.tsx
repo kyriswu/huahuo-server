@@ -2,16 +2,14 @@ import { Alert, Button, ConfigProvider, Form, Input, Spin } from 'antd';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AdminApiError, getSession, login, logout, type AdminSession, type Credentials } from './session';
-import { Brand, Workbench } from './workbench';
+import { Workbench } from './workbench';
 import './style.css';
 
 function SignInFrame({ children }: { children: ReactNode }) {
   return (
-    <main className="grid min-h-dvh place-items-center px-4 py-12">
-      <div className="w-full max-w-md overflow-hidden rounded-2xl border border-console-line bg-white shadow-console-panel">
-        <div className="workbench-hero border-b border-console-line px-6 py-5 sm:px-8"><Brand /></div>
-        <div className="p-6 sm:p-8">{children}</div>
-      </div>
+    <main className="min-h-dvh">
+      <header className="px-6 py-6 text-lg font-semibold sm:px-8">花火</header>
+      <div className="mx-auto mt-12 w-full max-w-[408px] px-6 pb-12 sm:mt-20">{children}</div>
     </main>
   );
 }
@@ -43,8 +41,7 @@ function SignIn({ onSignedIn }: { onSignedIn: (session: AdminSession) => void })
 
   return (
     <SignInFrame>
-      <h1 className="text-2xl font-semibold tracking-tight">管理员登录</h1>
-      <p className="mt-2 mb-6 text-sm text-slate-600">使用管理员账号进入花火工作台。</p>
+      <h1 className="mb-8 text-[30px] leading-tight font-semibold tracking-tight">管理员登录</h1>
       {error && <Alert className="mb-4" type="error" showIcon title={error} />}
       <Form<Credentials> layout="vertical" requiredMark={false} onFinish={submit}>
         <Form.Item name="username" label="用户名" rules={[{ required: true, whitespace: true, message: '请输入用户名。' }]}>
@@ -96,7 +93,7 @@ function AdminApp() {
   }
 
   if (state.kind === 'signed-in') {
-    return <Workbench admin={state.session.admin} onLogout={() => void signOut(state.session)} loggingOut={loggingOut} error={error} onSessionExpired={sessionExpired} />;
+    return <Workbench admin={state.session.admin} csrfToken={state.session.csrfToken} onLogout={() => void signOut(state.session)} loggingOut={loggingOut} error={error} onSessionExpired={sessionExpired} />;
   }
   if (state.kind === 'signed-out') {
     return <SignIn onSignedIn={session => setState({ kind: 'signed-in', session })} />;
@@ -121,7 +118,8 @@ if (!root) throw new Error('Admin UI root is missing');
 
 createRoot(root).render(
   <ConfigProvider theme={{
-    token: { colorPrimary: '#5344ad', colorText: '#202038', colorTextPlaceholder: '#606378', colorBorder: '#e7e6ee', borderRadius: 9, fontFamily: 'inherit' },
+    token: { colorPrimary: '#171717', colorText: '#171717', colorTextSecondary:'#575757', colorTextPlaceholder: '#575757', colorBorder: '#d4d4d4', colorBgLayout:'#fafafa', borderRadius: 8, controlHeight:40, controlHeightLG:48, controlHeightSM:32, fontSize:14, fontFamily: 'inherit' },
+    components:{Button:{primaryShadow:'none',defaultShadow:'none',primaryColor:'#fafafa',colorPrimaryHover:'#373737',colorPrimaryActive:'#171717'},Input:{activeBorderColor:'#565656',hoverBorderColor:'#565656'}},
   }}>
     {preview ? <Workbench /> : <AdminApp />}
   </ConfigProvider>,

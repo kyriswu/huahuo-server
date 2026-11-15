@@ -12,11 +12,11 @@
     "pnpm": "10.15.1"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && pnpm build:admin-ui",
+    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.build.json && pnpm build:admin-ui",
     "build:admin-ui": "vite build admin-ui",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p admin-ui/tsconfig.json",
     "lint": "eslint src tests scripts/*.mjs admin-ui",
-    "test": "vitest run tests/unit tests/contract",
+    "test": "vitest run tests/unit tests/contract --exclude '**/.local/**'",
     "test:unit": "vitest run tests/unit",
     "test:contract": "vitest run tests/contract",
     "test:integration": "node scripts/integration.mjs",
@@ -48,7 +48,7 @@
     "infra:down": "docker compose --env-file .env stop redis",
     "db:seed:dev": "tsx src/db/seed.ts",
     "db:generate": "node scripts/new-migration.mjs",
-    "test:integration:inner": "vitest run tests/integration",
+    "test:integration:inner": "vitest run tests/integration --exclude '**/.local/**'",
     "rag:consistency": "node --env-file=.env scripts/rag-consistency.mjs",
     "rag:verify-milvus": "pnpm build && node --env-file=.env scripts/verify-milvus.mjs",
     "admin:bootstrap": "node dist/entrypoints/admin-bootstrap.js",

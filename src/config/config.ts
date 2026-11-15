@@ -2,13 +2,17 @@ import type { QueueName } from '../modules/tasks/model.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
-import { loadDocumentParserMachineConfig, type DocumentParserMachineConfig } from './document-parser-machine.js';
-import { loadDocumentExtractionConfig, type DocumentExtractionConfig } from './document-extraction.js';
+import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
+import type { DocumentExtractionConfig } from './document-extraction.js';
+import { scopedConfig } from '../modules/runtime-settings/service.js';
 export type Role = 'api-server' | 'admin' | 'worker' | 'scheduler' | 'migrate';
 export type Env = Record<string, string | undefined>;
 export interface AppConfig {
   documentExtraction: DocumentExtractionConfig;
-  documentParserMachine: DocumentParserMachineConfig;
+  processingNodes: ProcessingNodesConfig;
+  runtimeRevision: number;
+  uploadHardMaxBytes: number;
+  taskPolicy: { maxAttempts:number;retryBaseMs:number;retryMaxMs:number;concurrency:Record<QueueName,number> };
   queuePrefix:string; workerQueues:QueueName[]; taskLeaseMs:number; taskRedeliveryMs:number; schedulerIntervalMs:number; demoTasks:boolean; testTaskDelayMs:number;
   role: Role; host: string; port: number; databaseUrl: string; poolMax: number;
   httpRequestTimeoutMs: number; httpConnectionTimeoutMs: number;
@@ -138,13 +142,10 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   const billingMode = (env.BILLING_MODE ?? (appEnv === 'development' ? 'development' : 'disabled')) as AppConfig['billingMode'];
   if (!['disabled', 'development', 'live'].includes(billingMode)) fail('BILLING_MODE');
   if (appEnv === 'production' && billingMode === 'development') fail('BILLING_MODE');
-  const billingPolicyVersion = env.BILLING_POLICY_VERSION ?? 'credit-policy-v1';
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(billingPolicyVersion)) fail('BILLING_POLICY_VERSION');
+  const billingPolicyVersion = 'credit-policy-v1';
   const storageDriver=(env.STORAGE_DRIVER??'local') as AppConfig['storageDriver'];
   if(!['local','s3','aliyun-oss'].includes(storageDriver))fail('STORAGE_DRIVER');
-  const tagExtractorProvider=(env.TAG_EXTRACTOR_PROVIDER ?? 'disabled') as AppConfig['tagExtractorProvider'];
-  if(!['deterministic','disabled','llm','dify'].includes(tagExtractorProvider))fail('TAG_EXTRACTOR_PROVIDER');
-  if(tagExtractorProvider==='deterministic' && (appEnv==='production'||env.ALLOW_MOCK_PROVIDERS!=='true'))fail('TAG_EXTRACTOR_PROVIDER');
+  const tagExtractorProvider:AppConfig['tagExtractorProvider']='disabled';
   const bool = (key:string, fallback:boolean): boolean => {
     const value=env[key]; if(value===undefined||value==='')return fallback;
     if(value==='true')return true; if(value==='false')return false; return fail(key);
@@ -157,27 +158,27 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     tokenizerPath: env.RAG_TOKENIZER_PATH?.trim() || 'resources/tokenizers/bge-m3/tokenizer.json',
     tokenizerConfigPath: env.RAG_TOKENIZER_CONFIG_PATH?.trim() || 'resources/tokenizers/bge-m3/tokenizer_config.json',
     tokenizerMaxInputTokens: integer('RAG_TOKENIZER_MAX_INPUT_TOKENS', 8192, 8192, 8192),
-    enabled: bool('RAG_INGESTION_ENABLED', true),
+    enabled: true,
     sourceAllowedHosts: csv('RAG_SOURCE_ALLOWED_HOSTS'),
-    maxSourceBytes: integer('RAG_MAX_SOURCE_BYTES', 200*1024*1024, 1, 2*1024*1024*1024),
-    plainTextMaxChars: integer('RAG_PLAIN_TEXT_MAX_CHARS', 50_000, 1, 5_000_000),
-    downloadTimeoutMs: integer('RAG_DOWNLOAD_TIMEOUT_MS', 120_000, 1_000, 600_000),
+    maxSourceBytes: 200*1024*1024,
+    plainTextMaxChars: 50_000,
+    downloadTimeoutMs: 120_000,
     ...(env.RAG_EMBEDDING_BASE_URL?.trim() ? { embeddingBaseUrl: env.RAG_EMBEDDING_BASE_URL.trim() } : {}),
     ...(env.RAG_EMBEDDING_API_KEY?.trim() ? { embeddingApiKey: env.RAG_EMBEDDING_API_KEY.trim() } : {}),
     embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || 'BAAI/bge-m3',
     embeddingDimensions: integer('RAG_EMBEDDING_DIMENSIONS', 1024, 1024, 1024),
     embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || 'bge-m3-1024',
-    embeddingBatchSize: integer('RAG_INGEST_BATCH_SIZE', 32, 1, 256),
-    indexingConcurrency:integer('RAG_INDEX_CONCURRENCY',2,1,16),
-    embeddingTimeoutMs: integer('RAG_EMBEDDING_TIMEOUT_MS', 30_000, 1_000, 600_000),
-    embeddingMaxRetries: integer('RAG_EMBEDDING_MAX_RETRIES', 2, 0, 5),
+    embeddingBatchSize: 32,
+    indexingConcurrency: 2,
+    embeddingTimeoutMs: 30_000,
+    embeddingMaxRetries: 2,
     providerMode: ragProvider,
     rerankProvider: ((env.RAG_RERANK_PROVIDER?.trim() || 'disabled') as RagConfig['rerankProvider']),
     ...(env.RAG_RERANK_BASE_URL?.trim() ? { rerankBaseUrl: env.RAG_RERANK_BASE_URL.trim() } : {}),
     ...(env.RAG_RERANK_API_KEY?.trim() ? { rerankApiKey: env.RAG_RERANK_API_KEY.trim() } : {}),
     rerankModel: env.RAG_RERANK_MODEL?.trim() || 'qwen3-rerank',
-    rerankTimeoutMs: integer('RAG_RERANK_TIMEOUT_MS', 30_000, 1_000, 600_000),
-    noteRerankBudgetMs: integer('RAG_NOTE_RERANK_BUDGET_MS', 200, 1, 30_000),
+    rerankTimeoutMs: 30_000,
+    noteRerankBudgetMs: 200,
   };
   for(const [key,value] of [['RAG_EMBEDDING_BASE_URL',rag.embeddingBaseUrl],['RAG_RERANK_BASE_URL',rag.rerankBaseUrl]] as const){
     if(!value)continue;try{const endpoint=new URL(value);if(!['http:','https:'].includes(endpoint.protocol)||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||(appEnv==='production'&&endpoint.protocol!=='https:'))fail(key);}catch{fail(key);}
@@ -187,19 +188,20 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (rag.rerankProvider === 'http' && (!rag.rerankBaseUrl || !rag.rerankApiKey)) fail('RAG_RERANK_CONFIG');
   if(rag.embeddingModel!=='BAAI/bge-m3'||rag.embeddingProfile!=='bge-m3-1024')fail('RAG_EMBEDDING_PROFILE');
   const kb = {
-    noteEnabled: bool('KB_NOTE_INDEXING_ENABLED', false),
+    noteEnabled: false,
     noteCollection: env.KB_NOTE_HYBRID_COLLECTION?.trim() || 'huahuo_kb_note_hybrid_chunks',
     documentCollection: env.KB_DOCUMENT_KEYWORD_COLLECTION?.trim() || 'huahuo_kb_keyword_chunks',
   };
   if(kb.noteCollection===kb.documentCollection||![kb.noteCollection,kb.documentCollection].every(v=>/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(v)))fail('KB_COLLECTIONS');
-  const maxUploadBytes=integer('MAX_UPLOAD_BYTES',100*1024*1024,1,2*1024*1024*1024);
+  const maxUploadBytes=100*1024*1024;
+  const uploadHardMaxBytes=integer('HTTP_UPLOAD_HARD_MAX_BYTES',2*1024*1024*1024,100*1024*1024,2*1024*1024*1024);
   const httpRequestTimeoutMs=integer('HTTP_REQUEST_TIMEOUT_MS',60_000,1_000,600_000);
   const httpConnectionTimeoutMs=integer('HTTP_CONNECTION_TIMEOUT_MS',65_000,1_000,600_000);
   if(httpConnectionTimeoutMs<httpRequestTimeoutMs)fail('HTTP_CONNECTION_TIMEOUT_MS');
   let storageS3:AppConfig['storageS3'];
-  if(storageDriver==='s3'&&['api-server','worker'].includes(role))storageS3={endpoint:url('STORAGE_S3_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_S3_REGION??'us-east-1',bucket:required('STORAGE_S3_BUCKET'),accessKeyId:required('STORAGE_S3_ACCESS_KEY_ID'),secretAccessKey:required('STORAGE_S3_SECRET_ACCESS_KEY'),maxBytes:maxUploadBytes};
+  if(storageDriver==='s3'&&['api-server','worker'].includes(role))storageS3={endpoint:url('STORAGE_S3_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_S3_REGION??'us-east-1',bucket:required('STORAGE_S3_BUCKET'),accessKeyId:required('STORAGE_S3_ACCESS_KEY_ID'),secretAccessKey:required('STORAGE_S3_SECRET_ACCESS_KEY'),maxBytes:uploadHardMaxBytes};
   let storageAliyunOss:AppConfig['storageAliyunOss'];
-  if(storageDriver==='aliyun-oss'&&['api-server','worker'].includes(role))storageAliyunOss={endpoint:url('STORAGE_ALIYUN_OSS_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_ALIYUN_OSS_REGION??'cn-beijing',bucket:required('STORAGE_ALIYUN_OSS_BUCKET'),accessKeyId:required('ALIYUN_RAM_ACCESS_KEY_ID'),accessKeySecret:required('ALIYUN_RAM_ACCESS_KEY_SECRET'),secure:env.STORAGE_ALIYUN_OSS_SECURE!=='false',timeoutMs:integer('STORAGE_ALIYUN_OSS_TIMEOUT_MS',120000,1000,600000),...(env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim()?{keyPrefix:env.STORAGE_ALIYUN_OSS_KEY_PREFIX.trim()}:{}),maxBytes:maxUploadBytes};
+  if(storageDriver==='aliyun-oss'&&['api-server','worker'].includes(role))storageAliyunOss={endpoint:url('STORAGE_ALIYUN_OSS_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_ALIYUN_OSS_REGION??'cn-beijing',bucket:required('STORAGE_ALIYUN_OSS_BUCKET'),accessKeyId:required('ALIYUN_RAM_ACCESS_KEY_ID'),accessKeySecret:required('ALIYUN_RAM_ACCESS_KEY_SECRET'),secure:env.STORAGE_ALIYUN_OSS_SECURE!=='false',timeoutMs:integer('STORAGE_ALIYUN_OSS_TIMEOUT_MS',120000,1000,600000),...(env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim()?{keyPrefix:env.STORAGE_ALIYUN_OSS_KEY_PREFIX.trim()}:{}),maxBytes:uploadHardMaxBytes};
   const logLevel = env.LOG_LEVEL ?? 'info';
   if (!['fatal','error','warn','info','debug','trace','silent'].includes(logLevel)) fail('LOG_LEVEL');
   const queuePrefix=env.REDIS_KEY_PREFIX??'huahuo-dev';
@@ -208,11 +210,10 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if(!workerQueues.length||new Set(workerQueues).size!==workerQueues.length||workerQueues.some(q=>!['content','ai','commercial','maintenance'].includes(q)))fail('WORKER_QUEUES');
   if(env.ENABLE_DEMO_TASKS==='true'&&appEnv==='production')fail('ENABLE_DEMO_TASKS');
   if(env.TEST_TASK_DELAY_MS&&appEnv!=='test')fail('TEST_TASK_DELAY_MS');
-  const documentExtraction:DocumentExtractionConfig=role==='migrate'?{enabled:false}:loadDocumentExtractionConfig(env);
-  const documentParserMachine:DocumentParserMachineConfig=role==='worker'||role==='scheduler'?loadDocumentParserMachineConfig(env):{enabled:false};
-  if(role==='worker'&&documentExtraction.enabled&&!documentParserMachine.enabled)fail('DOCUMENT_PARSER_MODE');
-  return {
-    documentExtraction,documentParserMachine,
+  const documentExtraction:DocumentExtractionConfig={enabled:false};
+  return scopedConfig({
+    documentExtraction,processingNodes:loadProcessingNodesConfig(env),runtimeRevision:0,uploadHardMaxBytes,
+    taskPolicy:{maxAttempts:3,retryBaseMs:1000,retryMaxMs:60000,concurrency:{content:2,ai:1,commercial:1,maintenance:1}},
     queuePrefix,workerQueues,taskLeaseMs:integer('TASK_LEASE_MS',15000,1000,60000),taskRedeliveryMs:integer('TASK_REDELIVERY_MS',30000,1000,300000),schedulerIntervalMs:integer('SCHEDULER_INTERVAL_MS',1000,100,10000),
     demoTasks:env.ENABLE_DEMO_TASKS==='true',testTaskDelayMs:integer('TEST_TASK_DELAY_MS',0,0,5000),
     role, host: env.HOST ?? (['worker','scheduler'].includes(role) ? '127.0.0.1' : '0.0.0.0'),
@@ -246,7 +247,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     privacyVersion: env.PRIVACY_POLICY_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     adminOrigin: env.ADMIN_PUBLIC_BASE_URL ? new URL(env.ADMIN_PUBLIC_BASE_URL).origin : '',
     billingMode, billingPolicyVersion,
-    storageDriver, storageLocalRoot: env.STORAGE_LOCAL_ROOT ?? './var/storage', maxUploadBytes, storageS3, storageAliyunOss, storageQuotaBytes:integer('STORAGE_QUOTA_BYTES',1024*1024*1024,1,Number.MAX_SAFE_INTEGER), appPublicBaseUrl: env.APP_PUBLIC_BASE_URL ?? 'http://127.0.0.1:3000', tagExtractorProvider,
+    storageDriver, storageLocalRoot: env.STORAGE_LOCAL_ROOT ?? './var/storage', maxUploadBytes, storageS3, storageAliyunOss, storageQuotaBytes:1024*1024*1024, appPublicBaseUrl: env.APP_PUBLIC_BASE_URL ?? 'http://127.0.0.1:3000', tagExtractorProvider,
     milvus: {
       ...(env.MILVUS_ADDRESS?.trim() ? { address: env.MILVUS_ADDRESS.trim() } : {}),
       ...(env.MILVUS_USERNAME?.trim() ? { username: env.MILVUS_USERNAME.trim() } : {}),
@@ -254,13 +255,13 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
       database: env.MILVUS_DATABASE?.trim() || 'default',
       tls: bool('MILVUS_TLS', true),
       createIfMissing: bool('MILVUS_CREATE_IF_MISSING', false),
-      searchConcurrency: integer('MILVUS_SEARCH_CONCURRENCY', 50, 1, 50),
-      denseCandidates: integer('RAG_DENSE_CANDIDATES', 20, 1, 200),
-      bm25Candidates: integer('RAG_BM25_CANDIDATES', 20, 1, 200),
-      hybridCandidates: integer('RAG_HYBRID_CANDIDATES', 30, 1, 200),
-      rrfK: integer('RAG_RRF_K', 60, 1, 10000),
+      searchConcurrency: 50,
+      denseCandidates: 20,
+      bm25Candidates: 20,
+      hybridCandidates: 30,
+      rrfK: 60,
     },
     rag,
     kb,
-  };
+  });
 }

@@ -1,26 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { loadDocumentParserMachineConfig } from '../../src/config/document-parser-machine.js';
-import { singleA10InstanceTypes } from '../../src/config/document-parser-eci.js';
+import { createDocumentParserConfig } from '../../src/config/document-parser-machine.js';
+import {createDocumentParserEciConfig, singleA10InstanceTypes } from '../../src/config/document-parser-eci.js';
 import { isEcsCapacityRejection, EcsPowerError } from '../../src/integrations/ecs-power.js';
 import { buildEciCreateRequest } from '../../src/integrations/gpu-spot/aliyun-eci.js';
 
-const env = {
-  DOCUMENT_PARSER_MODE: 'ecs', DOCUMENT_PARSER_ECS_REGION_ID: 'cn-beijing',
-  DOCUMENT_PARSER_ECS_INSTANCE_ID: 'i-unittest123456', DOCUMENT_PARSER_ECS_PRIVATE_IP: '172.18.102.101',
-  ALIYUN_RAM_ACCESS_KEY_ID: 'test-ak', ALIYUN_RAM_ACCESS_KEY_SECRET: 'test-secret',
-  DOCUMENT_PARSER_ECI_FALLBACK_ENABLED: 'true', DOCUMENT_PARSER_ECI_VPC_ID: 'vpc-test',
-  DOCUMENT_PARSER_ECI_SECURITY_GROUP_ID: 'sg-test', DOCUMENT_PARSER_ECI_VSWITCH_IDS: 'vsw-a,vsw-b,vsw-c,vsw-d',
-  DOCUMENT_PARSER_ECI_IMAGE: 'example-registry-vpc.cn-beijing.cr.aliyuncs.com/ai_service/xberg:cuda-a10-native-first-oss-kbxml-v1',
-  DOCUMENT_PARSER_ECI_ACR_INSTANCE_ID: 'cri-test', STORAGE_ALIYUN_OSS_BUCKET: 'test-bucket', STORAGE_ALIYUN_OSS_KEY_PREFIX: 'huahuo',
-};
+const fallback={vpcId:'vpc-test',securityGroupId:'sg-test',vSwitchIds:['vsw-a','vsw-b','vsw-c','vsw-d'],instanceTypes:[...singleA10InstanceTypes],image:'example-registry-vpc.cn-beijing.cr.aliyuncs.com/ai_service/xberg:cuda-a10-native-first-oss-kbxml-v1',acrInstanceId:'cri-test',extraStorageGiB:40,bucket:'test-bucket',keyPrefix:'huahuo'};
+const options={mode:'ecs' as const,regionId:'cn-beijing',instanceId:'i-unittest123456',privateIp:'172.18.102.101',credentials:async()=>({accessKeyId:'test-ak',accessKeySecret:'test-secret'})};
 
 describe('A10 pay-as-you-go ECS → ECI configuration (no cloud)', () => {
   it('is opt-in and does not change the existing ECS configuration when disabled', () => {
-    const config = loadDocumentParserMachineConfig({ ...env, DOCUMENT_PARSER_ECI_FALLBACK_ENABLED: 'false', DOCUMENT_PARSER_ECI_IMAGE: '' });
+    const config = createDocumentParserConfig(options);
     expect(config).not.toHaveProperty('eciFallback');
   });
   it('keeps all four A10 priorities, four switches, internal image/OSS and the existing model entrypoint', () => {
-    const config = loadDocumentParserMachineConfig(env);
+    const config = createDocumentParserConfig({...options,eciFallback:createDocumentParserEciConfig(fallback,'cn-beijing')});
     if (!config.enabled || config.mode !== 'ecs' || !config.eciFallback) throw new Error('TEST_CONFIG_REQUIRED');
     const spec = config.eciFallback.spec, request = buildEciCreateRequest(spec, 'test-token', 'a'.repeat(64));
     expect(spec.instanceTypes).toEqual(singleA10InstanceTypes);
@@ -41,15 +34,16 @@ describe('A10 pay-as-you-go ECS → ECI configuration (no cloud)', () => {
     request.validate();
   });
   it.each([
-    { DOCUMENT_PARSER_ECI_FALLBACK_ENABLED: 'yes' }, { DOCUMENT_PARSER_MODE: 'always-on' },
-    { DOCUMENT_PARSER_ECI_VPC_ID: '' }, { DOCUMENT_PARSER_ECI_VSWITCH_IDS: 'vsw-a,vsw-a' },
-    { DOCUMENT_PARSER_ECI_INSTANCE_TYPES: 'ecs.gn6i-c4g1.xlarge' }, { DOCUMENT_PARSER_ECI_INSTANCE_TYPES: 'ecs.gn7i-c8g1.2xlarge,ecs.gn7i-c8g1.2xlarge' },
-    { DOCUMENT_PARSER_ECI_IMAGE: 'example-registry.cn-beijing.cr.aliyuncs.com/ai_service/xberg:latest' },
-    { DOCUMENT_PARSER_ECI_IMAGE: 'example-registry-vpc.cn-shanghai.cr.aliyuncs.com/ai_service/xberg:latest' },
-    { DOCUMENT_PARSER_ECI_ACR_INSTANCE_ID: '' }, { DOCUMENT_PARSER_ECI_EXTRA_STORAGE_GIB: '0' },
-    { STORAGE_ALIYUN_OSS_BUCKET: '' }, { STORAGE_ALIYUN_OSS_KEY_PREFIX: '../private' },
-  ])('rejects a partial or incompatible fallback before any allocation: %j', override => {
-    expect(() => loadDocumentParserMachineConfig({ ...env, ...override })).toThrow('INVALID_CONFIG:');
+    {vpcId:''},{vSwitchIds:['vsw-a','vsw-a']},{instanceTypes:['ecs.gn6i-c4g1.xlarge']},
+    {instanceTypes:['ecs.gn7i-c8g1.2xlarge','ecs.gn7i-c8g1.2xlarge']},
+    {image:'example-registry.cn-beijing.cr.aliyuncs.com/ai_service/xberg:latest'},
+    {image:'example-registry-vpc.cn-shanghai.cr.aliyuncs.com/ai_service/xberg:latest'},
+    {acrInstanceId:''},{extraStorageGiB:0},{bucket:''},{keyPrefix:'../private'},
+  ])('rejects incompatible fallback before allocation: %j',override=>{
+    expect(()=>createDocumentParserEciConfig({...fallback,...override},'cn-beijing')).toThrow('INVALID_CONFIG:');
+  });
+  it('rejects ECI fallback on a permanent API node',()=>{
+    expect(()=>createDocumentParserConfig({mode:'always-on',baseUrl:'https://example.test',eciFallback:createDocumentParserEciConfig(fallback,'cn-beijing')})).toThrow('INVALID_CONFIG:');
   });
   it('accepts only the explicit stock rejection of StartInstance', () => {
     expect(isEcsCapacityRejection(new EcsPowerError('ECS_API_FAILED', 'rejected', 'OperationDenied.NoStock'))).toBe(true);

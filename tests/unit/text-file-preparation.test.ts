@@ -62,7 +62,7 @@ describe('native file text preparation', () => {
   it.each([['source.pdf', 'application/pdf'], ['source.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'], ['source.ppt', 'application/vnd.ms-powerpoint'], ['source.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']])('rejects %s at admission before opening a database transaction', async (fileName, mimeType) => {
     const config = configuration(); config.rag.enabled = true;
     const connect = vi.fn();
-    const repository = new RagIngestionRepository({ connect } as unknown as pg.Pool, config.rag, config.appEnv, config.kb.documentCollection, config);
+    const repository = new RagIngestionRepository({ connect } as unknown as pg.Pool,config);
     await expect(repository.create({ userId: 'user', sessionId: 'session', traceId: 'trace' }, { fileName, mimeType, ossUrl: `https://files.example/${fileName}` })).rejects.toMatchObject({ statusCode: 400, code: 'RAG_FILE_TYPE_UNSUPPORTED' });
     expect(connect).not.toHaveBeenCalled();
   });
@@ -107,7 +107,7 @@ describe('bounded source downloading', () => {
     const boundary = new Error('DB_BOUNDARY');
     const connect = vi.fn(async () => { throw boundary; });
     const pool = { connect } as unknown as pg.Pool;
-    const repository = new RagIngestionRepository(pool, config.rag, config.appEnv, config.kb.documentCollection, config);
+    const repository = new RagIngestionRepository(pool,config);
     const scope = { userId: 'user', sessionId: 'session', traceId: 'trace' };
     const input = { fileName: 'source.txt', mimeType: 'text/plain' };
     await expect(repository.create(scope, { ...input, ossUrl: 'not-a-url' })).rejects.toMatchObject({ statusCode: 400, code: 'RAG_SOURCE_URL_INVALID' });

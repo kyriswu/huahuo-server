@@ -1,12 +1,13 @@
+import {extractionConfig} from '../support/extraction-config.js';
 import {describe,it,expect,vi} from 'vitest';
 import {DocumentExtractionClient,validateExtractionResponse,type ExtractionFile} from '../../src/integrations/document-extraction.js';
-import {loadDocumentExtractionConfig,assertCompleteExtractionConfig,type EnabledDocumentExtractionConfig} from '../../src/config/document-extraction.js';
+import {assertCompleteExtractionConfig,type EnabledDocumentExtractionConfig} from '../../src/config/document-extraction.js';
 import {sampleContext,sampleExtraction,sampleImage} from '../support/document-extraction.js';
 const ctx={baseUrl:'http://172.18.102.101:8000',headers:{Authorization:'Bearer test-token'},signal:new AbortController().signal};
 const files:ExtractionFile[]=[{...sampleContext,bytes:Buffer.from('%PDF-1.7\n%%EOF'),fileName:'document.pdf',mimeType:'application/pdf'}];
 const hooks=()=>({beforeSubmit:vi.fn(async()=>undefined),submitted:vi.fn<(jobId:string)=>Promise<void>>(async()=>undefined)});
 function configuration(mode:'sync'|'async'='sync'):EnabledDocumentExtractionConfig{
- const c=loadDocumentExtractionConfig({DOCUMENT_EXTRACTION_MODE:mode});if(!c.enabled)throw new Error('TEST_CONFIG_REQUIRED');return {...c,pollMs:1};
+ const c=extractionConfig(mode);if(!c.enabled)throw new Error('TEST_CONFIG_REQUIRED');return {...c,pollMs:1};
 }
 const json=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json'}});
 describe('document extraction protocol; fetch is mocked, no private-network calls',()=>{

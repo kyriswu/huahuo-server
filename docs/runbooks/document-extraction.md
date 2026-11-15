@@ -4,33 +4,15 @@
 
 大文件测试前须确认 Worker 临时磁盘容量及上游异步任务保留时间能够覆盖完整处理流程。2026-11-14 的325页 VPC 复测先遇128MiB临时磁盘 `ENOSPC`，随后异步任务约5分钟后返回404；实际接口声明任务5分钟过期，全文未完成入库及查询。相关设置尚未调整，同步接口尚未复测，详见[失败记录](../acceptance/document-extraction.md#完整325页复测未通过解析机已停止2026-11-14)。
 
-## 测试环境配置
+## 当前配置入口
 
-当前控制目标已换为通用文档解析CPU ECS `i-2zejbbo2svjieb44tqy8`。只有获得CPU服务完整config并确认端口/协议后，才在能访问私网的测试环境启用；下面先保持提取disabled，避免将GPU/CUDA请求配置发往CPU服务：
+文档模式、完整提取JSON、轮询与响应限额在PostgreSQL + Admin「解析与模型」管理；节点在「处理节点」登记。详见[运行配置手册](runtime-configuration.md)。不再读取DOCUMENT_EXTRACTION/DOCUMENT_PARSER旧ENV；当前本地开发环境已部署配置表，真实解析服务仍须在可达内网中另行验收。
 
-```dotenv
-DOCUMENT_PARSER_MODE=ecs
-DOCUMENT_PARSER_BASE_URL=http://172.18.102.103:8000
-DOCUMENT_PARSER_HEALTH_PATH=/health
-DOCUMENT_PARSER_ECS_REGION_ID=cn-beijing
-DOCUMENT_PARSER_ECS_INSTANCE_ID=i-2zejbbo2svjieb44tqy8
-DOCUMENT_PARSER_ECS_PRIVATE_IP=172.18.102.103
-DOCUMENT_PARSER_ECI_FALLBACK_ENABLED=false
-DOCUMENT_PARSER_CONCURRENCY=1
-DOCUMENT_PARSER_IDLE_SECONDS=60
-DOCUMENT_EXTRACTION_MODE=disabled
-DOCUMENT_EXTRACTION_CONFIG_PATH=resources/document-extraction/kbxml-request.json
-DOCUMENT_EXTRACTION_POLL_MS=2000
-DOCUMENT_EXTRACTION_MAX_RESPONSE_BYTES=67108864
-```
+CPU 节点 `i-2zejbbo2svjieb44tqy8` / `172.18.102.103:8000` 在初始化基线中停用，解析模式 disabled，总开关 PROCESSING_NODES_ENABLED=false。CPU 完整 JSON/服务协议尚待实测；历史 resources/document-extraction/kbxml-request.json 是 GPU/CUDA 基线，不自动发送给 CPU。
 
-ECS 控制使用已有共享 RAM 环境变量；API/worker 共用提取模式及配置文件，只有 worker/scheduler 收到机器控制配置。worker 在启用提取但未配置运行模式时拒绝启动。构建已包含 resources 文件，不在启动/请求时下载模型。启用配置后，真实任务会访问解析服务，并在 ECS 模式下按需开停机；2026-11-14 的 VPC 复测使用临时部署配置，未修改原 `.env`。
+配置整体替换、不递归合并，受理时冻结完整 JSON/hash 和母文件/批次 UUID。新任务按负载分配兼容节点；已分配任务的提交、轮询、取消和结果领取始终使用原节点，重试不读取新提取参数。明确提交前的 bound 阶段可安全恢复；intent 模糊提交不重发；job 恢复只查询。同步/异步由 document.mode 决定。
 
-`resources/document-extraction/kbxml-request.json` 保留的是此前用户提供的GPU完整请求配置：Markdown、关闭缓存与force_ocr、PP-OCRv5 server/chi_sim/batch6、CUDA0、3000秒、150DPI/JPEG85、每页最多16图、无图片Base64、native-first80/32。它不是当前CPU实例的已验证配置。本轮不猜测CPU模型/提供器；后续将CPU服务完整JSON配置到 `DOCUMENT_EXTRACTION_CONFIG_PATH` 后，再将提取模式设为async。覆盖文件必须完整，不做默认合并；每个任务受理时将整份配置及hash写入PG快照，重试不读取新默认值。默认客户端3120秒覆盖3000秒提取上限并留传输预算。
-
-单次请求最多16个文件，总文件字节预算略低于服务100MiB上限（预留multipart开销）；响应上限64MiB，规范正文沿用存储侧16MiB文本上限，超出明确失败而不截断。完整JSON压缩保存，避免大量定位元数据占用文本文件预算。所有资料入口只依赖关键词索引，不因全局模型提供方关闭而拒绝资料导入；`RAG_INGESTION_ENABLED` 仍控制业务功能开关。
-
-将 `DOCUMENT_EXTRACTION_MODE` 改为 `sync` 使用同步 `/extract`。切换长期在线的同协议 API 时用 `DOCUMENT_PARSER_MODE=always-on` 和配置的服务基址，不需 ECS 凭据，其余去重/排队/并发不变；具体排空切换步骤见[运行库手册](document-parser-machine.md)。
+单次提取最多16文件、总文件字节预算略低于服务100MiB（预留multipart）；响应默认64MiB，正文存储沿用16MiB文本上限。超出明确失败，不截断；完整JSON gzip保存。features.documentIngestion 控制资料受理，继续使用现有关键词流水线，不新增模型/向量知识库。当前生产镜像/CPU参数待实际验证，不因单元或隔离测试通过而声称线上解析可用。
 
 ## 现有文件 API
 

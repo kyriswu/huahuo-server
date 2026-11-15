@@ -37,15 +37,17 @@ local function notify() redis.call('PUBLISH', string.sub(meta, 1, -6) .. 'events
 local exists = redis.call('EXISTS', meta) == 1
 if not exists then
   if redis.call('HLEN', jobs) > 0 or redis.call('ZCARD', waiting) > 0 or redis.call('ZCARD', active) > 0 then return result('STATE_MISSING') end
-  if op ~= 'register' then return result('UNMANAGED') end
+  if op ~= 'register' and op ~= 'recover-admission' then return result('UNMANAGED') end
   redis.call('HSET', meta, 'signature', signature, 'phase', 'ready', 'lastActivity', now, 'sequence', 0)
-elseif op == 'configure' then
-  if redis.call('HLEN', jobs) > 0 or redis.call('ZCARD', waiting) > 0 or redis.call('ZCARD', active) > 0
-    or redis.call('EXISTS', lock) == 1 or redis.call('HEXISTS', meta, 'eciTarget') == 1
-    or redis.call('HGET', meta, 'phase') ~= 'ready' then return result('BUSY') end
-  redis.call('HSET', meta, 'signature', signature, 'lastActivity', now)
-  notify()
+elseif op == 'unlock' then
+  if redis.call('GET', lock) == token then redis.call('DEL', lock) end
   return result('OK')
+elseif op == 'configure-locked' then
+  if redis.call('GET', lock) ~= token then return result('LOCK_LOST') end
+  if redis.call('HLEN',jobs) > 0 or redis.call('HEXISTS',meta,'eciTarget') == 1
+    or redis.call('HGET',meta,'phase') ~= 'ready'
+    or (value == 'ecs' and redis.call('HGET',meta,'economicallyStopped') ~= '1') then return result('BUSY') end
+  redis.call('HSET',meta,'signature',signature); notify(); return result('OK')
 elseif redis.call('HGET', meta, 'signature') ~= signature then return result('CONFIG_MISMATCH') end
 local phase = redis.call('HGET', meta, 'phase')
 if redis.call('HLEN', jobs) ~= redis.call('ZCARD', waiting) + redis.call('ZCARD', active) then return result('STATE_INCONSISTENT') end
@@ -77,12 +79,18 @@ local function ownedActive()
   local job = jobFor(id)
   return job and job.owner == owner and job.stage == 'active' and job.expires > now
 end
-if op == 'status' then
+if op == 'outcome' then
+  local job = jobFor(id)
+  if job then return result('OK',job.stage) end
+  local raw = redis.call('GET',receipt)
+  if raw then return result('OK',cjson.decode(raw).stage) end
+  return result('OK')
+elseif op == 'status' then
   return result('OK', {phase=phase, queued=redis.call('ZCARD', waiting), active=redis.call('ZCARD', active), uncertain=uncertain,
     economicallyStopped=redis.call('HGET', meta, 'economicallyStopped') == '1',
     eciTarget=redis.call('HGET', meta, 'eciTarget') and cjson.decode(redis.call('HGET', meta, 'eciTarget')) or nil,
     lastActivityMs=tonumber(redis.call('HGET', meta, 'lastActivity')), redisTimeMs=now, reason=redis.call('HGET', meta, 'reason') or nil})
-elseif op == 'register' then
+elseif op == 'register' or op == 'recover-admission' then
   touch()
   local previous = redis.call('GET', receipt)
   local job = jobFor(id)
@@ -93,6 +101,14 @@ elseif op == 'register' then
   end
   if job then
     if job.fingerprint ~= fingerprint then return result('CONFLICT') end
+    if op == 'recover-admission' then
+      if job.stage == 'unknown' then
+        job.owner=owner; job.stage='active'; job.expires=now+lease
+        redis.call('HSET',jobs,id,cjson.encode(job)); redis.call('ZADD',active,job.expires,id)
+        return result('RESUMED')
+      end
+      if job.stage == 'active' or job.stage == 'queued' then return result('WAIT') end
+    end
     return result('DUPLICATE', job.stage)
   end
   if uncertain > 0 or phase == 'blocked' then return result('UNCERTAIN') end
@@ -140,13 +156,11 @@ elseif op == 'finish' or op == 'resolve' then
   return result('OK')
 elseif op == 'lock' then
   if value == 'request' and not ownedActive() then return result('LEASE_LOST') end
+  if value == 'configure' and (phase ~= 'ready' or redis.call('HLEN', jobs) > 0 or redis.call('HEXISTS', meta, 'eciTarget') == 1) then return result('BUSY') end
   if value == 'idle' and phase == 'ready' and not idleEnough() then return result('NOT_IDLE') end
   if phase == 'blocked' then return result('BLOCKED') end
   if not redis.call('SET', lock, token, 'NX', 'PX', 30000) then return result('LOCKED') end
   return result('OK', phase)
-elseif op == 'unlock' then
-  if redis.call('GET', lock) == token then redis.call('DEL', lock) end
-  return result('OK')
 elseif op == 'eci-target' or op == 'begin-eci-stop' then
   if redis.call('GET', lock) ~= token then return result('LOCK_LOST') end
   if op == 'eci-target' then
@@ -182,7 +196,8 @@ export class ParserMachineRedis {
   private readonly signature: string;
   constructor(private readonly redis: Pick<Redis, 'eval'>, private readonly config: EnabledDocumentParserMachineConfig, prefix: string) {
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(prefix)) throw new ParserMachineError('DOCUMENT_PARSER_PREFIX_INVALID');
-    this.keyPrefix = `${prefix}:document-parser:{single}`;
+    if(config.coordinationId&&!/^[a-f0-9-]{36}$/.test(config.coordinationId))throw new ParserMachineError('DOCUMENT_PARSER_PREFIX_INVALID');
+    this.keyPrefix = config.coordinationId ? `${prefix}:processing-node:{${config.coordinationId}}` : `${prefix}:document-parser:{single}`;
     this.eventsChannel = `${this.keyPrefix}:events`;
     this.signature = createHash('sha256').update(JSON.stringify({
       target: config.mode === 'ecs' ? { mode: config.mode, region: config.regionId, instance: config.instanceId, ip: config.privateIp } : { mode: config.mode },
@@ -208,6 +223,15 @@ export class ParserMachineRedis {
   async register(id: string, owner: string, fingerprint: string) {
     const r = await this.run('register', { id, owner, fingerprint });
     if (r.code !== 'OK') throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`, typeof r.data === 'string' ? r.data : undefined);
+  }
+  async recoverAdmission(id:string,owner:string,fingerprint:string):Promise<'registered'|'resumed'|'wait'>{
+    const r=await this.run('recover-admission',{id,owner,fingerprint});
+    if(r.code==='WAIT')return 'wait';if(r.code==='RESUMED')return 'resumed';if(r.code==='OK')return 'registered';
+    throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
+  }
+  async requestOutcome(id:string):Promise<string|undefined>{const r=await this.run('outcome',{id});return typeof r.data==='string'?r.data:undefined;}
+  async configureLocked(token:string,previousMode:'ecs'|'always-on'):Promise<void>{
+    const r=await this.run('configure-locked',{token,value:previousMode});if(r.code!=='OK')throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
   }
   async claim(id: string, owner: string): Promise<boolean> {
     const r = await this.run('claim', { id, owner });
@@ -255,12 +279,7 @@ export class ParserMachineRedis {
     if (r.code !== 'OK') throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
     return true;
   }
-  /** Explicit rollout step after draining callers; never clears active/unknown work or receipts. */
-  async configureWhenIdle(): Promise<void> {
-    const r = await this.run('configure');
-    if (r.code !== 'OK' && r.code !== 'UNMANAGED') throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);
-  }
-  async lock(token: string, mode: 'idle' | 'request', id?: string, owner?: string): Promise<MachinePhase | undefined> {
+  async lock(token: string, mode: 'idle' | 'request' | 'configure', id?: string, owner?: string): Promise<MachinePhase | undefined> {
     const r = await this.run('lock', { token, value: mode, id, owner });
     if (['UNMANAGED', 'NOT_IDLE', 'LOCKED'].includes(r.code)) return undefined;
     if (r.code !== 'OK') throw new ParserMachineError(`DOCUMENT_PARSER_${r.code}`);

@@ -1,5 +1,23 @@
 # Provider 与业务存储状态
 
+## RAG参数后台管理与ENV清理（2026-11-15）
+
+本轮仅配置/接口/界面及真实隔离PG/Redis验证，未执行模型、OSS上传、内网解析或云开停机。新增检索与Embedding测试用显式替身；服务地址、凭据、模型规格、源域名白名单仍在ENV，运行参数由后台DB管理。当前值无损导入原配置行，未改业务数据/索引，见[验收](acceptance/runtime-configuration.md)。
+
+## 试用弹窗与当前CPU检查（2026-11-15）
+
+本轮仅查询既有CPU实例身份/Stopped+StopCharging状态及尝试GET健康/版本/OpenAPI，172.18.102.103:8000不可达；没有云开停机、新申请、解析或OSS上传。节点配置改为单条JSON，试用入口收进解析与模型的Modal。434项unit/contract、220项真实隔离PG/Redis通过（1项Milvus跳过），其中云/解析协议为替身；不能视为真实PDF/Office识别通过。见[验收](acceptance/admin-document-trial.md)。
+
+## Admin文档试用与旧入口清理（2026-11-15）
+
+现有后台新增文档试用，复用业务解析配置/客户端/节点占用，只展示Markdown/JSON和阶段耗时，不创建笔记、资料、入库任务或索引。节点状态按用户要求显示“在线 / 不在线”。旧ENV加载器、假AK校验、无用参数与未使用旁路已清理；构建清除旧生成产物。434项unit/contract、219项隔离PG/Redis通过（1项Milvus跳过），typecheck/lint/build通过。现有主环境按原账号/数据更新，PDF/Office仍需CPU完整配置及可用节点。见[验收](acceptance/admin-document-trial.md)。
+
+
+## 运行配置与处理节点（2026-11-15）
+
+机器目标和业务策略改由PostgreSQL + Admin管理，连接/凭据/付费总开关仍在ENV。CPU文档基线节点停用，文档提取和节点总开关关闭；A10回退在GPU节点可选保留，没有调用真实供应商。LLM/Dify标签和音频HTTP协议仍未接入，不因出现配置项就宣称能力可用。见[验收](acceptance/runtime-configuration.md)。
+
+
 ## 当前文档解析CPU ECS目标（2026-11-15）
 
 用户将按量目标换为 `i-2zejbbo2svjieb44tqy8`，64核/128GiB、PostPaid/NoSpot，私网 `172.18.102.103`。共享RAM仅Describe校验通过；本机与示例已同步，实际模式disabled、A10回退false。CPU提取配置/HTTP接口未验收，不将此前CUDA配置直接启用；下面GPU结果均是历史基线。见[验收](acceptance/document-parser-cpu-target.md)。

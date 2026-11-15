@@ -1,16 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { loadDocumentParserMachineConfig } from '../../src/config/document-parser-machine.js';
+import { createDocumentParserConfig } from '../../src/config/document-parser-machine.js';
 import { AliyunEcsPower, EcsPowerError, assertEconomicalStopEligible, type EcsRpc, type EcsInstance } from '../../src/integrations/ecs-power.js';
-import { createDocumentParserMachine } from '../../src/lib/document-parser-machine/index.js';
 import { loadConfig } from '../../src/config/config.js';
 import { env } from '../helpers.js';
 
 const target = { regionId: 'cn-beijing', instanceId: 'i-unittest123456', privateIp: '172.18.102.101', credentials: async () => ({ accessKeyId: 'unit-ak', accessKeySecret: 'unit-secret' }) };
-const ecsEnv = {
-  DOCUMENT_PARSER_MODE: 'ecs', DOCUMENT_PARSER_ECS_REGION_ID: target.regionId,
-  DOCUMENT_PARSER_ECS_INSTANCE_ID: target.instanceId, DOCUMENT_PARSER_ECS_PRIVATE_IP: target.privateIp,
-  ALIYUN_RAM_ACCESS_KEY_ID: 'unit-ak', ALIYUN_RAM_ACCESS_KEY_SECRET: 'unit-secret',
-};
+const ecsOptions={mode:'ecs' as const,...target};
 const response = (overrides = {}) => ({ Instances: { Instance: [{
   InstanceId: target.instanceId, RegionId: target.regionId, InstanceType: 'ecs.gn7i-c16g1.4xlarge',
   Status: 'Running', InstanceChargeType: 'PostPaid', InstanceNetworkType: 'vpc',
@@ -19,47 +14,44 @@ const response = (overrides = {}) => ({ Instances: { Instance: [{
 }] } });
 
 describe('document parser configuration (no live cloud calls)', () => {
-  it('defaults disabled without cloud/HTTP/Redis connections', () => {
-    const config = loadDocumentParserMachineConfig({});
-    expect(config).toEqual({ enabled: false });
-    expect(createDocumentParserMachine(config, 'not-a-url', 'prefix')).toBeUndefined();
+  it('defaults node execution disabled at the deployment boundary',()=>{
+    expect(loadConfig('worker',env).processingNodes.enabled).toBe(false);
   });
   it('configures one ECS with default one-minute idle and one global slot', () => {
-    const config = loadDocumentParserMachineConfig(ecsEnv);
+    const config = createDocumentParserConfig(ecsOptions);
     expect(config.enabled && config.mode).toBe('ecs');
     if (!config.enabled) throw new Error('CONFIG_REQUIRED');
     expect(config).toMatchObject({ baseUrl: 'http://172.18.102.101:8000', healthPath: '/health', idleMs: 60000, concurrency: 1 });
   });
   it('supports permanent API paths with no ECS credentials', () => {
-    const config = loadDocumentParserMachineConfig({ DOCUMENT_PARSER_MODE: 'always-on', DOCUMENT_PARSER_BASE_URL: 'https://parser.example.com/v2/documents' });
+    const config = createDocumentParserConfig({ mode: 'always-on', baseUrl: 'https://parser.example.com/v2/documents' });
     expect(config).toMatchObject({ mode: 'always-on', baseUrl: 'https://parser.example.com/v2/documents', healthPath: '', concurrency: 1 });
     expect('credentials' in config).toBe(false);
   });
   it.each([
-    { DOCUMENT_PARSER_MODE: 'unknown' },
-    { DOCUMENT_PARSER_BASE_URL: 'http://172.18.102.102:8000' },
-    { DOCUMENT_PARSER_BASE_URL: 'https://user:secret@172.18.102.101' },
-    { DOCUMENT_PARSER_ECS_PRIVATE_IP: '169.254.169.254' },
-    { DOCUMENT_PARSER_ECS_REGION_ID: 'cn-beijing.evil.invalid' },
-    { DOCUMENT_PARSER_CONCURRENCY: '0' },
-    { DOCUMENT_PARSER_IDLE_SECONDS: '0' },
-    { DOCUMENT_PARSER_HEALTH_PATH: '//other-host/health' },
-    { DOCUMENT_PARSER_HEALTH_PATH: '' },
-    { DOCUMENT_PARSER_API_TOKEN: 'abc\r\nsecret' },
+    { mode: 'unknown' },
+    { baseUrl: 'http://172.18.102.102:8000' },
+    { baseUrl: 'https://user:secret@172.18.102.101' },
+    { privateIp: '169.254.169.254' },
+    { regionId: 'cn-beijing.evil.invalid' },
+    { concurrency: 0 },
+    { idleMs: 0 },
+    { healthPath: '//other-host/health' },
+    { healthPath: '' },
+    { apiToken: 'abc\r\nsecret' },
   ])('rejects malformed or mismatched managed target settings %j', override => {
-    expect(() => loadDocumentParserMachineConfig({ ...ecsEnv, ...override })).toThrow('INVALID_CONFIG:');
+    expect(() => createDocumentParserConfig({ ...ecsOptions, ...override } as Parameters<typeof createDocumentParserConfig>[0])).toThrow('INVALID_CONFIG:');
   });
   it('rejects credentials in API URLs and public plaintext APIs', () => {
     for (const url of ['https://user:secret@parser.example.com', 'http://parser.example.com/v1']) {
-      expect(() => loadDocumentParserMachineConfig({ DOCUMENT_PARSER_MODE: 'always-on', DOCUMENT_PARSER_BASE_URL: url })).toThrow('INVALID_CONFIG:DOCUMENT_PARSER_BASE_URL');
+      expect(() => createDocumentParserConfig({ mode: 'always-on', baseUrl: url })).toThrow('INVALID_CONFIG:PROCESSING_NODE_BASE_URL');
     }
   });
-  it('loads lifecycle configuration only in worker and scheduler roles', () => {
-    const settings = { ...env, ...ecsEnv };
-    expect(loadConfig('worker', settings).documentParserMachine.enabled).toBe(true);
-    expect(loadConfig('scheduler', settings).documentParserMachine.enabled).toBe(true);
-    expect(loadConfig('api-server', settings).documentParserMachine.enabled).toBe(false);
-    expect(loadConfig('admin', settings).documentParserMachine.enabled).toBe(false);
+  it('uses DB nodes behind a deployment master switch, not legacy target environment', () => {
+    const settings={...env,DOCUMENT_PARSER_MODE:'ecs',DOCUMENT_PARSER_BASE_URL:'https://unused.invalid'};
+    expect(loadConfig('worker', settings).processingNodes.enabled).toBe(false);
+    expect(loadConfig('scheduler', {...settings,PROCESSING_NODES_ENABLED:'true'}).processingNodes.enabled).toBe(true);
+    expect(loadConfig('api-server', settings).documentExtraction.enabled).toBe(false);
   });
 });
 

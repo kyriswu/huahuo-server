@@ -31,7 +31,7 @@ export class RagIngestionJobs {
   private readonly versions: RagIngestionRepository;
   private readonly extractor:ManagedDocumentExtractor;
   constructor(readonly pool: pg.Pool, readonly config: AppConfig, readonly storage: StoragePort, private readonly dependencies:{analyze?:typeof analyzeDocumentStructure;saveToc?:(id:string,toc:CanonicalTocItem[])=>Promise<void>;kb?:KbDependencies}={}) {
-    this.versions = new RagIngestionRepository(pool, config.rag, config.appEnv, config.kb.documentCollection, config);
+    this.versions = new RagIngestionRepository(pool,config);
     this.extractor=new ManagedDocumentExtractor(pool,config,storage);
   }
   async close(): Promise<void> {await this.extractor.close();}

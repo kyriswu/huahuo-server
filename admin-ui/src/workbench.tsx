@@ -2,6 +2,7 @@ import { Alert, Button } from 'antd';
 import { useEffect, useState, type ReactNode } from 'react';
 import type { AdminIdentity } from './session';
 import { UserManagement } from './users';
+import {ConfigurationPage} from './configuration';
 
 type SampleRecord = {
   id: string;
@@ -37,7 +38,7 @@ function readSidebarPreference() {
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex shrink-0 items-center gap-2.5">
-      <span className="grid size-9 shrink-0 place-items-center rounded-[11px] bg-[#fff0eb] text-[#be4c3b]">
+      <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-console-accent-soft text-console-ink">
         <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor" className="size-[21px]">
           <path d="M12 1.5 14.9 9.1 22.5 12l-7.6 2.9-2.9 7.6-2.9-7.6L1.5 12l7.6-2.9L12 1.5Z" />
         </svg>
@@ -50,8 +51,8 @@ export function Brand({ compact = false }: { compact?: boolean }) {
   );
 }
 
-type AdminPage = 'workbench' | 'users';
-const currentPage = (): AdminPage => window.location.hash === '#users' ? 'users' : 'workbench';
+type AdminPage = 'workbench' | 'users' | 'configuration';
+const currentPage = (): AdminPage => window.location.hash === '#configuration'?'configuration':window.location.hash === '#users' ? 'users' : 'workbench';
 
 function WorkspaceNavigation({ collapsed, page }: { collapsed: boolean; page: AdminPage }) {
   const navigationStyle = (active: boolean) => `flex min-h-10 items-center gap-2.5 rounded-[10px] py-2 text-sm font-semibold whitespace-nowrap focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-console-accent ${active ? 'bg-console-accent-soft text-console-accent' : 'text-console-muted hover:bg-console-canvas hover:text-console-ink'} ${collapsed ? 'justify-center px-2.5' : 'px-3'}`;
@@ -60,7 +61,7 @@ function WorkspaceNavigation({ collapsed, page }: { collapsed: boolean; page: Ad
       <div className={`md:flex md:h-16 md:items-center ${collapsed ? 'md:justify-center' : 'md:px-2'}`}>
         <Brand compact={collapsed} />
       </div>
-      <nav aria-label="管理后台导航" className="flex gap-1 md:mt-6 md:flex-col">
+      <nav aria-label="管理后台导航" className="flex min-w-0 gap-1 overflow-x-auto md:mt-6 md:flex-col md:overflow-visible">
         {!collapsed && <div aria-hidden="true" className="mb-2 hidden px-3 text-xs font-medium text-console-muted md:block">导航</div>}
         <a href="#workbench" aria-current={page === 'workbench' ? 'page' : undefined} title="工作台" className={navigationStyle(page === 'workbench')}>
           <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0">
@@ -74,6 +75,10 @@ function WorkspaceNavigation({ collapsed, page }: { collapsed: boolean; page: Ad
         <a href="#users" aria-current={page === 'users' ? 'page' : undefined} title="用户管理" className={navigationStyle(page === 'users')}>
           <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0"><circle cx="9" cy="8" r="3" /><path d="M3.5 20v-2a5.5 5.5 0 0 1 11 0v2M16 5.5a3 3 0 0 1 0 5.8M20.5 20v-2a5.5 5.5 0 0 0-3-4.9" /></svg>
           <span className={collapsed ? 'sr-only' : undefined}>用户管理</span>
+        </a>
+        <a href="#configuration" aria-current={page==='configuration'?'page':undefined} title="运行配置" className={navigationStyle(page==='configuration')}>
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="8" cy="18" r="2" fill="currentColor"/></svg>
+          <span className={collapsed?'sr-only':undefined}>运行配置</span>
         </a>
       </nav>
     </aside>
@@ -117,22 +122,7 @@ function Panel({ title, titleId, meta, children }: { title: string; titleId: str
 function WorkbenchHero() {
   return (
     <section aria-labelledby="workbench-title" className="workbench-hero relative isolate overflow-hidden rounded-2xl border border-console-line px-5 py-6 shadow-console-panel sm:px-8 sm:py-8">
-      <svg aria-hidden="true" viewBox="0 0 335 188" fill="none" className="pointer-events-none absolute right-0 bottom-0 -z-10 h-full w-56 translate-x-12 opacity-60 sm:w-80 sm:translate-x-0 sm:opacity-100" preserveAspectRatio="xMaxYMid slice">
-        <g stroke="#d9d0f4">
-          <circle cx="225" cy="94" r="36" />
-          <circle cx="225" cy="94" r="58" />
-          <circle cx="225" cy="94" r="80" />
-          <circle cx="225" cy="94" r="104" />
-        </g>
-        <path d="M225 66 232 87 253 94 232 101 225 122 218 101 197 94 218 87Z" fill="#c3b5ef" />
-        <circle cx="225" cy="36" r="3.5" fill="#b9a8e8" />
-        <circle cx="294" cy="135" r="4.5" fill="#d5a7c7" />
-        <circle cx="139" cy="36" r="3" fill="#dfc1e2" />
-      </svg>
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-[#e4ddf8] bg-white/75 px-2.5 py-1 text-xs font-medium text-console-accent">
-        <span aria-hidden="true" className="size-1.5 rounded-full bg-console-accent" />
-        示例数据
-      </span>
+      <span className="text-xs font-medium text-console-muted">示例数据</span>
       <h1 id="workbench-title" className="mt-3 text-[1.85rem] leading-tight font-semibold tracking-tight sm:text-4xl">工作台</h1>
       <p className="mt-2 text-sm leading-6 text-console-muted">查看示例记录和处理概况。</p>
     </section>
@@ -140,6 +130,7 @@ function WorkbenchHero() {
 }
 
 interface WorkbenchProps {
+  csrfToken?:string;
   admin?: AdminIdentity;
   onLogout?: () => void;
   loggingOut?: boolean;
@@ -147,7 +138,7 @@ interface WorkbenchProps {
   onSessionExpired?: () => void;
 }
 
-export function Workbench({ admin, onLogout, loggingOut, error, onSessionExpired }: WorkbenchProps) {
+export function Workbench({ admin, csrfToken, onLogout, loggingOut, error, onSessionExpired }: WorkbenchProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarPreference);
   const [page, setPage] = useState<AdminPage>(currentPage);
   useEffect(() => {
@@ -172,13 +163,13 @@ export function Workbench({ admin, onLogout, loggingOut, error, onSessionExpired
       <WorkspaceNavigation collapsed={sidebarCollapsed} page={page} />
 
       <div className="min-w-0">
-        <header className="sticky top-0 z-10 flex min-h-16 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-console-line bg-white/95 px-3 py-2.5 backdrop-blur-sm sm:px-7 lg:px-9">
+        <header className="sticky top-0 z-10 flex min-h-16 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-console-line bg-white px-3 py-2.5 sm:px-7 lg:px-9">
           <div className="flex items-center gap-2 text-sm sm:gap-3">
             <SidebarToggle collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
             <span aria-hidden="true" className="mr-1 h-5 w-px bg-console-line" />
             <span className="hidden text-console-muted sm:inline">管理后台</span>
             <span aria-hidden="true" className="hidden text-slate-400 sm:inline">/</span>
-            <span className="font-medium">{page === 'users' ? '用户管理' : '工作台'}</span>
+            <span className="font-medium">{page==='configuration'?'运行配置':page === 'users' ? '用户管理' : '工作台'}</span>
           </div>
           <div className="flex min-w-0 items-center gap-2 sm:gap-4">
             {admin && (
@@ -194,9 +185,9 @@ export function Workbench({ admin, onLogout, loggingOut, error, onSessionExpired
           </div>
         </header>
 
-        <main id={page} className="mx-auto grid max-w-7xl scroll-mt-16 gap-5 px-4 pt-5 pb-10 sm:px-8 sm:pt-8 lg:px-10">
+        <main id={page} className="mx-auto grid max-w-7xl grid-cols-1 scroll-mt-16 gap-5 px-4 pt-5 pb-10 sm:px-8 sm:pt-8 lg:px-10">
           {error && <Alert type="error" showIcon title={error} />}
-          {page === 'users' ? <UserManagement onSessionExpired={onSessionExpired} /> : <>
+          {page==='configuration'?<ConfigurationPage admin={admin} csrfToken={csrfToken} onSessionExpired={onSessionExpired}/>:page === 'users' ? <UserManagement onSessionExpired={onSessionExpired} /> : <>
           <WorkbenchHero />
           <Panel title="概况" titleId="overview-title">
             <dl aria-labelledby="overview-title" className="grid grid-cols-3 gap-2 p-3 sm:gap-4 sm:p-5">

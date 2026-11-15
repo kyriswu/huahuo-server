@@ -9,6 +9,12 @@ import { DomainError } from '../identity/store.js';
 import { AdminService, type AdminScope } from './service.js';
 import { Envelope, Text, Strict, Id } from '../identity/schemas.js';
 import { AdminUserList, AdminUserQuery } from './user-schemas.js';
+import {NodeSchema,ConfigurationResponse} from './configuration-schemas.js';
+import type {ProcessingNodes} from '../processing-nodes/service.js';
+import type {ProcessingNode} from '../processing-nodes/model.js';
+import type {RuntimeSettings} from '../runtime-settings/service.js';
+import type {Category,Values} from '../runtime-settings/registry.js';
+import type {AdminDocumentTrials} from './document-trials.js';
 declare module 'fastify' { interface FastifyRequest { adminScope?:AdminScope; } }
 function sessionCookie(req:FastifyRequest){
  const values=(req.headers.cookie??'').split(';').map(x=>x.trim()).filter(x=>x.startsWith('hh_admin_session='));
@@ -19,6 +25,7 @@ export function registerAdminRoutes(
  service: AdminService,
  config: AppConfig,
  tasks: TaskService,
+ configuration:{settings:RuntimeSettings;nodes:ProcessingNodes;trials:AdminDocumentTrials},
  renderPage: (reply: FastifyReply) => FastifyReply,
 ){
  app.decorateRequest('adminScope');
@@ -65,6 +72,35 @@ export function registerAdminRoutes(
  app.get('/admin/api/v1/tasks/:taskId',{preHandler:auth,schema:{params:Type.Object({taskId:Id},Strict),response:{200:Envelope(Type.Object({task:TaskSchema})),...taskErrors}}},async req=>success(await tasks.adminDetail(scope(req),(req.params as {taskId:string}).taskId),req.id));
  app.post('/admin/api/v1/tasks/:taskId/retry',{preHandler:[auth,csrf],schema:{params:Type.Object({taskId:Id},Strict),body:Type.Object({reason:Text(500)},Strict),response:{200:Envelope(MutationSchema),...taskErrors}}},async req=>success(await tasks.adminRetry(scope(req),(req.params as {taskId:string}).taskId,idempotencyKey(req,'required')!,(req.body as {reason:string}).reason,req.id),req.id));
  app.get('/admin/api/v1/resources/:resourceId',{preHandler:auth,schema:{params:Type.Object({resourceId:Id},Strict),response:{200:Envelope(Type.Object({resourceId:Id,userId:Id,workspaceId:Id,fileName:Type.String(),mimeType:Type.String(),sizeBytes:Type.Integer(),status:Type.String(),processingStatus:Type.String(),createdAt:Type.String()})),...errors}}},async req=>success(await service.resource(scope(req),(req.params as {resourceId:string}).resourceId,req.id),req.id));
+ app.get('/admin/api/v1/configuration',{preHandler:auth,schema:{response:{200:Envelope(ConfigurationResponse),...errors}}},async req=>success(await configuration.settings.view(),req.id));
+ app.put('/admin/api/v1/configuration/:category',{preHandler:[auth,csrf],bodyLimit:262144,schema:{
+  params:Type.Object({category:Type.Union(['document','rag','tasks','storage','billing','features'].map(c=>Type.Literal(c)))},Strict),
+  body:Type.Object({revision:Type.Integer({minimum:1}),values:Type.Record(Type.String(),Type.Unknown())},Strict),
+  response:{200:Envelope(Type.Object({revision:Type.Integer(),values:Type.Record(Type.String(),Type.Unknown()),updatedAt:Type.String()})),...errors},
+ }},async req=>{const b=req.body as {revision:number;values:Values};return success(await configuration.settings.save((req.params as {category:Category}).category,b.values,b.revision,scope(req),req.id),req.id);});
+ app.get('/admin/api/v1/processing-nodes',{preHandler:auth,schema:{response:{200:Envelope(Type.Object({items:Type.Array(NodeSchema),enabled:Type.Boolean()})),...errors}}},async req=>success({items:await configuration.nodes.list(),enabled:config.processingNodes.enabled},req.id));
+ app.put('/admin/api/v1/processing-nodes/:nodeId',{preHandler:[auth,csrf],schema:{
+  params:Type.Object({nodeId:Id},Strict),body:Type.Object({revision:Type.Integer({minimum:0}),node:NodeSchema},Strict),
+  response:{200:Envelope(NodeSchema),...errors},
+ }},async req=>{const b=req.body as {revision:number;node:ProcessingNode};if(b.node.id!==(req.params as {nodeId:string}).nodeId)throw new DomainError(400,'PROCESSING_NODE_INVALID');return success(await configuration.nodes.upsert(b.node,b.revision,scope(req),req.id),req.id);});
+ const trials=configuration.trials;
+ const trialAuth=async(req:FastifyRequest)=>{await auth(req);await trials.authorize(scope(req));};
+ const trialErrors={...errors,413:ErrorSchema,503:ErrorSchema};
+ const trialResponse={200:Envelope(Type.Unknown()),202:Envelope(Type.Unknown()),...trialErrors};
+ app.get('/admin/api/v1/document-trials/capabilities',{preHandler:trialAuth,schema:{response:trialResponse}},async req=>success(await trials.capabilities(),req.id));
+ app.post('/admin/api/v1/document-trials',{preHandler:[trialAuth,csrf],schema:{body:Type.Object({fileUrl:Text(8192)},Strict),response:trialResponse}},async(req,reply)=>{reply.code(202);return success(await trials.start(scope(req),{url:(req.body as {fileUrl:string}).fileUrl},req.id),req.id);});
+ void app.register(async uploads=>{
+  uploads.removeAllContentTypeParsers();uploads.addContentTypeParser('application/octet-stream',(_req,payload,done)=>done(null,payload));
+  uploads.post('/admin/api/v1/document-trials/upload',{preHandler:[trialAuth,csrf],bodyLimit:32*1024*1024,schema:{querystring:Type.Object({fileName:Text(255),mimeType:Text(128)},Strict),response:trialResponse}},async(req,reply)=>{
+   const metadata=req.query as {fileName:string;mimeType:string};const {maxBytes}=await trials.capabilities();const parts:Buffer[]=[];let bytes=0;
+   for await(const part of req.body as NodeJS.ReadableStream){const chunk=Buffer.from(part);bytes+=chunk.length;if(bytes>maxBytes)throw new DomainError(413,'ADMIN_TRIAL_FILE_TOO_LARGE');parts.push(chunk);}
+   reply.code(202);return success(await trials.start(scope(req),{file:{bytes:Buffer.concat(parts),fileName:metadata.fileName,contentType:metadata.mimeType,finalUrl:''}},req.id),req.id);
+  });
+ });
+ const trialParams=Type.Object({trialId:Id},Strict);
+ app.get('/admin/api/v1/document-trials/:trialId',{preHandler:trialAuth,schema:{params:trialParams,response:trialResponse}},async req=>success(trials.status(scope(req),(req.params as {trialId:string}).trialId),req.id));
+ app.get('/admin/api/v1/document-trials/:trialId/result',{preHandler:trialAuth,schema:{params:trialParams,response:trialResponse}},async req=>success(trials.result(scope(req),(req.params as {trialId:string}).trialId),req.id));
+ app.delete('/admin/api/v1/document-trials/:trialId',{preHandler:[trialAuth,csrf],schema:{params:trialParams,response:trialResponse}},async req=>success(trials.cancel(scope(req),(req.params as {trialId:string}).trialId),req.id));
  // Unimplemented admin operations fail closed, including App JWT/Bearer attempts.
  app.all('/admin/*',{preHandler:auth},async()=>{throw new DomainError(404,'NOT_FOUND');});
 }

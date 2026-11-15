@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createHash, randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { createServer } from 'node:http';
-import { loadDocumentParserMachineConfig, type EcsDocumentParserConfig, type EnabledDocumentParserMachineConfig } from '../../src/config/document-parser-machine.js';
+import { createDocumentParserConfig, type EcsDocumentParserConfig, type EnabledDocumentParserMachineConfig } from '../../src/config/document-parser-machine.js';
 import { EcsPowerError, type EcsInstance, type EcsPowerPort } from '../../src/integrations/ecs-power.js';
 import { DocumentParserMachine, ParserExecutionError, ParserMachineRedis, type ParserRequest } from '../../src/lib/document-parser-machine/index.js';
 import { ParserMachineIdleMonitor } from '../../src/lib/document-parser-machine/monitor.js';
@@ -46,10 +46,7 @@ class Cloud implements EcsPowerPort {
   async stopEconomically() { this.stops++; if (this.stopError) throw this.stopError; this.instance.status = 'Stopping'; }
 }
 function setup(overrides: Partial<EcsDocumentParserConfig> = {}, cloud = new Cloud()) {
-  const loaded = loadDocumentParserMachineConfig({
-    DOCUMENT_PARSER_MODE: 'ecs', DOCUMENT_PARSER_ECS_REGION_ID: 'cn-beijing', DOCUMENT_PARSER_ECS_INSTANCE_ID: cloud.instance.instanceId,
-    DOCUMENT_PARSER_ECS_PRIVATE_IP: '172.18.102.101', ALIYUN_RAM_ACCESS_KEY_ID: 'test-ak', ALIYUN_RAM_ACCESS_KEY_SECRET: 'test-secret',
-  });
+  const loaded=createDocumentParserConfig({mode:'ecs',regionId:'cn-beijing',instanceId:cloud.instance.instanceId,privateIp:'172.18.102.101',credentials:async()=>({accessKeyId:'test-ak',accessKeySecret:'test-secret'})});
   if (!loaded.enabled || loaded.mode !== 'ecs') throw new Error('TEST_CONFIG_REQUIRED');
   const config: EcsDocumentParserConfig = { ...loaded, pollMs: 5, startupTimeoutMs: 1000, queueTimeoutMs: 2000, ...overrides };
   const prefix = `test_parser_${randomUUID().replaceAll('-', '')}`; prefixes.push(prefix);
@@ -68,6 +65,10 @@ async function expire(state: ParserMachineRedis, input: ParserRequest) {
 }
 
 describe('single document parser coordination: real isolated Redis, mock ECS/HTTP', () => {
+  it('keeps the machine running when the durable registry reports unresolved occupancy', async () => {
+    const s=setup({canStop:async()=>false});await s.machine.withDocumentParser(request(),async()=>undefined);await age(s.state);
+    expect(await s.machine.tick()).toBe('busy');expect(s.cloud.stops).toBe(0);
+  });
   it('deduplicates simultaneous deliveries and completed deliveries across clients', async () => {
     const s = setup(), input = request(), started = deferred(), finish = deferred();
     const parse = vi.fn(async () => { started.resolve(); await finish.promise; return 'parsed'; });
@@ -232,15 +233,16 @@ describe('single document parser coordination: real isolated Redis, mock ECS/HTT
     await expect(s.state2.register(sha(second.requestId), 'two', second.fingerprint)).rejects.toMatchObject({ code: 'DOCUMENT_PARSER_QUEUE_FULL' });
     const different = new ParserMachineRedis(otherRedis, { ...s.config, concurrency: 2 }, s.prefix);
     await expect(different.register(sha(second.requestId), 'two', second.fingerprint)).rejects.toMatchObject({ code: 'DOCUMENT_PARSER_CONFIG_MISMATCH' });
-    await expect(different.configureWhenIdle()).rejects.toMatchObject({ code: 'DOCUMENT_PARSER_BUSY' });
+    await expect(s.state.lock('rollout','configure')).rejects.toMatchObject({code:'DOCUMENT_PARSER_BUSY'});
   });
   it('switches an idle deployment to a permanent API while keeping shared deduplication and zero cloud mutations', async () => {
     const s = setup(), completed = request(); await s.machine.withDocumentParser(completed, async () => 'done');
-    const loaded = loadDocumentParserMachineConfig({ DOCUMENT_PARSER_MODE: 'always-on', DOCUMENT_PARSER_BASE_URL: 'https://parser.example.test/v2', DOCUMENT_PARSER_API_TOKEN: 'test-token' });
+    const loaded = createDocumentParserConfig({mode:'always-on',baseUrl:'https://parser.example.test/v2',apiToken:'test-token'});
     if (!loaded.enabled) throw new Error('TEST_CONFIG_REQUIRED');
     const config: EnabledDocumentParserMachineConfig = { ...loaded, pollMs: 5 };
     const state = new ParserMachineRedis(otherRedis, config, s.prefix);
-    await state.configureWhenIdle();
+    await age(s.state);await s.machine.tick();s.cloud.instance.status='Stopped';s.cloud.instance.stoppedMode='StopCharging';await s.machine.tick();
+    const token=randomUUID();expect(await s.state.lock(token,'configure')).toBe('ready');await state.configureLocked(token,'ecs');await s.state.unlock(token);
     const machine = new DocumentParserMachine(state, s.cloud, config, async () => true), before = { starts: s.cloud.starts, stops: s.cloud.stops, describes: s.cloud.describes };
     await expect(machine.withDocumentParser(completed, async () => 'bad')).rejects.toMatchObject({ code: 'DOCUMENT_PARSER_DUPLICATE' });
     const result = await machine.withDocumentParser(request(), async ({ baseUrl, headers }) => ({ baseUrl, authenticated: headers.Authorization === 'Bearer test-token' }));
@@ -309,7 +311,7 @@ describe('single document parser coordination: real isolated Redis, mock ECS/HTT
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     try {
       const address = server.address(); if (address === null || typeof address === 'string') throw new Error('TEST_ADDRESS_REQUIRED');
-      const config = loadDocumentParserMachineConfig({ DOCUMENT_PARSER_MODE: 'always-on', DOCUMENT_PARSER_BASE_URL: `http://127.0.0.1:${address.port}/api`, DOCUMENT_PARSER_HEALTH_PATH: '/ready', DOCUMENT_PARSER_API_TOKEN: 'test-token' });
+      const config = createDocumentParserConfig({mode:'always-on',baseUrl:`http://127.0.0.1:${address.port}/api`,healthPath:'/ready',apiToken:'test-token'});
       if (!config.enabled) throw new Error('TEST_CONFIG_REQUIRED');
       const tuned = { ...config, pollMs: 5, startupTimeoutMs: 100 };
       const prefix = `test_parser_${randomUUID().replaceAll('-', '')}`; prefixes.push(prefix);

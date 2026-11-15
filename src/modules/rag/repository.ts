@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { canonical } from '../../lib/crypto.js';
 import { assertScope, transaction, type Scope, DomainError } from '../identity/store.js';
 import { enqueueIntent, event } from '../tasks/model.js';
-import type { AppConfig, RagConfig } from '../../config/config.js';
+import type { AppConfig } from '../../config/config.js';
 import { sha256 } from './chunkers.js';
 import type { RagMode, RagStage } from './types.js';
 import { fileProcessingSnapshot, type FileProcessingSnapshot } from './processing-profile.js';
@@ -42,7 +42,10 @@ function modeFor(fileName: string, mimeType: string,structuredEnabled=false): Ra
   throw new DomainError(400, 'RAG_FILE_TYPE_UNSUPPORTED');
 }
 export class RagIngestionRepository {
-  constructor(readonly pool:pg.Pool,readonly config:RagConfig,readonly appEnv:string,readonly milvusCollection:string,readonly appConfig:AppConfig){}
+  constructor(readonly pool:pg.Pool,readonly appConfig:AppConfig){}
+  get appEnv(){return this.appConfig.appEnv;}
+  get milvusCollection(){return this.appConfig.kb.documentCollection;}
+  get config(){return this.appConfig.rag;}
   async create(scope: Scope, input: CreateRagInput): Promise<{ jobId: string; documentVersionId: string; status: string; reused: boolean }> {
     input={...input,sourceResourceId:input.sourceResourceId?.toLowerCase(),parseRunId:input.parseRunId?.toLowerCase()};
     if(!this.config.enabled)throw new DomainError(503,'RAG_INGESTION_DISABLED');

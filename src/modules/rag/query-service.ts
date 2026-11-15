@@ -3,7 +3,7 @@ import type {AppConfig} from '../../config/config.js';
 import {DomainError,assertScope,transaction,type Scope} from '../identity/store.js';
 import {kbSnapshot,kbEmbedding,kbTokenizer,knowledgeIndex,type IndexFactory} from '../kb/profile.js';
 import {sourceContent} from '../kb/repository.js';
-import {tablesFor,type KbBuild,type KbSourceType,type HybridIndex} from '../kb/types.js';
+import {tablesFor,type KbBuild,type KbSourceType,type KbSnapshot,type HybridIndex} from '../kb/types.js';
 import {digest} from '../kb/split.js';
 import type {EmbeddingClient} from './adapters/embedding.js';
 import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,type RerankAdapter,type RagSearchCandidate} from './search.js';
@@ -17,12 +17,29 @@ export const ragImageKey=(image:RagImageRequest)=>JSON.stringify([image.sourceTy
 export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveImages?:(scope:Scope,images:RagImageRequest[])=>Promise<ReadonlyMap<string,RagImageLink>>;}
 interface ChunkRow{build_id:string;point_id:string;ordinal:number;source_start:number;source_end:number;content_hash:string;chunk_count:number;}
 export class RagQueryService {
- private indexes=new Map<string,HybridIndex>();private fallbackTotal=0;
- private readonly rerank:RerankAdapter|undefined;
- constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly dependencies:RagQueryDependencies={}){
-  this.rerank=dependencies.rerank??(config.rag.rerankProvider==='mock'?new MockRerankAdapter():config.rag.rerankProvider==='http'?new HttpRerankAdapter({baseUrl:config.rag.rerankBaseUrl!,apiKey:config.rag.rerankApiKey,model:config.rag.rerankModel,timeoutMs:config.rag.rerankTimeoutMs}):undefined);
+ private indexes=new Map<string,{target:string;index:HybridIndex;active:number;revision:number;retired:boolean}>();private fallbackTotal=0;
+ constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly dependencies:RagQueryDependencies={}){}
+ private reranker():RerankAdapter|undefined{
+  const config=this.config;
+  return this.dependencies.rerank??(config.rag.rerankProvider==='mock'?new MockRerankAdapter():config.rag.rerankProvider==='http'?new HttpRerankAdapter({baseUrl:config.rag.rerankBaseUrl!,apiKey:config.rag.rerankApiKey,model:config.rag.rerankModel,timeoutMs:config.rag.rerankTimeoutMs}):undefined);
  }
- async close(){for(const index of this.indexes.values())await index.close();this.indexes.clear();}
+ private acquireIndex(snapshot:KbSnapshot){
+  const target=JSON.stringify(snapshot.target),tuning=this.config.milvus;
+  const key=JSON.stringify([target,tuning.searchConcurrency,tuning.denseCandidates,tuning.bm25Candidates,tuning.hybridCandidates,tuning.rrfK]);
+  let entry=this.indexes.get(key);
+  if(!entry){entry={target,index:this.dependencies.index?.(snapshot)??knowledgeIndex(this.config,snapshot),active:0,revision:this.config.runtimeRevision,retired:false};this.indexes.set(key,entry);}
+  entry.revision=Math.max(entry.revision,this.config.runtimeRevision);entry.active++;
+  const latest=Math.max(...[...this.indexes.values()].filter(e=>e.target===target).map(e=>e.revision));
+  for(const other of this.indexes.values())if(other.target===target)other.retired=other.revision<latest||(other.revision===latest&&other!==entry);
+  const acquired=entry;
+  return {index:entry.index,release:async()=>{
+   acquired.active--;
+   const closing:Promise<void>[]=[];
+   for(const [cacheKey,old]of this.indexes)if(old.retired&&!old.active){this.indexes.delete(cacheKey);closing.push(old.index.close());}
+   await Promise.all(closing);
+  }};
+ }
+ async close(){await Promise.all([...this.indexes.values()].map(entry=>entry.index.close()));this.indexes.clear();}
  private async eligible(scope:Scope,input:RagQueryInput,type:KbSourceType){
   const {builds}=tablesFor(type==='note'?'note-hybrid':'document-keyword');
   return transaction(this.pool,async tx=>{await assertScope(tx,scope);
@@ -57,8 +74,7 @@ export class RagQueryService {
   if(note&&builds.some(b=>b.snapshot.embedding?.model!=='BAAI/bge-m3'||b.snapshot.embedding.dimensions!==1024||b.snapshot.embedding.profile!=='bge-m3-1024'))throw new DomainError(503,'KB_PROFILE_CHANGED');
   const rows=await transaction(this.pool,async tx=>{await assertScope(tx,scope);const {chunks}=tablesFor(selected.mode);return (await tx.query<ChunkRow>(`SELECT c.*,b.chunk_count FROM ${chunks} c JOIN ${tablesFor(selected.mode).builds} b ON b.id=c.build_id WHERE c.build_id=ANY($1::uuid[]) AND b.published AND b.status='ready' AND c.index_status='ready'`,[builds.map(b=>b.id)])).rows;});
   if(!rows.length)return {mode,query,results:[]};
-  const targetKey=JSON.stringify(selected.target);
-  let index=this.indexes.get(targetKey);if(!index){index=this.dependencies.index?.(selected)??knowledgeIndex(this.config,selected);this.indexes.set(targetKey,index);}
+  const lease=this.acquireIndex(selected),index=lease.index;
   const limit=Math.max(topK,mode==='keyword'?this.config.milvus.bm25Candidates:this.config.milvus.hybridCandidates);
   try{
    await timing.measure('milvus_ready',()=>index.ensureReady());
@@ -89,7 +105,8 @@ export class RagQueryService {
     }
    });
    let ranked=candidates;
-   if(note&&mode!=='keyword'&&this.rerank&&candidates.length){const result=await timing.measure('rerank',()=>rerankWithinBudget(this.rerank!,query,candidates,this.config.rag.noteRerankBudgetMs));ranked=result.candidates;if(result.fallback){timing.fallback=result.fallback;this.fallbackTotal++;}timing.fallbackTotal=this.fallbackTotal;}
+   const rerank=note&&mode!=='keyword'?this.reranker():undefined;
+   if(rerank&&candidates.length){const result=await timing.measure('rerank',()=>rerankWithinBudget(rerank,query,candidates,this.config.rag.noteRerankBudgetMs));ranked=result.candidates;if(result.fallback){timing.fallback=result.fallback;this.fallbackTotal++;}timing.fallbackTotal=this.fallbackTotal;}
    const current=new Map((await timing.measure('pg_recheck',()=>this.eligible(scope,input,sourceType))).map(b=>[b.id,b]));
    // Only final, rechecked topK chunks can request images. UUIDs stay in the
    // evidence; expiring URLs are a separate view, never rerank input or offsets.
@@ -115,5 +132,6 @@ export class RagQueryService {
    });
    return {mode,query,results};
   }catch(e){if(e instanceof DomainError)throw e;throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE');}
+  finally{await lease.release();}
  }
 }

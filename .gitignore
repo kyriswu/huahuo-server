@@ -10,3 +10,5 @@ docs/*.local.json
 .impeccable/review/
 infra/certs/*
 !infra/certs/README.md
+
+.DS_Store

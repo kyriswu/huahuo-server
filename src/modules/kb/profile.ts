@@ -33,7 +33,7 @@ export function kbEmbedding(config:AppConfig,snapshot:KbSnapshot){
  const {model,dimensions}=snapshot.embedding;
  if(config.rag.providerMode==='mock')return Object.assign(new DeterministicEmbeddingClient(dimensions),{model});
  if(snapshot.embedding.baseUrl!==config.rag.embeddingBaseUrl||!config.rag.embeddingApiKey||!config.rag.embeddingBaseUrl)throw new Error('KB_EMBEDDING_UNAVAILABLE');
- return new OpenAICompatibleEmbeddingClient({baseUrl:config.rag.embeddingBaseUrl,apiKey:config.rag.embeddingApiKey,model,dimensions,sendDimensions:false,timeoutMs:config.rag.embeddingTimeoutMs,maxRetries:0});
+ return new OpenAICompatibleEmbeddingClient({baseUrl:config.rag.embeddingBaseUrl,apiKey:config.rag.embeddingApiKey,model,dimensions,sendDimensions:false,timeoutMs:snapshot.indexing.timeoutMs,maxRetries:0});
 }
 export type IndexFactory=(snapshot:KbSnapshot)=>HybridIndex;
 export function knowledgeIndex(config:AppConfig,snapshot:KbSnapshot):HybridIndex{

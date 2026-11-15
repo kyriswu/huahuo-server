@@ -65,15 +65,13 @@ RAG_TOKENIZER_PATH=resources/tokenizers/bge-m3/tokenizer.json
 RAG_TOKENIZER_CONFIG_PATH=resources/tokenizers/bge-m3/tokenizer_config.json
 RAG_TOKENIZER_MAX_INPUT_TOKENS=8192
 MILVUS_DATABASE=default
-MILVUS_SEARCH_CONCURRENCY=50
-KB_NOTE_INDEXING_ENABLED=true
 KB_NOTE_HYBRID_COLLECTION=huahuo_kb_note_hybrid_chunks
 KB_DOCUMENT_KEYWORD_COLLECTION=huahuo_kb_keyword_chunks
 ```
 
-现有 Embedding 凭据沿用；Rerank 端点、模型、密钥和 Note 200ms 预算独立配置，不随 Embedding 模型切换。资料关键词和 Note 纯关键词完全不调用这两个模型或模型 tokenizer。服务端连接及对象存储配置仍是全局配置。
+上面的ENV只描述连接/模型规格/部署路径和集合绑定。召回候选、RRF、检索并发、Embedding索引批次/并发/超时/重试、重排超时/Note预算和原生文字上限在Admin「RAG 与检索」，Note索引开关在「功能开关」；不再使用这些参数的旧ENV。现有Embedding和Rerank端点/模型/凭据保留在部署环境。资料关键词和Note纯关键词完全不调用这两个模型或模型tokenizer。
 
-Milvus SDK 2.6.17 连接及就绪状态按进程复用，应用并发闸门与 SDK 池 max 同为 50（min=2，按需增长）；排队最多 32。新建集合幂等，Sparse 使用 SPARSE_INVERTED_INDEX / BM25，Dense 使用 HNSW / COSINE（M=16、efConstruction=128）。SDK 数值 Strong=0 的默认值问题以明确的 Strong 枚举名称处理。启动和正常任务不 DROP 集合或清库。
+Milvus SDK 2.6.17连接及就绪状态按目标与当前检索参数复用，应用闸门与SDK池max默认50，可在后台设1–50；min不超过2，排队最多32。调参创建新客户端，在途查询沿用旧实例，结束后释放已淘汰客户端。索引构建沿用持久化快照。新建集合幂等，Sparse使用SPARSE_INVERTED_INDEX/BM25，Dense使用HNSW/COSINE（M=16、efConstruction=128）。SDK数值Strong=0的默认值问题以明确枚举名称处理。启动和正常任务不DROP集合或清库。
 
 ## 修订、发布与恢复
 

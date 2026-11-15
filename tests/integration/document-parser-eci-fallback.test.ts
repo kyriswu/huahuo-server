@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createHash, randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
-import { loadDocumentParserMachineConfig, type EcsDocumentParserConfig } from '../../src/config/document-parser-machine.js';
+import { createDocumentParserConfig, type EcsDocumentParserConfig } from '../../src/config/document-parser-machine.js';
+import {createDocumentParserEciConfig,singleA10InstanceTypes} from '../../src/config/document-parser-eci.js';
 import { EcsPowerError, type EcsInstance, type EcsPowerPort } from '../../src/integrations/ecs-power.js';
 import { EciProviderError, type GpuInstanceRef, type GpuInstanceSnapshot, type PreparedGpuSpotSpec } from '../../src/integrations/gpu-spot/types.js';
 import { allocationHash, digest } from '../../src/integrations/gpu-spot/spec.js';
@@ -76,13 +77,8 @@ class Eci implements ParserEciProvider {
 }
 function setup(options: { concurrency?: number; timeout?: number; health?: (context: { baseUrl: string }) => Promise<boolean> } = {}) {
   const cloud = new Ecs(), eci = new Eci();
-  const loaded = loadDocumentParserMachineConfig({
-    DOCUMENT_PARSER_MODE: 'ecs', DOCUMENT_PARSER_ECS_REGION_ID: 'cn-beijing', DOCUMENT_PARSER_ECS_INSTANCE_ID: cloud.instance.instanceId,
-    DOCUMENT_PARSER_ECS_PRIVATE_IP: '172.18.102.101', ALIYUN_RAM_ACCESS_KEY_ID: 'mock-ak', ALIYUN_RAM_ACCESS_KEY_SECRET: 'mock-secret',
-    DOCUMENT_PARSER_ECI_FALLBACK_ENABLED: 'true', DOCUMENT_PARSER_ECI_VPC_ID: 'vpc-test', DOCUMENT_PARSER_ECI_SECURITY_GROUP_ID: 'sg-test',
-    DOCUMENT_PARSER_ECI_VSWITCH_IDS: 'vsw-a,vsw-b,vsw-c,vsw-d', DOCUMENT_PARSER_ECI_ACR_INSTANCE_ID: 'cri-test',
-    DOCUMENT_PARSER_ECI_IMAGE: 'test-registry-vpc.cn-beijing.cr.aliyuncs.com/ai_service/xberg:kbxml', STORAGE_ALIYUN_OSS_BUCKET: 'test-bucket',
-  });
+  const loaded=createDocumentParserConfig({mode:'ecs',regionId:'cn-beijing',instanceId:cloud.instance.instanceId,privateIp:'172.18.102.101',credentials:async()=>({accessKeyId:'mock-ak',accessKeySecret:'mock-secret'}),
+    eciFallback:createDocumentParserEciConfig({vpcId:'vpc-test',securityGroupId:'sg-test',vSwitchIds:['vsw-a','vsw-b','vsw-c','vsw-d'],instanceTypes:[...singleA10InstanceTypes],image:'test-registry-vpc.cn-beijing.cr.aliyuncs.com/ai_service/xberg:kbxml',acrInstanceId:'cri-test',extraStorageGiB:40,bucket:'test-bucket',keyPrefix:'huahuo'},'cn-beijing')});
   if (!loaded.enabled || loaded.mode !== 'ecs' || !loaded.eciFallback) throw new Error('TEST_CONFIG_REQUIRED');
   const config: EcsDocumentParserConfig = { ...loaded, pollMs: 5, startupTimeoutMs: options.timeout ?? 1000, queueTimeoutMs: 1000,
     concurrency: options.concurrency ?? 1, eciFallback: { ...loaded.eciFallback, retryMs: 20 } };
@@ -115,7 +111,7 @@ describe('A10 ECS stock rejection → pay-as-you-go ECI (real Redis; mock cloud)
     expect(health.mock.calls.every(call => call[0]?.baseUrl === 'http://172.18.102.202:8000')).toBe(true);
     expect(s.cloud.starts).toBe(1); expect(s.eci.creates).toBe(1);
     expect(JSON.stringify(await s.state.status())).not.toMatch(/mock-ak|mock-secret/);
-    await expect(s.otherState.configureWhenIdle()).rejects.toMatchObject({ code: 'DOCUMENT_PARSER_BUSY' });
+    await expect(s.otherState.lock('rollout','configure')).rejects.toMatchObject({code:'DOCUMENT_PARSER_BUSY'});
   });
   it.each(['Forbidden', 'InsufficientBalance', 'QuotaExceed.ElasticQuota'])('does not fall back on %s', async code => {
     const s = setup(); s.cloud.error = new EcsPowerError('ECS_API_FAILED', 'rejected', code);

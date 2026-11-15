@@ -7,6 +7,7 @@ FROM tooling AS build
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY tsconfig*.json ./
+COPY scripts/clean-build.mjs ./scripts/clean-build.mjs
 COPY src ./src
 COPY resources ./resources
 COPY admin-ui ./admin-ui

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Redis } from 'ioredis';
-import type { EnabledDocumentParserMachineConfig, DocumentParserMachineConfig } from '../../config/document-parser-machine.js';
+import type { EnabledDocumentParserMachineConfig } from '../../config/document-parser-machine.js';
 import { AliyunEcsPower, EcsPowerError, assertEconomicalStopEligible, isEcsCapacityRejection, type EcsPowerPort } from '../../integrations/ecs-power.js';
 import { AliyunEciGpuProvider } from '../../integrations/gpu-spot/aliyun-eci.js';
 import { DocumentParserEciFallback, type ParserEciProvider } from './eci-fallback.js';
@@ -10,13 +10,13 @@ import { ParserMachineIdleMonitor, type MonitorEvents } from './monitor.js';
 
 export { ParserMachineError, ParserMachineRedis } from './redis.js';
 export type { MachineState, MachinePhase } from './redis.js';
-export { loadDocumentParserMachineConfig } from '../../config/document-parser-machine.js';
-export type { DocumentParserMachineConfig } from '../../config/document-parser-machine.js';
 export interface ParserRequest {
   /** Cancels queue/startup waiting only. Submitted durable work uses its remote cancellation protocol. */
   admissionSignal?:AbortSignal;
   /** Internal recovery only: take over the existing slot and QUERY a persisted remote job; never resubmit. */
   resume?: boolean;
+  /** Only after durable task state proves that no remote submission intent exists. */
+  recoverAdmission?: boolean;
   /** Durable task/request identity; all redeliveries must use the same value. */
   requestId: string;
   /** SHA256 of document revision/content identity AND all parsing options. */
@@ -136,7 +136,16 @@ export class DocumentParserMachine {
     const signal = input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal;
     const admissionSignal=input.admissionSignal?AbortSignal.any([signal,input.admissionSignal]):signal;
     assertNotAborted(admissionSignal);
-    if(input.resume){
+    let admissionResumed=false;
+    if(input.recoverAdmission){
+      const deadline=Date.now()+this.config.startupTimeoutMs;
+      while(true){
+        const result=await this.state.recoverAdmission(id,owner,input.fingerprint);
+        if(result!=='wait'){admissionResumed=result==='resumed';break;}
+        if(Date.now()>=deadline)throw new ParserMachineError('DOCUMENT_PARSER_RESUME_TIMEOUT');
+        await pause(this.config.pollMs,admissionSignal);
+      }
+    }else if(input.resume){
       const deadline=Date.now()+this.config.startupTimeoutMs;
       while(!await this.state.resume(id,owner,input.fingerprint)){
         if(Date.now()>=deadline)throw new ParserMachineError('DOCUMENT_PARSER_RESUME_TIMEOUT');
@@ -153,7 +162,7 @@ export class DocumentParserMachine {
     let submitted = Boolean(input.resume), outcome: 'succeeded' | 'failed' | 'cancelled' | 'unknown' = input.resume?'unknown':'cancelled', value: T | undefined, failure: unknown;
     try {
       const queueDeadline = Date.now() + this.config.queueTimeoutMs;
-      while (!input.resume&&!await this.state.claim(id, owner)) {
+      while (!input.resume&&!admissionResumed&&!await this.state.claim(id, owner)) {
         assertNotAborted(admissionSignal);
         if (Date.now() >= queueDeadline) throw new ParserMachineError('DOCUMENT_PARSER_QUEUE_TIMEOUT');
         // Also reconcile a stop already underway, so a caller can work without a local timer.
@@ -189,6 +198,7 @@ export class DocumentParserMachine {
     const token = randomUUID(), phase: MachinePhase | undefined = await this.state.lock(token, 'idle');
     if (!phase) return (await this.state.status()) ? 'busy' : 'unmanaged';
     try {
+      if(phase==='ready'&&this.config.canStop&&!await this.config.canStop())return 'busy';
       if ((await this.state.status())?.eciTarget) {
         if (phase === 'stopping' || phase === 'unknown-stop' || await this.state.beginEciStop(token)) {
           if (!await this.eci!.cleanup(token)) return 'transition_pending';
@@ -237,8 +247,7 @@ export class DocumentParserMachine {
   async acknowledgeSettled(input: ParserRequest): Promise<void> { await this.state.resolve(identity(input), input.fingerprint); }
 }
 
-export function createDocumentParserMachine(config: DocumentParserMachineConfig, redisUrl: string, prefix: string) {
-  if (!config.enabled) return undefined;
+export function createDocumentParserMachine(config: EnabledDocumentParserMachineConfig, redisUrl: string, prefix: string) {
   const redis = new Redis(redisUrl, { maxRetriesPerRequest: 0, enableOfflineQueue: false, connectTimeout: 1500, commandTimeout: 2000, lazyConnect: true });
   redis.on('error', () => undefined);
   const state = new ParserMachineRedis(redis, config, prefix);

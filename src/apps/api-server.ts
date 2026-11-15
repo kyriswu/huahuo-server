@@ -19,11 +19,14 @@ import { registerRagRoutes } from '../modules/rag/routes.js';
 import { RagIngestionRepository } from '../modules/rag/repository.js';
 import { RagQueryService, type RagQueryDependencies } from '../modules/rag/query-service.js';
 import { RagImageLinks } from '../modules/rag/image-links.js';
+import {RuntimeSettings} from '../modules/runtime-settings/service.js';
 export async function buildApiServer(options: BuildOptions & IdentityOptions & { ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
  const pool=dependencies.pool??poolFor(options.config);
  const app=await buildBase({...options,dependencies});
+ const settings=new RuntimeSettings(pool,options.config);
+ app.addHook('onRequest',(req,_reply,done)=>{const path=req.routeOptions.url;if(path?.startsWith('/api/v1/')&&!path.startsWith('/api/v1/auth/'))void settings.enter(done);else done();});
  if(!dependencies.pool)app.addHook('onClose',async()=>{await pool.end();});
  const identity=new IdentityService(pool,options.config,options);
  registerIdentityRoutes(app,identity,new WorkspaceService(pool,options.config.appTokenSecret!));
@@ -41,6 +44,6 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
  registerAssetRoutes(app,identity,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery),storageService);
- registerRagRoutes(app,identity,new RagIngestionRepository(pool,options.config.rag,options.config.appEnv,options.config.kb.documentCollection,options.config),storageService.storage,ragQuery);
+ registerRagRoutes(app,identity,new RagIngestionRepository(pool,options.config),storageService.storage,ragQuery);
  registerTaskRoutes(app,identity,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
 }

@@ -6,31 +6,26 @@ export const singleA10InstanceTypes = [
   'ecs.gn7i-c32g1.8xlarge', 'ecs.gn7i-c48g1.12xlarge',
 ] as const;
 export interface DocumentParserEciConfig { spec: PreparedGpuSpotSpec; retryMs: number }
-type Env = Readonly<Record<string, string | undefined>>;
+export interface EciFallbackSettings {
+  vpcId:string; securityGroupId:string; vSwitchIds:string[]; instanceTypes:string[];
+  image:string; acrInstanceId:string; extraStorageGiB:number; bucket:string; keyPrefix:string;
+}
 
-/** Opt-in server configuration only; neither an App request nor parsing config selects resources. */
-export function loadDocumentParserEciConfig(env: Env, regionId: string): DocumentParserEciConfig | undefined {
-  const fail = (key: string): never => { throw new Error(`INVALID_CONFIG:${key}`); };
-  const enabled = env.DOCUMENT_PARSER_ECI_FALLBACK_ENABLED ?? 'false';
-  if (!['true', 'false'].includes(enabled)) fail('DOCUMENT_PARSER_ECI_FALLBACK_ENABLED');
-  if (enabled === 'false') return undefined;
-  const required = (key: string) => env[key]?.trim() || fail(key);
-  const instanceTypes = (env.DOCUMENT_PARSER_ECI_INSTANCE_TYPES?.trim() || singleA10InstanceTypes.join(',')).split(',').map(s => s.trim());
-  if (!instanceTypes.every(type => singleA10InstanceTypes.includes(type as typeof singleA10InstanceTypes[number]))) fail('DOCUMENT_PARSER_ECI_INSTANCE_TYPES');
-  const bucket = required('STORAGE_ALIYUN_OSS_BUCKET');
-  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) fail('STORAGE_ALIYUN_OSS_BUCKET');
-  const prefix = (env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim() || 'huahuo').replace(/^\/+|\/+$/g, '');
-  if (!/^[a-zA-Z0-9_/-]{1,200}$/.test(prefix) || prefix.split('/').some(s => !s || s === '.' || s === '..')) fail('STORAGE_ALIYUN_OSS_KEY_PREFIX');
-  const image = required('DOCUMENT_PARSER_ECI_IMAGE');
-  // This workload has its models bundled; pulling and OSS traffic stay within the chosen region.
-  if (!new RegExp(`^[a-z0-9-]+-registry-vpc\\.${regionId.replaceAll('.', '\\.')}\\.cr\\.aliyuncs\\.com/`).test(image)) fail('DOCUMENT_PARSER_ECI_IMAGE');
-  const extraStorageGiB = Number(env.DOCUMENT_PARSER_ECI_EXTRA_STORAGE_GIB ?? 40);
+/** Opt-in node configuration; document requests cannot select cloud resources. */
+export function createDocumentParserEciConfig(input:EciFallbackSettings, regionId:string):DocumentParserEciConfig {
+  const fail = (key:string):never => {throw new Error(`INVALID_CONFIG:PROCESSING_NODE_ECI_${key}`);};
+  const {instanceTypes,bucket,image,extraStorageGiB}=input;
+  if (!instanceTypes.length || !instanceTypes.every(type=>singleA10InstanceTypes.includes(type as typeof singleA10InstanceTypes[number]))) fail('INSTANCE_TYPES');
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) fail('BUCKET');
+  const prefix=(input.keyPrefix.trim()||'huahuo').replace(/^\/+|\/+$/g,'');
+  if (!/^[a-zA-Z0-9_/-]{1,200}$/.test(prefix)||prefix.split('/').some(s=>!s||s==='.'||s==='..')) fail('KEY_PREFIX');
+  if (!new RegExp(`^[a-z0-9-]+-registry-vpc\\.${regionId.replaceAll('.', '\\.')}\\.cr\\.aliyuncs\\.com/`).test(image)) fail('IMAGE');
   try {
     return { retryMs: 15000, spec: prepareGpuSpotSpec({
-      regionId, vpcId: required('DOCUMENT_PARSER_ECI_VPC_ID'), securityGroupId: required('DOCUMENT_PARSER_ECI_SECURITY_GROUP_ID'),
-      vSwitchIds: required('DOCUMENT_PARSER_ECI_VSWITCH_IDS').split(',').map(s => s.trim()), instanceTypes, image,
+      regionId, vpcId: input.vpcId, securityGroupId: input.securityGroupId,
+      vSwitchIds: input.vSwitchIds, instanceTypes, image,
       gpuCount: 1, spot: { strategy: 'NoSpot' }, port: 8000, sharedMemoryGiB: 1,
-      extraStorageGiB, autoMatchImageCache: true, acrInstanceId: required('DOCUMENT_PARSER_ECI_ACR_INSTANCE_ID'),
+      extraStorageGiB, autoMatchImageCache: true, acrInstanceId: input.acrInstanceId,
       environment: {
         STORAGE_ALIYUN_OSS_REGION: regionId, STORAGE_ALIYUN_OSS_ENDPOINT: `https://oss-${regionId}-internal.aliyuncs.com`,
         STORAGE_ALIYUN_OSS_BUCKET: bucket, STORAGE_ALIYUN_OSS_KEY_PREFIX: `${prefix}/resources`,
@@ -48,6 +43,6 @@ export function loadDocumentParserEciConfig(env: Env, regionId: string): Documen
     }) };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('INVALID_CONFIG:')) throw error;
-    return fail('DOCUMENT_PARSER_ECI_FALLBACK');
+    return fail('FALLBACK');
   }
 }
