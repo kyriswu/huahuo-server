@@ -4,6 +4,8 @@ import { ApplicationLifecycle } from '../../src/plugins/lifecycle.js';
 import { config, dependencies } from '../helpers.js';
 import { fork, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createConnection } from 'node:net';
+import { once } from 'node:events';
 
 const children: ChildProcess[] = [];
 afterEach(async () => {
@@ -36,6 +38,40 @@ function start(workMs = 11000, shutdownMs = 15000, leak = false) {
 }
 
 describe('application drain and shutdown', () => {
+  it.each(['api-server', 'admin', 'worker', 'scheduler'] as const)('%s handles an existing socket during preClose with the intended closing policy', async role => {
+    let dependenciesClosed = false, handled = 0;
+    const app = await buildBase({ config: config(role), dependencies: { ...dependencies(), close: async () => { dependenciesClosed = true; } } });
+    let entered!: () => void, release!: () => void;
+    const preClose = new Promise<void>(resolve => { entered = resolve; });
+    const finishPreClose = new Promise<void>(resolve => { release = resolve; });
+    app.addHook('preClose', async () => { entered(); await finishPreClose; });
+    app.post('/late-business', async () => { handled++; expect(dependenciesClosed).toBe(false); return { completed: true }; });
+    const address = new URL(await app.listen({ host: '127.0.0.1', port: 0 }));
+    // Establish the upstream connection before shutdown. Its HTTP request arrives
+    // only after Fastify has entered closing, while preClose still holds it open.
+    const socket = createConnection({ host: '127.0.0.1', port: Number(address.port) });
+    socket.setTimeout(2000, () => socket.destroy(new Error('LATE_REQUEST_TIMEOUT')));
+    const response = new Promise<string>((resolve, reject) => {
+      let body = '';
+      socket.setEncoding('utf8'); socket.on('data', chunk => { body += chunk; });
+      socket.once('end', () => resolve(body)); socket.once('error', reject);
+    });
+    let closing: Promise<void> | undefined;
+    try {
+      await once(socket, 'connect');
+      closing = app.close(); await preClose;
+      expect(app.lifecycle.phase).toBe('closing');
+      socket.write('POST /late-business HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n');
+      const body = await response;
+      expect(body).toMatch(role === 'api-server' ? /^HTTP\/1\.1 200 / : /^HTTP\/1\.1 503 /);
+      expect(body).toMatch(/\r\nconnection: close\r\n/i);
+      expect(handled).toBe(role === 'api-server' ? 1 : 0);
+      if (role === 'api-server') expect(body).toContain('{"completed":true}');
+      expect(dependenciesClosed).toBe(false);
+    } finally { release(); socket.destroy(); await (closing ?? app.close()); }
+    expect(dependenciesClosed).toBe(true);
+  });
+
   it('withdraws readiness while keeping liveness and routed business requests available', async () => {
     const app = await buildBase({ config: config(), dependencies: dependencies() });
     let release!: () => void;

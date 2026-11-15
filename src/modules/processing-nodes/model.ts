@@ -19,7 +19,7 @@ export function nodeDocumentConfig(node:ProcessingNode){
  rejectSecrets(api);
  return createDocumentExtractionConfig(api.mode,api.parameters,api.pollMs,api.maxResponseBytes,api.timeoutSeconds*1000);
 }
-export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig):EnabledDocumentParserMachineConfig{
+export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig,requireApiToken=true):EnabledDocumentParserMachineConfig{
  try{
   if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(node.id)||!node.name?.trim()||node.name.length>80||!['cpu','gpu'].includes(node.resourceClass)
    ||!Array.isArray(node.capabilities)||!node.capabilities.length||new Set(node.capabilities).size!==node.capabilities.length
@@ -37,9 +37,9 @@ export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig):
    ...(fallback?{eciFallback:createDocumentParserEciConfig(fallback,node.regionId!)}:{})});
   // The DB stores only a secret reference. Resolve it in the owning deployment.
   const token=node.tokenEnv?bootstrap.token(node.tokenEnv):undefined;
-  if(node.tokenEnv&&!token)throw new DomainError(503,'PROCESSING_NODE_TOKEN_UNAVAILABLE');
+  if(requireApiToken&&node.tokenEnv&&!token)throw new DomainError(503,'PROCESSING_NODE_TOKEN_UNAVAILABLE');
   if(token&&(token.length>4096||/[\r\n]/.test(token)))throw new DomainError(503,'PROCESSING_NODE_TOKEN_UNAVAILABLE');
-  return {...config,...(token?{apiToken:token}:{})};
+  return {...config,powerControlEnabled:bootstrap.cloudControlEnabled,...(token?{apiToken:token}:{})};
  }catch(error){if(error instanceof DomainError)throw error;throw new DomainError(400,'PROCESSING_NODE_INVALID');}
 }
 export function nodeFromRow(row:Record<string,unknown>):ProcessingNode{

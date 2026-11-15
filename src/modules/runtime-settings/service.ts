@@ -43,8 +43,8 @@ export class RuntimeSettings {
  }
  async run<T>(execute:()=>Promise<T>):Promise<T>{const loaded=await this.load();return context.run(applyValues(this.base,loaded.values,loaded.revision),execute);}
  async enter(done:(error?:Error)=>void){try{const loaded=await this.load();context.run(applyValues(this.base,loaded.values,loaded.revision),()=>done());}catch(error){done(error as Error);}}
- async view(){const state=await this.load();return {...state,definitions:settings,bootstrap:{processingNodesEnabled:this.base.processingNodes.enabled,
-  billingMode:this.base.billingMode,uploadHardMaxBytes:this.base.uploadHardMaxBytes,environmentKeys:['DATABASE_URL','REDIS_QUEUE_URL','REDIS_CACHE_URL','ALIYUN_RAM_ACCESS_KEY_ID','ALIYUN_RAM_ACCESS_KEY_SECRET','PROCESSING_NODES_ENABLED','HTTP_UPLOAD_HARD_MAX_BYTES','BILLING_MODE','HOST','PORT','LOG_LEVEL',
+ async view(){const state=await this.load();return {...state,definitions:settings,bootstrap:{processingNodesEnabled:this.base.processingNodes.enabled,cloudControlEnabled:this.base.processingNodes.cloudControlEnabled,
+  billingMode:this.base.billingMode,uploadHardMaxBytes:this.base.uploadHardMaxBytes,environmentKeys:['DATABASE_URL','REDIS_QUEUE_URL','REDIS_CACHE_URL','ALIYUN_RAM_ACCESS_KEY_ID','ALIYUN_RAM_ACCESS_KEY_SECRET','PROCESSING_NODES_CLOUD_CONTROL_ENABLED','PROCESSING_NODES_ENABLED','HTTP_UPLOAD_HARD_MAX_BYTES','BILLING_MODE','HOST','PORT','LOG_LEVEL',
    'MILVUS_ADDRESS','MILVUS_USERNAME','MILVUS_PASSWORD','MILVUS_DATABASE','MILVUS_TLS','MILVUS_CREATE_IF_MISSING','KB_NOTE_HYBRID_COLLECTION','KB_DOCUMENT_KEYWORD_COLLECTION',
    'RAG_PROVIDER_MODE','RAG_SOURCE_ALLOWED_HOSTS','RAG_EMBEDDING_BASE_URL','RAG_EMBEDDING_API_KEY','RAG_EMBEDDING_MODEL','RAG_EMBEDDING_DIMENSIONS','RAG_EMBEDDING_PROFILE',
    'RAG_RERANK_PROVIDER','RAG_RERANK_BASE_URL','RAG_RERANK_API_KEY','RAG_RERANK_MODEL','RAG_TOKENIZER_PATH','RAG_TOKENIZER_CONFIG_PATH','RAG_TOKENIZER_MAX_INPUT_TOKENS']},

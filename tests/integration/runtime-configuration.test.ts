@@ -12,9 +12,10 @@ import type {ProcessingNode} from '../../src/modules/processing-nodes/model.js';
 import {RuntimeSettings,currentRuntimeConfig} from '../../src/modules/runtime-settings/service.js';
 import {RUNTIME_CONFIGURATION_SCHEMA_KEY,RUNTIME_CONFIGURATION_SCHEMA_VERSION} from '../../src/modules/runtime-settings/registry.js';
 import {ParserExecutionError,DocumentParserMachine,ParserMachineRedis} from '../../src/lib/document-parser-machine/index.js';
+import {ParserMachineIdleMonitor,type MonitorEvents} from '../../src/lib/document-parser-machine/monitor.js';
 import {ProcessingNodeJobs} from '../../src/modules/processing-nodes/jobs.js';
 import {TaskEngine} from '../../src/modules/tasks/engine.js';
-import type {EcsInstance,EcsPowerPort} from '../../src/integrations/ecs-power.js';
+import {AliyunEcsPower,type EcsInstance,type EcsPowerPort} from '../../src/integrations/ecs-power.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
 import {BillingService} from '../../src/modules/billing/service.js';
 import {transaction} from '../../src/modules/identity/store.js';
@@ -44,6 +45,8 @@ async function save(category:string,values:Record<string,unknown>,revision?:numb
  return app.inject({method:'PUT',url:'/admin/api/v1/configuration/'+category,headers:custom,payload:{revision:revision??(await get()).revision,values}});
 }
 async function nodeSave(node:ProcessingNode,revision=0){return app.inject({method:'PUT',url:'/admin/api/v1/processing-nodes/'+node.id,headers:headers(),payload:{node,revision}});}
+// Test-only equivalent of publishing a reviewed catalog row; Admin cannot create nodes.
+async function publishTestNode(node:ProcessingNode){const {id,revision,...config}=node;await root.query('INSERT INTO processing_nodes(id,config,revision) VALUES($1,$2,$3)',[id,JSON.stringify(config),revision]);}
 beforeAll(async()=>{
  await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();
  await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
@@ -189,7 +192,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   expect(workerConfig.milvus.rrfK).toBe(60);
  });
  it('assigns by occupied capacity, preserves node affinity and shares document/audio occupancy',async()=>{
-  const a=baseNode(),b=baseNode({documentApi:{...defaultDocumentApi(),mode:'async',timeoutSeconds:4000}});expect((await nodeSave(a)).statusCode).toBe(200);expect((await nodeSave(b)).statusCode).toBe(200);
+  const a=baseNode(),b=baseNode({documentApi:{...defaultDocumentApi(),mode:'async',timeoutSeconds:4000}});await publishTestNode(a);await publishTestNode(b);
   const first=await nodes.bind('first-'+a.id,'document'),second=await nodes.bind('second-'+a.id,'audio');expect(first.id).not.toBe(second.id);
   expect(first.documentApi).toMatchObject({mode:'async',parameters:null,timeoutSeconds:3120});
   expect(second.documentApi).toMatchObject({mode:'async',parameters:null,timeoutSeconds:4000});
@@ -214,13 +217,15 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
    expect(lots).toEqual([{policy_version:'credit-policy-v1',granted_credits:'10000000'}]);
   }finally{await save('billing',{'billing.policyVersion':'credit-policy-v1'});await pool.end();}
  });
- it('forbids duplicate ECS registration and revision races',async()=>{
+ it('refuses Admin node creation while retaining existing-node revision protection',async()=>{
   const existing=(await nodes.list()).find(n=>n.instanceId==='i-2zejbbo2svjieb44tqy8')!;
-  expect((await nodeSave({...existing,id:randomUUID(),revision:1})).statusCode).toBe(409);
+  const count=Number((await root.query('SELECT count(*) AS n FROM processing_nodes')).rows[0].n);
+  const created=await nodeSave({...existing,id:randomUUID(),revision:1});expect(created.statusCode).toBe(404);expect(created.json().error.code).toBe('PROCESSING_NODE_NOT_FOUND');
+  expect(Number((await root.query('SELECT count(*) AS n FROM processing_nodes')).rows[0].n)).toBe(count);
   expect((await nodeSave({...existing,name:'stale'},0)).statusCode).toBe(409);
  });
  it('stores one JSON configuration per node and increments the existing row on edits',async()=>{
-  const node=baseNode({enabled:false});expect((await nodeSave(node)).statusCode).toBe(200);
+  const node=baseNode({enabled:false});await publishTestNode(node);
   const first=await nodeSave({...node,name:'Renamed CPU'},1);expect(first.statusCode,first.body).toBe(200);
   const next=await nodeSave({...first.json().data,name:'Shared document/audio CPU'},2);expect(next.statusCode,next.body).toBe(200);
   const rows=(await root.query('SELECT * FROM processing_nodes WHERE id=$1',[node.id])).rows;
@@ -232,7 +237,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   await expect(root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{concurrency}','0') WHERE id=$1`,[node.id])).rejects.toMatchObject({code:'23514'});
  });
  it('retains ambiguous execution and resumes the original node after disabling it',async()=>{
-  const node=baseNode();expect((await nodeSave(node)).statusCode).toBe(200);const input=request();
+  const node=baseNode();await publishTestNode(node);const input=request();
   await expect(nodes.withNode('document',input,async()=>{throw new ParserExecutionError('TEST_REMOTE_UNKNOWN');})).rejects.toMatchObject({code:'DOCUMENT_PARSER_EXECUTION_UNKNOWN'});
   expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',[input.requestId])).rows[0].settled).toBe(false);
   const status=await(await nodes.runtime(node)).machine.state.status();expect(status?.uncertain).toBe(1);
@@ -242,7 +247,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   await expect(nodes.withNode('document',input,async()=>{throw Error('must not run');})).rejects.toMatchObject({code:'PROCESSING_ASSIGNMENT_SETTLED'});
  });
  it('enforces shared Redis slots across capabilities and protects routing changes until drained',async()=>{
-  const node=baseNode();expect((await nodeSave(node)).statusCode).toBe(200);const first=request(),second=request();
+  const node=baseNode();await publishTestNode(node);const first=request(),second=request();
   let release!:()=>void;let started!:()=>void;const gate=new Promise<void>(r=>release=r),start=new Promise<void>(r=>started=r);let audioStarted=false;
   const work=nodes.withNode('document',first,async()=>{started();await gate;});await start;
   const audio=nodes.withNode('audio',second,async()=>{audioStarted=true;});
@@ -255,7 +260,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   await expect(workerPool.query('UPDATE runtime_configuration SET revision=revision+1')).rejects.toMatchObject({code:'42501'});
  });
  it('blocks fresh admission if Redis loses durable remote occupancy',async()=>{
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode();expect((await nodeSave(node)).statusCode).toBe(200);const previous=request();
+  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode();await publishTestNode(node);const previous=request();
   await expect(nodes.withNode('document',previous,async()=>{throw new ParserExecutionError('TEST_REMOTE_UNKNOWN');})).rejects.toMatchObject({code:'DOCUMENT_PARSER_EXECUTION_UNKNOWN'});
   const runtime=await nodes.runtime(node),keys=await redis.keys(runtime.machine.state.keyPrefix+':*');if(keys.length)await redis.del(...keys);
   let executed=false;await expect(nodes.withNode('audio',request(),async()=>{executed=true;})).rejects.toMatchObject({code:'PROCESSING_NODE_COORDINATION_UNCERTAIN'});expect(executed).toBe(false);
@@ -265,44 +270,78 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
 
 
 describe('manual startup: durable tasks, event notifications and mock cloud only',()=>{
- it('authenticates and deduplicates startup, yields boot checks and pushes readiness without status polling',async()=>{
+ it('starts from outside the parser VPC, completes at Running and never calls the private API',async()=>{
   const node=baseNode({name:'Manual CPU node',mode:'ecs',capabilities:['document'],enabled:false,regionId:'cn-beijing',instanceId:'i-manual'+randomUUID().replaceAll('-','').slice(0,16),privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health'});
-  expect((await nodeSave(node)).statusCode).toBe(200);
+  node.tokenEnv='PROCESSING_NODE_TOKEN_DOCUMENT';await publishTestNode(node);
+  const externalAdmin={...adminConfig,processingNodes:{...adminConfig.processingNodes,enabled:false,cloudControlEnabled:true}};
+  const externalWorker={...workerConfig,processingNodes:{...workerConfig.processingNodes,enabled:false,cloudControlEnabled:true}};
+  const live=await buildAdminServer({config:externalAdmin,dependencies:{pool:adminPool,check:async()=>({postgres:true,schema:true,redisCache:true,redisQueue:true}),close:async()=>undefined}});
   const path=`/admin/api/v1/processing-nodes/${node.id}/start`;
-  expect((await app.inject({method:'POST',url:path})).statusCode).toBe(401);
-  expect((await app.inject({method:'POST',url:path,headers:{cookie:superCookie,origin:env.ADMIN_PUBLIC_BASE_URL}})).statusCode).toBe(403);
-  expect((await app.inject({method:'POST',url:path,headers:{cookie:operatorCookie,origin:env.ADMIN_PUBLIC_BASE_URL,'x-csrf-token':operatorCsrf}})).statusCode).toBe(403);
-  const first=await app.inject({method:'POST',url:path,headers:headers()}),second=await app.inject({method:'POST',url:path,headers:headers()});
+  expect((await live.inject({method:'POST',url:path})).statusCode).toBe(401);
+  expect((await live.inject({method:'POST',url:path,headers:{cookie:superCookie,origin:env.ADMIN_PUBLIC_BASE_URL}})).statusCode).toBe(403);
+  expect((await live.inject({method:'POST',url:path,headers:{cookie:operatorCookie,origin:env.ADMIN_PUBLIC_BASE_URL,'x-csrf-token':operatorCsrf}})).statusCode).toBe(403);
+  const first=await live.inject({method:'POST',url:path,headers:headers()}),second=await live.inject({method:'POST',url:path,headers:headers()});
   expect(first.statusCode,first.body).toBe(202);expect(second.json().data.taskId).toBe(first.json().data.taskId);
   const taskId=first.json().data.taskId as string;
   const instance:EcsInstance={instanceId:node.instanceId!,regionId:node.regionId!,instanceType:'ecs.c8y.16xlarge',status:'Stopped',stoppedMode:'StopCharging',chargeType:'PostPaid',networkType:'vpc',vpcId:'vpc-test',privateIps:[node.privateIp!],localStorageAmount:0,localStorageCapacity:0,operationLocked:false};
   const cloud:EcsPowerPort={describe:vi.fn(async()=>({...instance})),start:vi.fn(async()=>{instance.status='Starting';}),stopEconomically:vi.fn(async()=>undefined)};
-  const controlled=new ProcessingNodes(workerPool,workerConfig,cfg=>({machine:new DocumentParserMachine(new ParserMachineRedis(redis,cfg,env.REDIS_KEY_PREFIX),cloud,cfg,async()=>true),connect:async()=>undefined,close:async()=>undefined,startIdleMonitor:async()=>undefined}));
-  const jobs=new ProcessingNodeJobs(workerPool,workerConfig,controlled),engine=new TaskEngine(workerPool,15000,undefined,undefined,undefined,undefined,undefined,undefined,jobs);
-  const live=await buildAdminServer({config:adminConfig,dependencies:{pool:adminPool,check:async()=>({postgres:true,schema:true,redisCache:true,redisQueue:true}),close:async()=>undefined}});
+  const workerHealth=vi.fn(async()=>false);
+  const monitorErrors:unknown[]=[];
+  const controlled=new ProcessingNodes(workerPool,externalWorker,cfg=>{
+   const state=new ParserMachineRedis(redis,cfg,env.REDIS_KEY_PREFIX),machine=new DocumentParserMachine(state,cloud,cfg,workerHealth);
+   let monitor:ParserMachineIdleMonitor|undefined;
+   return {machine,connect:async()=>undefined,watch:async()=>()=>undefined,close:async()=>{await monitor?.close();},startIdleMonitor:async(events:MonitorEvents={})=>{
+    if(cfg.mode!=='ecs'||monitor)return;
+    const subscriber=redis.duplicate({lazyConnect:true});subscriber.on('error',()=>undefined);
+    monitor=new ParserMachineIdleMonitor(machine,subscriber,state.eventsChannel,cfg.idleMs,events);await monitor.start();
+   }};
+  });
+  const jobs=new ProcessingNodeJobs(workerPool,externalWorker,controlled),engine=new TaskEngine(workerPool,15000,undefined,undefined,undefined,undefined,undefined,undefined,jobs);
   const streamAbort=new AbortController();
+  const describe=vi.spyOn(AliyunEcsPower.prototype,'describe').mockImplementation(async()=>({...instance})),originalFetch=globalThis.fetch;
+  const privateRequest=vi.fn();const health=vi.spyOn(globalThis,'fetch').mockImplementation(async(url,options)=>{if(String(url).startsWith(node.baseUrl)){privateRequest();throw Error('PRIVATE_API_NOT_ALLOWED_OUTSIDE');}return originalFetch(url,options);});
   try{
    await live.listen({host:'127.0.0.1',port:0});const address=live.server.address();if(!address||typeof address==='string')throw Error('TEST_ADDRESS');
-   const stream=await fetch(`http://127.0.0.1:${address.port}/admin/api/v1/processing-nodes/${node.id}/start-events`,{headers:{cookie:superCookie},signal:AbortSignal.any([streamAbort.signal,AbortSignal.timeout(4000)])});
+   const stream=await fetch(`http://127.0.0.1:${address.port}/admin/api/v1/processing-nodes/${node.id}/events`,{headers:{cookie:superCookie},signal:AbortSignal.any([streamAbort.signal,AbortSignal.timeout(6000)])});
    expect(stream.status).toBe(200);expect(stream.headers.get('content-type')).toContain('text/event-stream');
-   const messages=stream.text();
+   const reader=stream.body!.getReader(),decoder=new TextDecoder();let body='';
+   const until=async(state:string)=>{while(!body.includes(`"state":"${state}"`)){const chunk=await reader.read();expect(chunk.done).toBe(false);body+=decoder.decode(chunk.value,{stream:true});}};
+   await until('starting');
    const run=async()=>{await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[taskId]);const attempt=await engine.claim(taskId,randomUUID());expect(attempt).not.toBeNull();return engine.execute(attempt!);};
    expect(await run()).toBe(false);expect(cloud.start).toHaveBeenCalledTimes(1);
    expect((await root.query('SELECT state,lease_owner,external_state FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'waiting_external',lease_owner:null,external_state:'none'});
    expect(await run()).toBe(false);expect(cloud.start).toHaveBeenCalledTimes(1);
    instance.status='Running';expect(await run()).toBe(true);
-   const body=await messages;expect(body).toContain('"state":"starting"');expect(body).toContain('"state":"ready"');
+   await until('online');expect(body).toContain('"serviceStatus":"not_checked"');expect(workerHealth).not.toHaveBeenCalled();expect(privateRequest).not.toHaveBeenCalled();
+   const privateParse=vi.fn(async()=>undefined);await expect(controlled.withNode('document',request(),privateParse)).rejects.toMatchObject({code:'PROCESSING_NODES_DISABLED'});expect(privateParse).not.toHaveBeenCalled();
+   expect((await live.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:superCookie}})).json().data.structuredEnabled).toBe(false);
    expect((await root.query('SELECT state,attempt_no,resume_count FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'succeeded',attempt_no:3,resume_count:2});
    expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',['manual:'+taskId])).rows[0].settled).toBe(true);
    expect((await root.query("SELECT config->'enabled' AS enabled FROM processing_nodes WHERE id=$1",[node.id])).rows[0].enabled).toBe(false);
    expect(cloud.start).toHaveBeenCalledTimes(1);expect(cloud.stopEconomically).not.toHaveBeenCalled();
-  }finally{streamAbort.abort();await live.close();await jobs.close();}
+   // Manual boots are monitored even with private API calls and automatic admission disabled.
+   await controlled.startMonitors(error=>monitorErrors.push(error));
+   const runtime=await controlled.runtime(node,false),started=await runtime.machine.state.status();
+   expect(started).toMatchObject({phase:'ready',active:0,queued:0,uncertain:0});
+   expect(await runtime.machine.tick()).toBe('busy');expect(cloud.stopEconomically).not.toHaveBeenCalled();
+   await controlled.observe(node.id);
+   expect((await runtime.machine.state.status())?.lastActivityMs).toBe(started?.lastActivityMs);
+   const [seconds,micros]=await redis.time();
+   await redis.hset(`${runtime.machine.state.keyPrefix}:state`,'lastActivity',Number(seconds)*1000+Math.floor(Number(micros)/1000)-node.idleSeconds*1000-1);
+   await redis.publish(runtime.machine.state.eventsChannel,'changed');
+   await vi.waitFor(()=>expect(cloud.stopEconomically).toHaveBeenCalledTimes(1),{interval:5});
+   expect((await runtime.machine.state.status())?.phase).toBe('stopping');
+   instance.status='Stopped';expect(await runtime.machine.tick()).toBe('stop_confirmed');
+   expect((await runtime.machine.state.status())?.economicallyStopped).toBe(true);
+   await until('offline');expect(body).toContain('"canStart":true');await reader.cancel();
+   expect(monitorErrors).toEqual([]);expect(workerHealth).not.toHaveBeenCalled();expect(privateRequest).not.toHaveBeenCalled();
+  }finally{streamAbort.abort();await live.close();await jobs.close();describe.mockRestore();health.mockRestore();}
  });
  it('keeps the deployment switch authoritative and does not queue a paid action while disabled',async()=>{
   const scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]);
-  const disabled=new ProcessingNodeJobs(adminPool,{...adminConfig,processingNodes:{...adminConfig.processingNodes,enabled:false}});
+  const disabled=new ProcessingNodeJobs(adminPool,{...adminConfig,processingNodes:{...adminConfig.processingNodes,enabled:false,cloudControlEnabled:false}});
   const before=Number((await root.query("SELECT count(*) AS n FROM tasks WHERE kind='processing.node-start'")).rows[0].n);
-  try{await expect(disabled.start(randomUUID(),scope,randomUUID())).rejects.toMatchObject({code:'PROCESSING_NODES_DISABLED'});expect(Number((await root.query("SELECT count(*) AS n FROM tasks WHERE kind='processing.node-start'")).rows[0].n)).toBe(before);}finally{await disabled.close();}
+  try{await expect(disabled.start(randomUUID(),scope,randomUUID())).rejects.toMatchObject({code:'PROCESSING_NODE_CLOUD_CONTROL_DISABLED'});expect(Number((await root.query("SELECT count(*) AS n FROM tasks WHERE kind='processing.node-start'")).rows[0].n)).toBe(before);}finally{await disabled.close();}
  });
 });
 
@@ -330,7 +369,7 @@ describe('Admin-only document trial, no business ingestion',()=>{
   const url=await app.inject({method:'POST',url:'/admin/api/v1/document-trials',headers:headers(),payload:{fileUrl:'http://169.254.169.254/latest/meta-data/'}});expect(url.statusCode,url.body).toBe(400);
  });
  it('probes the configured parser API with in-memory results and zero trial database writes',async()=>{
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});expect((await nodeSave(node)).statusCode).toBe(200);
+  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});await publishTestNode(node);
   let context:FileContext;const jobId=randomUUID();
   const fetchDouble=vi.fn<typeof fetch>(async(url,options)=>{
    if(options?.method==='POST'){
@@ -354,7 +393,7 @@ describe('Admin-only document trial, no business ingestion',()=>{
   }finally{await service.close();await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);}
  });
  it('discards an interrupted probe on close without durable recovery or a second submission',async()=>{
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});expect((await nodeSave(node)).statusCode).toBe(200);
+  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});await publishTestNode(node);
   const fetchDouble=vi.fn<typeof fetch>(async(_url,options)=>new Promise<Response>((_resolve,reject)=>{
    options!.signal!.addEventListener('abort',()=>reject(new Error('probe interrupted')),{once:true});
   }));

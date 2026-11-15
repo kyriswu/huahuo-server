@@ -1,5 +1,13 @@
 # App 只读参照基线
 
+## 服务端异常诊断（2026-11-15）
+
+只读复核api_endpoints.dart与http_auth_repository.dart，哈希与本轮开始时一致；仍使用原错误envelope/traceId，不新增客户端参数或暴露stack。未写App或运行Flutter，本轮证据见[验收](acceptance/error-diagnostics.md)。
+
+## 解析节点状态专项（2026-11-15）
+
+只读复核真实App的api_endpoints.dart与http_auth_repository.dart，SHA256仍为`17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`和`d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`。本轮调整Admin运行状态、云控制与内网调用边界、发布维护的节点清单及标签；不改App接口或源文件、不运行Flutter。见[验收](acceptance/processing-node-status.md)。
+
 ## 发布冒烟只读核对（2026-11-15）
 
 只读核对 App 的 `lib/core/network/api_endpoints.dart`（17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1）及 `lib/features/auth/data/http_auth_repository.dart`（d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5）。冒烟使用已有身份/工作区/任务路由，不新增 App 契约或写 App；证据 `.local/release-smoke/app-reference.json`，见[验收](acceptance/release-smoke.md)。

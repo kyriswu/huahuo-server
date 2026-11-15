@@ -1,5 +1,5 @@
 import type pg from 'pg';
-type Channel='task_events'|'document_parser_callbacks';
+type Channel='task_events'|'document_parser_callbacks'|'processing_node_events';
 /** One shared LISTEN socket per role; notifications only wake readers of durable state. */
 export class PgEvents {
  private client?:pg.PoolClient;private connecting?:Promise<void>;private reconnect?:NodeJS.Timeout;private closed=false;private connectedOnce=false;
@@ -12,7 +12,7 @@ export class PgEvents {
   if(this.client)return Promise.resolve();
   return this.connecting??=(async()=>{
    const client=await this.pool.connect();
-   try{await client.query('LISTEN task_events');await client.query('LISTEN document_parser_callbacks');
+   try{await client.query('LISTEN task_events');await client.query('LISTEN document_parser_callbacks');await client.query('LISTEN processing_node_events');
     if(this.closed){client.release();return;}
     this.client=client;client.on('notification',this.changed);client.on('error',this.disconnected);
     if(this.connectedOnce)for(const callbacks of this.listeners.values())for(const fn of callbacks)fn();this.connectedOnce=true;

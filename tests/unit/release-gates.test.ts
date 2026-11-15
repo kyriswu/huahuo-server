@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Env, Role } from '../../src/config/config.js';
-import { checkReleaseConfiguration, checkReleaseExternal, checkReleaseRuntime, runDatabaseAssertions } from '../../src/release/gates.js';
+import { checkReleaseConfiguration, checkReleaseConfigurationAssertions, checkReleaseExternal, checkReleaseRuntime, runDatabaseAssertions } from '../../src/release/gates.js';
 import { readReleasePlan, type ReleasePlan } from '../../src/release/plan.js';
 import { env } from '../helpers.js';
 
@@ -58,6 +58,28 @@ describe('release gate configuration and local child-process fixtures (no databa
     ];
     expect(checkReleaseConfiguration(await readFixture(), 'api-server', env).role).toBe('api-server');
   });
+  it('checks changed values in each actual role and suppresses private failure output', async () => {
+    plan.configuration.mode = 'candidate';
+    plan.configuration.verifyFile = 'scripts/release/changes/gate-test/verify-config.mjs';
+    plan.configuration.changes = [{ key: 'FEATURE_BUDGET', operation: 'change', roles: ['worker'], required: true, hasDefault: false }];
+    await writeFile(join(root, plan.configuration.verifyFile), `if (process.env.SERVICE_ROLE === 'worker' && process.env.FEATURE_BUDGET !== '20') { console.error(process.env.FEATURE_BUDGET); throw Error('private-fixture-detail'); }`);
+    const parsed = await readFixture();
+    await expect(checkReleaseConfigurationAssertions(parsed, 'worker', { ...env, FEATURE_BUDGET: '10' }, root)).rejects.toThrow(/^RELEASE_CONFIGURATION_ASSERTION_FAILED$/);
+    await expect(checkReleaseConfigurationAssertions(parsed, 'worker', { ...env, FEATURE_BUDGET: '20' }, root)).resolves.toEqual({ checkCount: 1 });
+    await expect(checkReleaseConfigurationAssertions(parsed, 'api-server', env, root)).resolves.toEqual({ checkCount: 1 });
+  });
+  it('rejects missing or overlong configuration check scripts', async () => {
+    plan.configuration.verifyFile = 'scripts/release/changes/gate-test/verify-config.mjs';
+    const parsed = await readFixture();
+    await expect(checkReleaseConfigurationAssertions(parsed, 'worker', env, root)).rejects.toThrow('RELEASE_CONFIGURATION_ASSERTION_FAILED');
+    await writeFile(join(root, plan.configuration.verifyFile), ' '.repeat(65537));
+    await expect(checkReleaseConfigurationAssertions(parsed, 'worker', env, root)).rejects.toThrow('RELEASE_CONFIGURATION_ASSERTION_FAILED');
+  });
+  it('bounds a stalled configuration assertion', async () => {
+    plan.configuration.verifyFile = 'scripts/release/changes/gate-test/verify-config.mjs';
+    await writeFile(join(root, plan.configuration.verifyFile), 'setInterval(() => {}, 1000);');
+    await expect(checkReleaseConfigurationAssertions(await readFixture(), 'worker', env, root)).rejects.toThrow('RELEASE_CONFIGURATION_ASSERTION_FAILED');
+  }, 7000);
   it('retains application configuration validation and does not leak invalid values', async () => {
     const parsed = await readFixture();
     expect(() => checkReleaseConfiguration(parsed, 'api-server', { ...env, DATABASE_URL: 'do-not-log-secret-url' })).toThrow('INVALID_CONFIG:DATABASE_URL');

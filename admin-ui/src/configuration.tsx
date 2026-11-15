@@ -1,5 +1,5 @@
 import {Alert, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Skeleton, Switch, Tabs, Tag} from 'antd';
-import {useEffect, useState} from 'react';
+import {useCallback, useEffect, useState} from 'react';
 import {AdminApiError, adminRequest, type AdminIdentity} from './session';
 import {DocumentTrial} from './document-trial';
 
@@ -7,23 +7,25 @@ type Category='document'|'rag'|'tasks'|'storage'|'billing'|'features'|'deploymen
 type SettingsCategory=Exclude<Category,'document'>;
 type Values=Record<string,unknown>;
 interface Definition {key:string;category:Category;label:string;description:string;type:'number'|'boolean'|'select'|'string';min?:number;max?:number;options?:string[];effect:string;}
-interface Configuration {revision:number;values:Values;updatedAt:string;definitions:Definition[];bootstrap:{processingNodesEnabled:boolean;billingMode:string;uploadHardMaxBytes:number;environmentKeys:string[]};billingPolicies:{policy_version:string;mode:string;monthly_credit_limit:string;currency:string}[];}
+interface Configuration {revision:number;values:Values;updatedAt:string;definitions:Definition[];bootstrap:{processingNodesEnabled:boolean;cloudControlEnabled:boolean;billingMode:string;uploadHardMaxBytes:number;environmentKeys:string[]};billingPolicies:{policy_version:string;mode:string;monthly_credit_limit:string;currency:string}[];}
 interface DocumentApi {mode:'async';parameters:Record<string,unknown>|null;timeoutSeconds:number;pollMs:number;maxResponseBytes:number;}
 const defaultDocumentApi=():DocumentApi=>({mode:'async',parameters:null,timeoutSeconds:3120,pollMs:2000,maxResponseBytes:67108864});
 interface Node {id:string;name:string;capabilities:('document'|'audio')[];resourceClass:'cpu'|'gpu';mode:'ecs'|'always-on';regionId:string|null;instanceId:string|null;privateIp:string|null;baseUrl:string;healthPath:string;tokenEnv:string|null;concurrency:number;idleSeconds:number;startupSeconds:number;queueSeconds:number;enabled:boolean;revision:number;eciFallback?:Record<string,unknown>|null;documentApi?:DocumentApi;}
+interface NodeStatus {state:'online'|'offline'|'starting'|'stopping'|'unknown';source:'ecs'|'eci'|'http';serviceReady:boolean|null;serviceStatus:'ready'|'unreachable'|'not_checked'|'not_running';canStart:boolean;checkedAt?:string;reason?:string;instanceStatus?:string;startup?:{taskId:string;state:string;error?:string}|null;}
+const nodeStatusText=(status?:NodeStatus)=>status?({online:'在线',offline:'不在线',starting:'开机中',stopping:'停机中',unknown:'状态未知'})[status.state]:'检测中';
+const nodeStatusDetail=(status?:NodeStatus)=>!status?'正在读取实例状态':status.state==='online'?`${status.source==='http'?'服务已运行':'实例已运行'} · ${status.serviceStatus==='ready'?'解析 API 可访问':status.serviceStatus==='not_checked'?'当前环境未启用解析 API 调用':'解析 API 暂不可达'}`:status.state==='starting'?'正在通过云端控制接口开机':status.state==='stopping'?'正在按空闲策略停机':status.state==='offline'?'实例或服务未运行':'无法确认实例状态，请检查查询权限和连接';
 const labels:Record<Category,string>={document:'解析与模型',rag:'RAG 与检索',tasks:'任务策略',storage:'上传与容量',billing:'计费策略',features:'功能开关',deployment:'部署配置'};
 const optionLabels:Record<string,string>={disabled:'关闭',async:'异步解析',sync:'同步解析',deterministic:'测试提供器（仅开发/测试）',llm:'LLM（尚未接入）',dify:'Dify（尚未接入）'};
 const panel='rounded-xl border border-console-line bg-white p-5 sm:p-6';
-const initialNode=():Node=>({id:crypto.randomUUID(),name:'',capabilities:['document'],resourceClass:'cpu',mode:'ecs',regionId:'cn-beijing',instanceId:null,privateIp:null,baseUrl:'',healthPath:'/health',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:false,revision:1});
 
 function errorText(cause:unknown){
  if(cause instanceof AdminApiError){
   if(cause.code==='CONFIGURATION_CONFLICT')return '已有其他管理员更新此配置。请保留当前修改，刷新配置后重新核对并保存。';
   if(cause.code==='PROCESSING_NODE_IDENTITY_EXISTS')return '该 ECS 或服务地址已登记，请编辑已有节点。';
-  if(cause.status===409)return '节点尚未排空。请先设为不在线并等待已有任务结束；ECS 还需确认已节省停机后再修改。';
+  if(cause.status===409)return '节点尚未排空。请先关闭“接收新任务”并等待已有任务结束；ECS 还需确认已节省停机后再修改。';
   if(cause.status===403)return '当前账号没有修改权限，或登录校验已失效。请重新登录后重试。';
   if(cause.status===400)return '配置未通过校验。请检查数值范围、完整 JSON、节点地址和密钥引用；不要填写密钥。';
-  if(cause.status===503)return '配置依赖暂不可用。请检查部署总开关和节点凭据引用后重试。';
+  if(cause.status===503)return '配置依赖暂不可用。请检查对应的部署开关和节点凭据引用后重试。';
  }
  return '暂时无法保存或读取配置。请重试。';
 }
@@ -50,15 +52,23 @@ function SettingsEditor({data,category,editable,save}:{data:Configuration;catego
  </section>;
 }
 
-function NodeEditor({node,editable,cloudEnabled,onSave,onStart}:{node:Node;editable:boolean;cloudEnabled:boolean;onSave:(node:Node,revision:number)=>Promise<void>;onStart:(id:string)=>Promise<{taskId:string;state:string}>}){
+function NodeEditor({node,editable,cloudEnabled,refreshKey,onSave,onStart,onStatus}:{node:Node;editable:boolean;cloudEnabled:boolean;refreshKey:number;onSave:(node:Node,revision:number)=>Promise<void>;onStart:(id:string)=>Promise<{taskId:string;state:string}>;onStatus:(id:string,status:NodeStatus)=>void}){
  type Fields=Node&{eciFallbackJson:string;documentParametersJson:string};
  const [form]=Form.useForm<Fields>();const mode=Form.useWatch('mode',form)??node.mode;
  const resourceClass=Form.useWatch('resourceClass',form)??node.resourceClass,capabilities=Form.useWatch('capabilities',form)??node.capabilities;
  const [saving,setSaving]=useState(false);const [error,setError]=useState<string>();const [saved,setSaved]=useState(false);
- const [control,setControl]=useState<{taskId:string;state:string;error?:string}|null>(null);const [starting,setStarting]=useState(false);
- useEffect(()=>{if(!node.name||node.mode!=='ecs')return;const controller=new AbortController();void adminRequest<{taskId:string;state:string;error?:string}|null>(`processing-nodes/${node.id}/start-status`,{signal:controller.signal}).then(setControl).catch(()=>undefined);return()=>controller.abort();},[node.id,node.name,node.mode]);
- useEffect(()=>{if(control?.state!=='starting')return;const events=new EventSource(`/admin/api/v1/processing-nodes/${node.id}/start-events`);events.addEventListener('update',event=>{try{const next=JSON.parse((event as MessageEvent).data);setControl(next);if(next.state!=='starting')events.close();}catch{setError('启动状态暂时无法读取，请刷新配置。');}});return()=>events.close();},[control?.taskId,control?.state,node.id]);
- async function startNode(){setStarting(true);setError(undefined);try{setControl(await onStart(node.id));}catch(cause){setError(errorText(cause));}finally{setStarting(false);}}
+ const [status,setStatus]=useState<NodeStatus>();const [statusAttempt,setStatusAttempt]=useState(0);const [starting,setStarting]=useState(false);
+ useEffect(()=>{
+  if(!node.name)return;
+  setStatus(undefined);onStatus(node.id,{state:'unknown',source:node.mode==='ecs'?'ecs':'http',serviceReady:null,serviceStatus:'not_checked',canStart:false,reason:'STATUS_CHECKING'});
+  const events=new EventSource(`/admin/api/v1/processing-nodes/${node.id}/events`);
+  const update=(next:NodeStatus)=>{setStatus(next);onStatus(node.id,next);};
+  events.addEventListener('update',event=>{try{update(JSON.parse((event as MessageEvent).data) as NodeStatus);}catch{setError('运行状态暂时无法读取，请刷新状态。');}});
+  events.onerror=()=>update({state:'unknown',source:node.mode==='ecs'?'ecs':'http',serviceReady:null,serviceStatus:'not_checked',canStart:false,reason:'STATUS_CONNECTION_UNAVAILABLE'});
+  const focused=()=>setStatusAttempt(n=>n+1);window.addEventListener('focus',focused);
+  return()=>{events.close();window.removeEventListener('focus',focused);};
+ },[node.id,node.name,node.mode,node.revision,refreshKey,statusAttempt,onStatus]);
+ async function startNode(){setStarting(true);setError(undefined);try{const startup=await onStart(node.id);const next:NodeStatus={...status,state:'starting',source:status?.source??'ecs',serviceReady:false,serviceStatus:'not_running',canStart:false,startup};setStatus(next);onStatus(node.id,next);}catch(cause){setError(errorText(cause));}finally{setStarting(false);}}
  useEffect(()=>{form.resetFields();form.setFieldsValue({...node,documentApi:node.documentApi??defaultDocumentApi(),documentParametersJson:node.documentApi?.parameters?JSON.stringify(node.documentApi.parameters,null,2):'',eciFallbackJson:node.eciFallback?JSON.stringify(node.eciFallback,null,2):''});setError(undefined);},[node,form]);
  async function submit(values:Fields){
   setSaving(true);setError(undefined);setSaved(false);
@@ -68,13 +78,19 @@ function NodeEditor({node,editable,cloudEnabled,onSave,onStart}:{node:Node;edita
     tokenEnv:values.tokenEnv?.trim()||null,regionId:mode==='ecs'?values.regionId:null,instanceId:mode==='ecs'?values.instanceId:null,privateIp:mode==='ecs'?new URL(values.baseUrl).hostname:null};
    if(capabilities.includes('document'))next.documentApi={...defaultDocumentApi(),...node.documentApi,...documentApi,mode:'async',parameters:documentParametersJson?.trim()?JSON.parse(documentParametersJson):null};
    else delete next.documentApi;
-   await onSave(next,node.name?node.revision:0);setSaved(true);
+   await onSave(next,node.revision);setSaved(true);
   }catch(cause){setError(cause instanceof SyntaxError?'JSON 格式有误，请检查后重试。':errorText(cause));}finally{setSaving(false);}
  }
  return <section className={panel} aria-label="节点配置">
-  <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold">{node.name||'登记处理节点'}</h2><Tag color={node.enabled?'green':'default'}>{node.enabled?'在线':'不在线'}</Tag></div>
-  <p className="mb-6 text-sm leading-6 text-console-muted">{mode==='ecs'?'ECS 按需唤醒，服务就绪后调用已有 API。':'直接调用已部署的 HTTP 服务。'}解析参数默认沿用服务端配置。</p>
-  {node.name&&mode==='ecs'&&<div className="mb-5 flex flex-wrap items-center gap-3"><Button disabled={!editable||!cloudEnabled} loading={starting||control?.state==='starting'} onClick={()=>void startNode()}>手动启动</Button><span className="text-xs text-console-muted">{!cloudEnabled?'当前部署未开启云节点':control?.state==='starting'?'正在启动并检查服务':control?.state==='ready'?'上次启动已就绪':control?.state==='failed'?'上次启动未完成，请检查实例状态':'空闲后仍按配置停机'}</span></div>}
+  <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><h2 className="text-base font-semibold">{node.name}</h2><Tag className="m-0 rounded-full" aria-label="运行方式">{node.mode==='ecs'?'按需启停':'常驻运行'}</Tag></div><div role="status" aria-live="polite"><Tag color={status?.state==='online'?'green':status?.state==='starting'?'processing':'default'}>{nodeStatusText(status)}</Tag></div></div>
+  <p className="mb-6 text-sm leading-6 text-console-muted">{node.mode==='ecs'?'云端开机不受内网限制；解析 API 需在同一 VPC 内访问。':'直接调用已部署的 HTTP 服务，需要当前环境可达。'}解析参数默认沿用服务端配置。</p>
+  {node.name&&<div className="mb-5 flex flex-wrap items-center gap-3">
+   {node.mode==='ecs'&&<Button disabled={!editable||!cloudEnabled||!status?.canStart} loading={starting||status?.state==='starting'} onClick={()=>void startNode()}>{starting||status?.state==='starting'?'开机中':'开机'}</Button>}
+   <Button onClick={()=>setStatusAttempt(n=>n+1)}>刷新状态</Button>
+   <span className="text-xs text-console-muted">{nodeStatusDetail(status)}{status?.checkedAt&&` · 最后检查 ${new Date(status.checkedAt).toLocaleTimeString('zh-CN',{hour12:false})}`}</span>
+  </div>}
+  {node.mode==='ecs'&&!cloudEnabled&&<Alert className="mb-5 break-words" type="warning" showIcon title="当前部署未允许云端控制" description="请核对 RAM 凭据与 PROCESSING_NODES_CLOUD_CONTROL_ENABLED。解析 API 的内网可达性不影响云端开机权限。"/>}
+  {status?.startup?.state==='failed'&&status.state!=='online'&&<Alert className="mb-5" type="error" showIcon title="上次开机未完成" description="当前状态以云端实例检查为准，可刷新状态后重试。"/>}
   {error&&<Alert className="mb-5" type="error" showIcon title={error}/>}{saved&&<Alert className="mb-5" type="success" title="节点配置已保存" showIcon/>}
   <Form form={form} layout="vertical" requiredMark={false} onFinish={submit} disabled={!editable||saving} onValuesChange={()=>setSaved(false)}>
    <div className="grid gap-x-6 sm:grid-cols-2">
@@ -82,11 +98,11 @@ function NodeEditor({node,editable,cloudEnabled,onSave,onStart}:{node:Node;edita
     {mode==='ecs'&&<Form.Item name="instanceId" label="ECS 实例 ID" rules={[{required:true,message:'请输入实例 ID。'}]}><Input placeholder="i-…"/></Form.Item>}
     <Form.Item name="baseUrl" label="服务地址" rules={[{required:true,message:'请输入完整 HTTP(S) 地址。'},{type:'url',message:'请输入完整 HTTP(S) 地址。'}]}><Input placeholder="http://172.18.102.103:8000"/></Form.Item>
     <Form.Item name="concurrency" label="整机并发" rules={[{required:true}]}><InputNumber min={1} max={16} precision={0} className="w-full"/></Form.Item>
-    <Form.Item name="idleSeconds" label={mode==='ecs'?'空闲停机等待（秒）':'空闲等待（秒）'} rules={[{required:true}]}><InputNumber min={1} max={3600} precision={0} className="w-full"/></Form.Item>
-    <Form.Item name="enabled" label="节点状态" extra="在线时接收新任务。" valuePropName="checked"><Switch checkedChildren="在线" unCheckedChildren="不在线"/></Form.Item>
+    <Form.Item name="idleSeconds" label={mode==='ecs'?'空闲停机等待（秒）':'空闲等待（秒）'} extra={mode==='ecs'?'开机后或最后一个请求结束后计时，无排队及执行任务时自动停机。':undefined} rules={[{required:true}]}><InputNumber min={1} max={3600} precision={0} className="w-full"/></Form.Item>
    </div>
    <details className="mb-5 border-t border-console-line pt-4"><summary className="cursor-pointer text-sm font-medium">高级设置</summary>
     <div className="mt-5 grid gap-x-6 sm:grid-cols-2">
+     <Form.Item name="enabled" label="参与自动调度" extra="允许新任务分配到此节点；机器运行状态由实际检查决定。" valuePropName="checked"><Checkbox>接收新任务</Checkbox></Form.Item>
      <Form.Item name="capabilities" label="处理类型" rules={[{required:true,message:'至少选择一种类型。'}]}><Checkbox.Group options={[{label:'文档',value:'document'},{label:'音频',value:'audio'}]}/></Form.Item>
      <Form.Item name="resourceClass" label="计算资源"><Select options={[{value:'cpu',label:'CPU'},{value:'gpu',label:'GPU'}]}/></Form.Item>
      <Form.Item name="mode" label="唤醒方式"><Select options={[{value:'ecs',label:'启动既有 ECS'},{value:'always-on',label:'无需唤醒，直接调用'}]}/></Form.Item>
@@ -109,6 +125,8 @@ function NodeEditor({node,editable,cloudEnabled,onSave,onStart}:{node:Node;edita
 export function ConfigurationPage({admin,csrfToken,onSessionExpired}:{admin?:AdminIdentity;csrfToken?:string;onSessionExpired?:()=>void}){
  const [data,setData]=useState<Configuration>();const [nodes,setNodes]=useState<Node[]>([]);const [selected,setSelected]=useState<Node>();const [tab,setTab]=useState('nodes');const [trialOpen,setTrialOpen]=useState(false);const [loading,setLoading]=useState(true);const [error,setError]=useState<string>();const [attempt,setAttempt]=useState(0);
  const editable=admin?.role==='superadmin'&&Boolean(csrfToken);
+ const [nodeStatuses,setNodeStatuses]=useState<Record<string,NodeStatus>>({});
+ const nodeStatusChanged=useCallback((id:string,status:NodeStatus)=>setNodeStatuses(current=>({...current,[id]:status})),[]);
  function failed(cause:unknown){if(cause instanceof AdminApiError&&cause.status===401)onSessionExpired?.();setError(errorText(cause));}
  useEffect(()=>{const controller=new AbortController();setLoading(true);setError(undefined);Promise.all([adminRequest<Configuration>('configuration',{signal:controller.signal}),adminRequest<{items:Node[]}>('processing-nodes',{signal:controller.signal})]).then(([config,list])=>{if(!controller.signal.aborted){setData(config);setNodes(list.items);setSelected(list.items[0]);setLoading(false);}},cause=>{if(!controller.signal.aborted){failed(cause);setLoading(false);}});return()=>controller.abort();},[attempt,onSessionExpired]);
  const headers={'Content-Type':'application/json','X-CSRF-Token':csrfToken??''};
@@ -122,10 +140,10 @@ export function ConfigurationPage({admin,csrfToken,onSessionExpired}:{admin?:Adm
    {!editable&&<Alert type="info" showIcon title="当前为只读视图，修改配置需要超级管理员权限。"/>}
    <Tabs activeKey={tab} onChange={setTab} items={[{key:'nodes',label:'处理节点'},...Object.entries(labels).map(([key,label])=>({key,label}))]}/>
    {tab==='nodes'?<div className="grid items-start gap-5 xl:grid-cols-[17rem_minmax(0,1fr)]"><aside className={panel}>
-    <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold">节点列表 · {nodes.length}</h2>{editable&&<Button size="small" onClick={()=>setSelected(initialNode())}>新增</Button>}</div>
-    <div className="grid gap-2">{nodes.map(n=><button key={n.id} type="button" onClick={()=>setSelected(n)} aria-pressed={selected?.id===n.id} className={`rounded-lg border p-3 text-left focus-visible:outline-2 focus-visible:outline-console-accent ${selected?.id===n.id?'border-console-accent bg-console-accent-soft':'border-console-line hover:bg-console-canvas'}`}><span className="block break-words text-sm font-medium">{n.name}</span><span className="mt-1 block text-xs text-console-muted">{n.resourceClass.toUpperCase()} · {n.capabilities.map(c=>c==='document'?'文档':'音频').join(' / ')} · {n.enabled?'在线':'不在线'}</span></button>)}</div>
-    <p className="mt-5 text-xs leading-5 text-console-muted">部署总开关：{data.bootstrap.processingNodesEnabled?'已开启':'已关闭'}<br/>同一 ECS 只登记一次，各处理类型共用整机额度。此处显示登记状态，运行状态由调度器协调。</p>
-   </aside>{selected?<NodeEditor key={selected.id} node={selected} editable={editable} cloudEnabled={data.bootstrap.processingNodesEnabled} onSave={saveNode} onStart={startNode}/>:<section className={panel}><h2 className="font-semibold">尚未登记节点</h2><p className="mt-2 text-sm text-console-muted">新增 CPU 或 GPU 节点，并选择处理类型。</p></section>}</div>
+    <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold">节点列表 · {nodes.length}</h2></div>
+    <div className="grid gap-2">{nodes.map(n=><button key={n.id} type="button" onClick={()=>setSelected(n)} aria-pressed={selected?.id===n.id} className={`rounded-lg border p-3 text-left focus-visible:outline-2 focus-visible:outline-console-accent ${selected?.id===n.id?'border-console-accent bg-console-accent-soft':'border-console-line hover:bg-console-canvas'}`}><span className="block break-words text-sm font-medium">{n.name}</span><span className="mt-1 block text-xs text-console-muted">{n.resourceClass.toUpperCase()} · {n.capabilities.map(c=>c==='document'?'文档':'音频').join(' / ')} · {nodeStatusText(nodeStatuses[n.id])}</span></button>)}</div>
+    <p className="mt-5 text-xs leading-5 text-console-muted">实例状态与解析 API 连通性分别检查。节点清单随代码发布维护。</p>
+   </aside>{selected?<NodeEditor key={selected.id} node={selected} editable={editable} cloudEnabled={data.bootstrap.cloudControlEnabled} refreshKey={attempt} onSave={saveNode} onStart={startNode} onStatus={nodeStatusChanged}/>:<section className={panel}><h2 className="font-semibold">尚未配置节点</h2><p className="mt-2 text-sm text-console-muted">节点清单由代码发布维护。</p></section>}</div>
    :tab==='deployment'?<div className="grid gap-5"><SettingsEditor data={data} category="deployment" editable={editable} save={values=>saveSettings('deployment',values)}/><section className={panel}><h2 className="mb-3 text-base font-semibold">保留在环境变量中的配置</h2><p className="mb-5 max-w-prose text-sm leading-6 text-console-muted">连接、凭据与部署总开关由部署环境提供。这里仅显示变量名，不读取或展示密钥；更新后需重建对应进程。</p><div className="grid gap-3 sm:grid-cols-2">{data.bootstrap.environmentKeys.map(key=><code key={key} className="break-all rounded-md bg-console-canvas px-3 py-2 text-xs">{key}</code>)}</div><dl className="mt-6 grid gap-4 text-sm sm:grid-cols-2"><div><dt className="text-console-muted">部署计费模式</dt><dd className="mt-1">{data.bootstrap.billingMode}</dd></div><div><dt className="text-console-muted">HTTP 上传硬上限</dt><dd className="mt-1 tabular-nums">{data.bootstrap.uploadHardMaxBytes.toLocaleString()} 字节</dd></div></dl></section></div>
    :tab==='document'?<section className={panel}><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base font-semibold">解析与模型</h2><Button disabled={!editable} onClick={()=>setTrialOpen(true)}>文档解析试用</Button></div><p className="mt-4 max-w-prose text-sm leading-6 text-console-muted">调用方式和提取参数随处理节点保存，默认使用已部署服务的配置。</p><Button className="mt-5" onClick={()=>setTab('nodes')}>管理处理节点</Button></section>:<SettingsEditor key={tab} data={data} category={tab as SettingsCategory} editable={editable} save={values=>saveSettings(tab as SettingsCategory,values)}/>}
   </>}

@@ -1,5 +1,7 @@
 # Prometheus 应用指标
 
+5xx 排查继续使用已有 Dozzle；应用已补充脱敏异常原因、stack/cause 与 traceId，须发布新版本后生效。字段及 TypeScript 行号要求见[应用日志](application-logs.md)，不新增日志组件或 Prometheus 高基数标签。
+
 四个常驻角色各一个 Node 进程；Worker 进程内的 BullMQ 队列消费者共享同一个 Registry。没有 cluster、PM2 或 worker_threads。依赖固定 `@prometheus-io/client@0.16.1`，其 Node engines 为 `^22 || ^24 || >=26`；本地 Volta 26.11.0、Docker 26.12.1 均满足。[客户端官方文档](https://github.com/prometheus/client_js)、[Fastify hooks](https://fastify.dev/docs/latest/Reference/Hooks/)。
 
 ## 环境与端口
