@@ -1,8 +1,12 @@
 import type {AppConfig} from '../../config/config.js';
 import {DomainError} from '../identity/store.js';
-export type Category='rag'|'tasks'|'storage'|'billing'|'features';
+export type Category='rag'|'tasks'|'storage'|'billing'|'features'|'deployment';
+export const DRAIN_TIMEOUT_KEY='deployment.drainTimeoutMs';
+export const DEFAULT_DRAIN_TIMEOUT_MS=600000;
+export const MAX_DRAIN_TIMEOUT_MS=3600000;
 export interface SettingDefinition {key:string;category:Category;label:string;description:string;type:'number'|'boolean'|'select'|'string';default:unknown;min?:number;max?:number;options?:string[];effect:string;}
 export const settings:SettingDefinition[]=[
+ {key:DRAIN_TIMEOUT_KEY,category:'deployment',label:'服务排空上限（毫秒）',description:'旧服务最多等待10–60分钟；工作完成后立即退出，达到上限强制结束。首次排空信号固定本次预算，重复停止信号不延长。',type:'number',min:DEFAULT_DRAIN_TIMEOUT_MS,max:MAX_DRAIN_TIMEOUT_MS,default:DEFAULT_DRAIN_TIMEOUT_MS,effect:'用于后续排空；发布期间请勿调整，不改变已开始的排空预算'},
  {key:'rag.denseCandidates',category:'rag',label:'向量召回候选数',description:'Note 混合检索中向量分支的候选数量。',type:'number',min:1,max:200,default:20,effect:'后续查询，执行中查询保持原参数'},
  {key:'rag.bm25Candidates',category:'rag',label:'关键词召回候选数',description:'BM25 关键词分支的候选数量；最终返回数量仍由请求 topK 决定。',type:'number',min:1,max:200,default:20,effect:'后续查询'},
  {key:'rag.hybridCandidates',category:'rag',label:'混合检索候选数',description:'融合后送入权限复核与可选重排的候选预算。',type:'number',min:1,max:200,default:30,effect:'后续查询'},

@@ -71,6 +71,16 @@ describe('reviewed cloud release command with local RPC fixtures only', () => {
     expect(s.wait).toHaveBeenCalledTimes(1);
   });
 
+  it('reports an explicitly completed forced drain without claiming graceful completion', async () => {
+    const s = setup(response([record({ Output: JSON.stringify({ ...marker(), code: 'OK_WITH_FORCED_DRAIN' }) })]));
+    expect(await runCloudRelease(s.config, s)).toMatchObject({ status: 'passed', stage: 'complete', code: 'TEST_RELEASE_OK_WITH_FORCED_DRAIN' });
+  });
+
+  it('does not accept a forced-drain marker when the release has not completed', async () => {
+    const s = setup(response([record({ Output: JSON.stringify({ ...marker(), stage: 'deploy', code: 'OK_WITH_FORCED_DRAIN' }) })]));
+    expect((await runCloudRelease(s.config, s)).status).toBe('failed');
+  });
+
   it.each([
     ['different instance', { InstanceId: 'i-not-the-authorized-instance' }],
     ['different invocation', { InvokeId: 't-anotherInvocation' }],
@@ -114,11 +124,11 @@ describe('reviewed cloud release command with local RPC fixtures only', () => {
   });
 
   it('also caps polling requests when a shortened interval leaves a large time budget', async () => {
-    const s = setup(response([]), { TEST_RELEASE_TOTAL_TIMEOUT_MS: '1200000' });
+    const s = setup(response([]), { TEST_RELEASE_TOTAL_TIMEOUT_MS: '5400000' });
     const result = await runCloudRelease(s.config, s);
-    expect(result).toMatchObject({ status: 'failed', code: 'TEST_RELEASE_TIMEOUT', requestCount: 241 });
+    expect(result).toMatchObject({ status: 'failed', code: 'TEST_RELEASE_TIMEOUT', requestCount: 1081 });
     expect(s.call.mock.calls.filter(args => args[0] === 'InvokeCommand')).toHaveLength(1);
-    expect(s.call.mock.calls.filter(args => args[0] === 'DescribeInvocationResults')).toHaveLength(240);
+    expect(s.call.mock.calls.filter(args => args[0] === 'DescribeInvocationResults')).toHaveLength(1080);
   });
 
   it.each(['invoke', 'poll'])('bounds a hung %s transport even when the SDK never resolves', async stage => {
@@ -153,7 +163,7 @@ describe('reviewed cloud release command with local RPC fixtures only', () => {
     ['TEST_RELEASE_COMMAND_ID', ''], ['TEST_RELEASE_COMMAND_ID', 'c-x'], ['TEST_RELEASE_COMMAND_ID', 'c-invalid;command'],
     ['TEST_RELEASE_SHA', 'main'], ['TEST_RELEASE_SHA', 'A'.repeat(40)], ['TEST_RELEASE_SHA', sha + '\nrm'],
     ['ALIBABA_CLOUD_ACCESS_KEY_ID', 'LTAI-long-lived-key'], ['ALIBABA_CLOUD_ACCESS_KEY_SECRET', ''], ['ALIBABA_CLOUD_SECURITY_TOKEN', ''],
-    ['TEST_RELEASE_TOTAL_TIMEOUT_MS', '99'], ['TEST_RELEASE_TOTAL_TIMEOUT_MS', '1200001'],
+    ['TEST_RELEASE_TOTAL_TIMEOUT_MS', '99'], ['TEST_RELEASE_TOTAL_TIMEOUT_MS', '5400001'],
     ['TEST_RELEASE_POLL_INTERVAL_MS', '9'], ['TEST_RELEASE_POLL_INTERVAL_MS', '5001'],
   ])('rejects unsafe configuration %s before an RPC', (key, value) => {
     expect(() => readCloudReleaseConfig({ ...env(), [key]: value })).toThrow(CloudReleaseError);

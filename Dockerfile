@@ -23,5 +23,6 @@ COPY --from=build --chown=node:node /app/resources ./resources
 COPY --chown=node:node migrations ./migrations
 COPY --chown=node:node scripts/healthcheck.mjs ./scripts/healthcheck.mjs
 COPY --chown=node:node scripts/rag-consistency.mjs ./scripts/rag-consistency.mjs
+COPY --chown=node:node scripts/release ./scripts/release
 USER node
 CMD ["node", "dist/entrypoints/api-server.js"]

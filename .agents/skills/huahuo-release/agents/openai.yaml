@@ -1,0 +1,6 @@
+interface:
+  display_name: "花火 Server 发布"
+  short_description: "准备可复用发布清单，评估迁移与配置风险，演练并核对真实发布结果"
+  default_prompt: "使用 $huahuo-release，根据实际部署版本准备本次发布，提出需要讨论的取舍并完成相应演练。"
+policy:
+  allow_implicit_invocation: true

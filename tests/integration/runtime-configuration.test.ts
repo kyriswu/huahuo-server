@@ -98,6 +98,19 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   const second=await settings.run(async()=>{expect(workerConfig.taskPolicy.maxAttempts).toBe(6);return workerConfig.runtimeRevision;});
   release();expect(await first).toBeLessThan(second);expect(currentRuntimeConfig()).toBeUndefined();expect(workerConfig.taskPolicy.maxAttempts).toBe(3);
  });
+ it('edits the database drain budget in the existing deployment category and preserves future fields',async()=>{
+  const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
+  const future={'deployment.futureOptional':{enabled:false}};
+  try{
+   await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify({...original,...future})]);
+   const response=await save('deployment',{'deployment.drainTimeoutMs':900000});expect(response.statusCode,response.body).toBe(200);
+   expect(app.drainTimeoutSnapshotMs()).toBe(900000);
+   expect(await app.readDrainTimeoutMs()).toBe(900000);
+   expect((await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values).toEqual({...original,...future,'deployment.drainTimeoutMs':900000});
+   expect((await save('deployment',{'deployment.drainTimeoutMs':599999})).statusCode).toBe(400);
+   expect((await save('deployment',{'deployment.drainTimeoutMs':600000},undefined,{cookie:operatorCookie,origin:env.ADMIN_PUBLIC_BASE_URL,'x-csrf-token':operatorCsrf})).statusCode).toBe(403);
+  }finally{await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(original)]);}
+ });
  it('reads future optional fields safely and preserves them through a strict older Admin edit',async()=>{
   const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
   const stored={[RUNTIME_CONFIGURATION_SCHEMA_KEY]:RUNTIME_CONFIGURATION_SCHEMA_VERSION,'tasks.futureOptional':{enabled:false,weights:[1,2]},'tasks.maxAttempts':4};

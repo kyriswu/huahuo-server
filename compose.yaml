@@ -115,7 +115,6 @@ services:
     environment:
       <<: *app-env
       SERVICE_ROLE: api-server
-      SHUTDOWN_TIMEOUT_MS: ${API_SHUTDOWN_TIMEOUT_MS:-300000}
       HOST: 0.0.0.0
       PORT: '3000'
       HEALTHCHECK_URL: http://127.0.0.1:3000/health/ready
@@ -157,7 +156,8 @@ services:
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: ${API_STOP_GRACE_PERIOD:-330s}
+    # DB drain budget controls exit; this ceiling must not kill a 60-minute drain early.
+    stop_grace_period: 3630s
     mem_limit: ${API_MEMORY_LIMIT:-512m}
     cpus: ${API_CPU_LIMIT:-1.0}
 
@@ -167,7 +167,6 @@ services:
     environment:
       <<: [*app-env, *processing-nodes-env]
       SERVICE_ROLE: admin
-      SHUTDOWN_TIMEOUT_MS: ${ADMIN_SHUTDOWN_TIMEOUT_MS:-300000}
       HOST: 0.0.0.0
       PORT: '3000'
       HEALTHCHECK_URL: http://127.0.0.1:3000/health/ready
@@ -184,7 +183,8 @@ services:
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: ${ADMIN_STOP_GRACE_PERIOD:-330s}
+    # DB drain budget controls exit; this ceiling must not kill a 60-minute drain early.
+    stop_grace_period: 3630s
     mem_limit: ${ADMIN_MEMORY_LIMIT:-512m}
     cpus: ${ADMIN_CPU_LIMIT:-1.0}
 
@@ -195,7 +195,6 @@ services:
       <<: [*app-env, *processing-nodes-env]
       WORKER_QUEUES: ${WORKER_QUEUES:-content,ai,commercial,maintenance}
       SERVICE_ROLE: worker
-      SHUTDOWN_TIMEOUT_MS: ${WORKER_SHUTDOWN_TIMEOUT_MS:-300000}
       HOST: 127.0.0.1
       PORT: '3100'
       HEALTHCHECK_URL: http://127.0.0.1:3100/health/ready
@@ -223,7 +222,8 @@ services:
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:-330s}
+    # DB drain budget controls exit; this ceiling must not kill a 60-minute drain early.
+    stop_grace_period: 3630s
     mem_limit: ${WORKER_MEMORY_LIMIT:-1g}
     cpus: ${WORKER_CPU_LIMIT:-2.0}
 
@@ -233,7 +233,6 @@ services:
     environment:
       <<: [*app-env, *processing-nodes-env]
       SERVICE_ROLE: scheduler
-      SHUTDOWN_TIMEOUT_MS: ${SCHEDULER_SHUTDOWN_TIMEOUT_MS:-30000}
       HOST: 127.0.0.1
       PORT: '3100'
       HEALTHCHECK_URL: http://127.0.0.1:3100/health/ready
@@ -245,7 +244,8 @@ services:
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
     healthcheck: *health
-    stop_grace_period: ${SCHEDULER_STOP_GRACE_PERIOD:-60s}
+    # DB drain budget controls exit; this ceiling must not kill a 60-minute drain early.
+    stop_grace_period: 3630s
     mem_limit: ${SCHEDULER_MEMORY_LIMIT:-256m}
     cpus: ${SCHEDULER_CPU_LIMIT:-0.5}
 
@@ -261,6 +261,8 @@ services:
       DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-disable}
       DATABASE_SSL_CA_FILE: ${DATABASE_SSL_CA_FILE:-}
       DATABASE_CONNECT_DEADLINE_MS: ${DATABASE_CONNECT_DEADLINE_MS:-120000}
+      DATABASE_STATEMENT_TIMEOUT_MS: ${MIGRATION_STATEMENT_TIMEOUT_MS:-30000}
+      MIGRATION_LOCK_TIMEOUT_MS: ${MIGRATION_LOCK_TIMEOUT_MS:-10000}
       DATABASE_POOL_MAX: '1'
     volumes:
       - ./infra/certs:/app/certs:ro

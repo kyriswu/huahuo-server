@@ -1,5 +1,9 @@
 # 当前开发进度
 
+## 可复用发布规范、Skill 与迁移验收（2026-11-15）
+
+在已完成的测试机发布基础上，新增仓库 skill、单份发布清单、冻结历史迁移、写库前纯只读检查、迁移后按角色 SQL 断言和配置门禁。每次隔离集成测试先按实际成功 SHA 的 SQL 升级到候选；本期用增量 0002 给已有单行配置补入默认十分钟退出预算，旧版迁移保持不变。数据修正依据规模、锁、时长与恢复条件决定随发布或独立运行，不机械强制双写/独立回填。675 项 unit/contract、275 项真实隔离 PG/Redis（1 项跳过）、Typecheck/Lint/Build 通过；宿主控制流另有 39 项 mock 演练，真实启用状态见[验收](acceptance/standard-release.md)，操作规范见[标准发布](runbooks/standard-release.md)。
+
 ## GitHub 真实合并演练与测试机发布准备（2026-11-15）
 
 全部工作区改动经 PR #1 合入 main `58da15340d60709065a9522e3b3a1887f08e22f7`，PR 和 main push 的 Server CI 均真实通过，分支保护已启用。新增测试机 workflow 和固定云助手调用器处于下一分支，48 项本地替身测试及全量 561 项 unit/contract、Lint/Typecheck 通过。云助手只读诊断定位旧镜像基线哈希不匹配导致四角色 unhealthy；未更新服务或数据库。用户随后确认云端授权，专用 OIDC 发布身份和固定命令已创建，宿主安装及真实 workflow 部署继续验证，见[接口及状态](runbooks/test-server-release.md)。

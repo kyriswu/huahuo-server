@@ -39,7 +39,7 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.path == '.github/workflows/release-smoke-check.yml'))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 100
     env:
       TEST_RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
     steps:
@@ -110,7 +110,7 @@ jobs:
           oidc-provider-arn: ${{ env.TEST_RELEASE_OIDC_PROVIDER_ARN }}
           role-to-assume: ${{ env.TEST_RELEASE_ROLE_ARN }}
           audience: sts.aliyuncs.com
-          role-session-expiration: 1800
+          role-session-expiration: 5400
           role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Invoke the fixed saved test-server command
         run: node scripts/release/invoke-cloud-release.mjs

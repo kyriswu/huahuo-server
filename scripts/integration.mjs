@@ -116,6 +116,15 @@ try {
     console.log('Cloud Milvus isolated database ready; business databases/collections are not used.');
   }
   console.log(`Ephemeral PostgreSQL/Redis${milvus ? '/Milvus' : ''} ready on loopback; no business SQL database, volume, model or OSS configuration used.`);
+  // Rehearse the actual declared deployed SQL baseline before the fresh business
+  // suite initializes any tables. Both phases use only this runner's resources.
+  const rehearsalExit = await new Promise((resolve, reject) => {
+    child = spawn('node', ['--import', 'tsx', 'src/entrypoints/release-rehearsal.ts'], { cwd: root, env: testEnv, stdio: 'inherit' });
+    child.once('error', () => reject(new IntegrationError('TEST_PROCESS_START_FAILED')));
+    child.once('exit', code => resolve(code));
+  });
+  checkInterrupted();
+  if (rehearsalExit !== 0) throw new IntegrationError('TEST_RELEASE_REHEARSAL_FAILED');
   const exit = await new Promise((resolve, reject) => {
     child = spawn('pnpm', ['test:integration:inner', '--maxWorkers=1', '--no-file-parallelism',
       ...(withCloudMilvus ? ['--testTimeout=30000', '--reporter=verbose'] : [])], { cwd: root, env: testEnv, stdio: 'inherit' });

@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26.11.0'
@@ -38,6 +39,8 @@ jobs:
         run: pnpm lint
       - name: Build
         run: pnpm build
+      - name: Validate release plan against its deployed base revision
+        run: node dist/entrypoints/release-plan.js
       - name: Unit and contract tests
         run: pnpm test
       - name: Prepare isolated integration images

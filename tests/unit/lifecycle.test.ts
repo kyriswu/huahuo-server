@@ -120,15 +120,25 @@ describe('application drain and shutdown', () => {
     const address = (await fixture.wait('ready')).address!;
     const response = fetch(address + '/slow').then(() => 'completed', () => 'interrupted');
     await fixture.wait('request-started'); fixture.child.kill('SIGTERM');
-    expect(await fixture.exit).toEqual({ code: 1, signal: null });
+    expect(await fixture.exit).toEqual({ code: 124, signal: null });
     expect(await response).toBe('interrupted');
     expect(fixture.messages.some(message => message.event === 'dependencies-closed')).toBe(false);
   }, 10000);
 
-  it('keeps the deadline effective if a handle leaks after successful cleanup', async () => {
+  it('exits immediately after completed cleanup even when an unrelated handle remains', async () => {
     const fixture = start(10, 1000, true);
     await fixture.wait('ready'); fixture.child.kill('SIGTERM');
-    expect(await fixture.exit).toEqual({ code: 1, signal: null });
+    expect(await fixture.exit).toEqual({ code: 0, signal: null });
     expect(fixture.messages.some(message => message.event === 'dependencies-closed')).toBe(true);
+  }, 10000);
+
+  it('does not abort active work when SIGTERM is sent more than once', async () => {
+    const fixture = start(300, 1500);
+    const address = (await fixture.wait('ready')).address!;
+    const response = fetch(address + '/slow');
+    await fixture.wait('request-started'); fixture.child.kill('SIGTERM');
+    await new Promise(resolve => setTimeout(resolve, 30)); fixture.child.kill('SIGTERM');
+    expect(await (await response).json()).toEqual({ done: true });
+    expect(await fixture.exit).toEqual({ code: 0, signal: null });
   }, 10000);
 });

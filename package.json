@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p admin-ui/tsconfig.json",
     "lint": "eslint src tests scripts/*.mjs scripts/release/*.mjs admin-ui",
     "release:smoke": "node scripts/release/smoke.mjs",
+    "release:check": "node dist/entrypoints/release-plan.js",
     "test": "vitest run tests/unit tests/contract --exclude '**/.local/**'",
     "test:unit": "vitest run tests/unit",
     "test:contract": "vitest run tests/contract",
