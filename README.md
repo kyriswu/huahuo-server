@@ -1,6 +1,6 @@
 # 花火 Server
 
-花火应用的独立后端，使用 Fastify、TypeScript/ESM、PostgreSQL、Redis 和 BullMQ。一个仓库、一份应用镜像，按 API、Admin、Worker、Scheduler 四个角色分别运行；数据库迁移由一次性 `migrate` 执行。
+花火应用的独立后端，使用 Fastify、TypeScript/ESM、PostgreSQL、Redis 和 BullMQ。一个仓库、一份应用镜像，按 API、Admin、Worker、Scheduler 四个角色分别运行；宿主入口统一鉴权并转发，数据库迁移由一次性 `migrate` 执行。
 
 本文说明首次运行、依赖、服务关系、开发与发布入口。实际配置以代码、`compose.yaml` 和环境模板为准；功能状态与验收边界见 [开发进度](docs/progress.md)。
 
@@ -26,10 +26,10 @@ Server 进程本身不要求本机安装 CUDA 或 GPU；解析和模型服务按
 | 能力 | 依赖与配置边界 |
 | --- | --- |
 | 文件存储 | `StoragePort` 支持本地卷、阿里云 OSS、S3；同机 API/Worker 可共用本地卷，跨主机不能各用一份不共享的目录 |
-| 知识库 | 启用索引/检索时需要兼容的 Milvus；资料走 BM25，笔记使用 BGE-M3 1024 维与 BM25，可选 HTTP Rerank |
+| 知识库 | 启用索引/检索时需要兼容的 Milvus；资料走 BM25，笔记使用 qwen3.7-text-embedding-flash 原生1024维/FP16与BM25，召回后由qwen3.7-text-rerank重排 |
 | PDF / Office | Xberg 解析服务；按后台节点配置调用常驻 API 或按需唤醒 ECS，内网地址须在实际运行环境可达 |
 | 短信登录 | 阿里云 SMS 的 RAM 凭据、已审核签名和模板；默认不因启动服务就发送短信 |
-| Agent 等服务 | 按已有 API 地址、方向独立的服务密钥与用户鉴权契约接入 |
+| Agent 等服务 | 内部地址直连，传递可信用户/会话身份；不携带 JWT 或 ServiceKey |
 
 未配置某项外部能力，不代表启动检查验证了它；也不要把 Mock、demo 任务或健康检查当作真实模型/解析验收。外部服务手册见文末。
 
@@ -37,8 +37,11 @@ Server 进程本身不要求本机安装 CUDA 或 GPU；解析和模型服务按
 
 ```mermaid
 flowchart LR
-    Client[App / Web] --> API[api-server]
-    Browser[管理页面] --> Admin[admin]
+    Client[App / Web] --> Gateway[宿主 Nginx 入口]
+    Gateway --> Auth[API JWT / 会话校验]
+    Gateway --> API[api-server]
+    Gateway --> Agent[独立 Agent]
+    Browser[本机管理页面 / 宿主代理] --> Admin[admin 独立端口]
     API --> PG[(PostgreSQL)]
     Admin --> PG
     Scheduler[scheduler] --> PG
@@ -58,13 +61,15 @@ API 先在 PostgreSQL 事务中保存业务任务和 Outbox，Scheduler 再投�
 
 | 角色 | 主要职责 | 默认宿主端口 |
 | --- | --- | --- |
-| `api-server` | 用户 API、上传下载、事件流、认证回调 | `3000`；指标 `9464` |
-| `admin` | 独立管理员鉴权、工作台、运行配置 | `3001`；指标 `9465` |
+| `api-server` | 用户 API、上传下载、事件流、认证回调 | 受限业务 `127.0.0.1:3000`；指标 `9464` |
+| `admin` | 独立管理员鉴权、工作台、运行配置 | 直接发布 `127.0.0.1:3001`；指标 `9465` |
 | `worker` | 消费任务、处理文件、索引、节点启动步骤 | 仅指标 `9466`，不开放业务端口 |
 | `scheduler` | 恢复/扫描任务、Outbox 投递、时间窗、节点空闲监控 | 仅指标 `9467`，不开放业务端口 |
 | `migrate` | 校验历史并执行尚未应用的编号迁移 | 一次性成功退出，不是常驻服务 |
 
 默认宿主映射绑定 loopback；容器内健康端口不等于宿主对外端口。API 不装载 Admin 路由。一个容器只运行一个角色，不用 PM2/supervisor 在容器内混跑。
+
+宿主入口调用 Server 的鉴权接口，验证 JWT、账号和会话后转发 `/api/v1/...` 与 `/agent/api/...`。业务接口消费可信身份，继续校验资源权限；Admin 使用自己的独立端口与管理会话。入口、域名、证书和切流由宿主独立维护，不进入应用 Compose 或项目发布脚本。Server 只维护[入口鉴权契约](docs/runbooks/gateway-auth.md)、应用监听、公开 URL 和可信代理配置。`pnpm compose` 直接调用 Docker Compose，不依赖业务分支。
 
 当前按 **API + Worker + Scheduler 同机成组，Admin 可独立部署** 使用，不要求拆仓库。Admin 跨机需连接原业务库和 Redis，并沿用该角色的账号及密钥；API/Worker 跨机前还须处理共享文件。更大范围的共享存储改造按实际拆分需要安排，见 [角色部署](docs/runbooks/role-deployment.md)。
 
@@ -87,7 +92,7 @@ volta install pnpm@10.15.1
 node --version
 pnpm --version
 docker version
-docker compose version
+pnpm compose version
 pnpm install --frozen-lockfile
 ```
 
@@ -116,7 +121,7 @@ if [ ! -f .env ]; then cp .env.example .env; fi
 - `APP_ENV`：本地 `development`，测试 `test`，生产 `production`。Docker 的 `NODE_ENV=production` 不代表业务环境是生产。
 - 数据库：为 API/Admin/Worker/Scheduler/migrate 分别填写 `DATABASE_*_URL` 和所需 TLS/CA；不要把所有角色改成数据库管理员。RDS 账号、库、网络和权限须已准备。
 - Redis：容器通过 `redis:6379` 或实际共享私网地址连接，宿主调试使用宿主可达地址；逻辑 DB 和前缀保持一致，`127.0.0.1` 在容器中指向容器自身。
-- 鉴权：准备 `APP_TOKEN_SECRET`、`ADMIN_SESSION_SECRET`、Ed25519 JWT 密钥及两个不同方向的服务密钥。JWT 的 PEM 按模板要求进行 Base64 编码；不要为重新部署轮换已有密钥。
+- 鉴权：准备 `APP_TOKEN_SECRET`、`ADMIN_SESSION_SECRET`、Ed25519 JWT 密钥（仅签发与网关统一认证使用）。服务间 ServiceKey 已移除。JWT 的 PEM 按模板要求进行 Base64 编码；不要为重新部署轮换已有密钥。
 - 地址：`APP_PUBLIC_BASE_URL` 给客户端使用，`ADMIN_PUBLIC_BASE_URL` 对应管理页面 Origin，`API_SERVICE_BASE_URL` 给其他服务/解析回调使用。地址必须从调用方可达，不能把容器名或 localhost 当作跨机地址。
 - 存储和可选外部服务：选择实际存储驱动，配置 Bucket/前缀、Milvus、模型等；不要为了健康检查随意启用短信、模型或云资源操作。
 
@@ -127,20 +132,20 @@ if [ ! -f .env ]; then cp .env.example .env; fi
 以下用于准备好的开发配置或全新隔离环境；现有测试/生产更新使用后文发布流程。连接共享库时先核对已审迁移与仍在运行的测试版本，确认兼容后才执行迁移，不能把它当作每次启动前的数据库重置。
 
 ```bash
-docker compose --env-file .env config --quiet
-docker compose --env-file .env build
+pnpm compose --env-file .env config --quiet
+pnpm compose --env-file .env build
 
 # 常规共享/RDS 模式只需本地 Redis：
-docker compose --env-file .env up -d redis
+pnpm compose --env-file .env up -d redis
 # 仅全新 local-db 环境，改用：
 # docker compose --env-file .env --profile local-db up -d postgres redis
 
 # 迁移单独执行；成功后才继续启动。
-docker compose --env-file .env run --rm --no-deps migrate
+pnpm compose --env-file .env run --rm --no-deps migrate
 
-# 四个常驻角色及其健康检查。
-docker compose --env-file .env up -d --no-build api-server admin worker scheduler
-docker compose --env-file .env ps -a
+# 四个应用角色及独立 HTTP 网关。
+pnpm compose --env-file .env up -d --no-build api-server admin worker scheduler
+pnpm compose --env-file .env ps -a
 curl --fail http://127.0.0.1:3000/health/ready
 curl --fail http://127.0.0.1:3001/health/ready
 ```

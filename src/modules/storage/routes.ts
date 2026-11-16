@@ -1,16 +1,16 @@
+import { readTrustedScope } from '../identity/trusted-scope.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { ErrorSchema, success } from '../../contracts/envelope.js';
 import { DomainError } from '../identity/store.js';
-import type { IdentityService } from '../identity/service.js';
 import { idempotencyKey } from '../identity/routes.js';
 import { Envelope, Id, Strict } from '../identity/schemas.js';
 import { StorageService } from './service.js';
 const empty=Type.Object({},Strict),uploadParams=Type.Object({uploadId:Id},Strict),resourceParams=Type.Object({resourceId:Id},Strict);
 const errors={400:ErrorSchema,401:ErrorSchema,403:ErrorSchema,404:ErrorSchema,409:ErrorSchema,410:ErrorSchema,413:ErrorSchema,416:ErrorSchema,429:ErrorSchema,503:ErrorSchema};
 const resource=Type.Object({resourceId:Id,sourceScene:Type.String(),fileName:Type.String(),mimeType:Type.String(),sizeBytes:Type.Integer(),durationSeconds:Type.Number(),sha256:Type.String()});
-export function registerStorageRoutes(app:FastifyInstance,identity:IdentityService,storage:StorageService){
- const auth=async(req:FastifyRequest)=>{req.authScope=await identity.authenticate(req.headers.authorization,req.id);};
+export function registerStorageRoutes(app:FastifyInstance,storage:StorageService){
+ const auth=async(req:FastifyRequest)=>{req.authScope=readTrustedScope(req.headers,req.id);};
  const scope=(req:FastifyRequest)=>{if(!req.authScope)throw new DomainError(401,'UNAUTHORIZED');return req.authScope;};
  const body=Type.Object({sourceScene:Type.String({minLength:2,maxLength:64}),fileName:Type.String({minLength:1,maxLength:120}),mimeType:Type.String({minLength:3,maxLength:128}),sizeBytes:Type.Integer({minimum:1,maximum:storage.config.uploadHardMaxBytes}),durationSeconds:Type.Number({minimum:0,maximum:14400}),sha256:Type.Optional(Type.String({pattern:'^[a-f0-9]{64}$'})),workspaceId:Type.Optional(Id),distillToDigitalTwin:Type.Optional(Type.Boolean())},Strict);
  app.post('/api/v1/media/upload-token',{preHandler:auth,schema:{body,querystring:empty,response:{200:Envelope(Type.Object({uploadId:Id,resourceId:Id,uploadUrl:Type.String(),method:Type.Literal('PUT'),headers:Type.Record(Type.String(),Type.String()),expiresAt:Type.String()})),...errors}}},async req=>{const b=req.body as {sourceScene:string;fileName:string;mimeType:string;sizeBytes:number;durationSeconds:number;sha256?:string;workspaceId?:string;distillToDigitalTwin?:boolean};return success(await storage.createUpload(scope(req),{...b,sizeBytes:BigInt(b.sizeBytes)},idempotencyKey(req,'required')!),req.id);});

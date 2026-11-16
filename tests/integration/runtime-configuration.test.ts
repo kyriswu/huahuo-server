@@ -17,6 +17,7 @@ import {ProcessingNodeJobs} from '../../src/modules/processing-nodes/jobs.js';
 import {TaskEngine} from '../../src/modules/tasks/engine.js';
 import {AliyunEcsPower,type EcsInstance,type EcsPowerPort} from '../../src/integrations/ecs-power.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {BillingService} from '../../src/modules/billing/service.js';
 import {transaction} from '../../src/modules/identity/store.js';
 import {AdminDocumentTrials} from '../../src/modules/admin/document-trials.js';
@@ -25,6 +26,7 @@ import {sampleExtraction} from '../support/document-extraction.js';
 import type {FileContext} from '../../src/integrations/document-extraction.js';
 import {DocumentCallbacks} from '../../src/modules/ingestion/document-callbacks.js';
 import {defaultDocumentApi} from '../../src/config/document-extraction.js';
+import {RagQueryService} from '../../src/modules/rag/query-service.js';
 
 const database=process.env.TEST_DATABASE_MIGRATION_URL,redisUrl=process.env.REDIS_QUEUE_URL;
 if(!database||!/^huahuo_test_/.test(new URL(database).pathname.slice(1))||!redisUrl||new URL(redisUrl).hostname!=='127.0.0.1'||Number(new URL(redisUrl).pathname.slice(1))<10)throw Error('ISOLATED_DEPENDENCIES_REQUIRED');
@@ -70,6 +72,32 @@ afterAll(async()=>{
 });
 
 describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no paid provider',()=>{
+ it('applies Admin recall updates to public and internal RAG with one stable snapshot per request',async()=>{
+  const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL});
+  const userId=await insertFixtureUser(root),bearer=await insertFixtureSession(root,userId);
+  const previous=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+  const observations:Array<{query:string;candidates:number;revision:number|undefined}>=[];
+  const spy=vi.spyOn(RagQueryService.prototype,'query').mockImplementation(async(_scope,input)=>{
+   observations.push({query:input.query,candidates:cfg.milvus.bm25Candidates,revision:currentRuntimeConfig()?.runtimeRevision});
+   if(input.query==='held'){entered();await gate;expect(cfg.milvus.bm25Candidates).toBe(7);}
+   return {mode:'keyword',query:input.query,results:[]};
+  });
+  const api=await buildApiServer({config:cfg});
+  const request=(url:string,query='snapshot')=>api.inject({method:'POST',url,headers:fixtureScopeHeaders(bearer),payload:{query,mode:'keyword'}});
+  let held:ReturnType<typeof request>|undefined;
+  try{
+   expect((await save('rag',{'rag.bm25Candidates':7})).statusCode).toBe(200);
+   for(const url of ['/api/v1/rag/query','/api/v1/kb/notes/query','/api/v1/kb/documents/query','/internal/v1/rag/query'])expect((await request(url)).statusCode).toBe(200);
+   expect(observations).toHaveLength(4);expect(observations.every(o=>o.candidates===7&&typeof o.revision==='number')).toBe(true);
+   held=request('/internal/v1/rag/query','held');void held.then(()=>undefined);await started;
+   expect((await save('rag',{'rag.bm25Candidates':11})).statusCode).toBe(200);
+   for(const url of ['/api/v1/rag/query','/internal/v1/rag/query'])expect((await request(url,'next')).statusCode).toBe(200);
+   expect(observations.filter(o=>o.query==='next').every(o=>o.candidates===11)).toBe(true);
+   release();expect((await held).statusCode).toBe(200);
+  }finally{release();await held;spy.mockRestore();await api.close();await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(previous)]);}
+ });
  it('requires admin sessions, denies App Bearer and isolates the API role',async()=>{
   expect((await app.inject({url:'/admin/api/v1/configuration',headers:{authorization:'Bearer app-token'}})).statusCode).toBe(401);
   const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL});const api=await buildApiServer({config:cfg});
@@ -177,7 +205,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL}),api=await buildApiServer({config:cfg});
   const userId=await insertFixtureUser(root),sessionId=randomUUID(),bearer=await insertFixtureSession(root,userId,sessionId);
   try{
-   const r=await api.inject({method:'POST',url:'/api/v1/media/upload-token',headers:{authorization:'Bearer '+bearer,'x-idempotency-key':randomUUID()},payload:{sourceScene:'note_import',fileName:'large.txt',mimeType:'text/plain',sizeBytes:1001,durationSeconds:0}});
+   const r=await api.inject({method:'POST',url:'/api/v1/media/upload-token',headers:{...fixtureScopeHeaders(bearer),'x-idempotency-key':randomUUID()},payload:{sourceScene:'note_import',fileName:'large.txt',mimeType:'text/plain',sizeBytes:1001,durationSeconds:0}});
    expect(r.statusCode,r.body).toBe(400);expect(r.json().error.code).toBe('UPLOAD_METADATA_INVALID');
   }finally{await api.close();await save('storage',{'storage.maxUploadBytes':104857600});}
  });

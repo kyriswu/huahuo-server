@@ -23,7 +23,7 @@
 
 | 环境变量 | 用途 |
 | --- | --- |
-| `SMOKE_BASE_URL` | 待验收公开 API 的 HTTPS origin |
+| `SMOKE_BASE_URL` | 待验收 统一鉴权公开入口的 HTTPS origin；不能指向内部 api-server 端口 |
 | `SMOKE_ACCESS_TOKEN` | 专用账号当前有效的 access JWT，只由受保护的调用方注入 |
 | `SMOKE_USER_ID` | 预先准备的验收账号 UUID |
 | `SMOKE_WORKSPACE_ID` | 该账号现有 ready 默认工作区 UUID |

@@ -4,6 +4,12 @@ import { loadGpuSpotConfig } from '../../src/integrations/gpu-spot/config.js';
 import { env } from '../helpers.js';
 import {applyValues,validateValues} from '../../src/modules/runtime-settings/registry.js';
 describe('role configuration',()=>{
+ it('defaults standalone HTTP to no proxy trust and bounds explicit trust to two hops',()=>{
+  expect(loadConfig('api-server',env).httpTrustProxyHops).toBe(0);
+  expect(loadConfig('admin',{...env,HTTP_TRUST_PROXY_HOPS:'1'}).httpTrustProxyHops).toBe(1);
+  expect(loadConfig('api-server',{...env,HTTP_TRUST_PROXY_HOPS:'2'}).httpTrustProxyHops).toBe(2);
+  for(const value of ['3','-1','true','1.5'])expect(()=>loadConfig('api-server',{...env,HTTP_TRUST_PROXY_HOPS:value})).toThrow('INVALID_CONFIG:HTTP_TRUST_PROXY_HOPS');
+ });
  it('does not retain a second ENV source for the database-managed drain budget',()=>{
   for(const role of ['api-server','worker','admin','scheduler'] as const){
    expect(loadConfig(role,env)).not.toHaveProperty('shutdownTimeoutMs');
@@ -41,14 +47,14 @@ describe('role configuration',()=>{
   expect(applyValues(loadConfig('api-server',env),{'rag.noteRerankBudgetMs':350},1).rag.noteRerankBudgetMs).toBe(350);
   for(const value of [0,-1,1.5,30001,NaN])expect(()=>validateValues({'rag.noteRerankBudgetMs':value},loadConfig('api-server',env))).toThrow('CONFIGURATION_INVALID');
  });
- it('configures native Milvus recall budgets and the fixed BGE model',()=>{
+ it('configures native Milvus recall budgets and the fixed Qwen native FP16 profile',()=>{
   const cfg=loadConfig('api-server',env);
   expect(cfg.milvus).toMatchObject({denseCandidates:20,bm25Candidates:20,hybridCandidates:30,rrfK:60});
-  expect(cfg.rag).toMatchObject({embeddingModel:'BAAI/bge-m3',embeddingDimensions:1024,embeddingProfile:'bge-m3-1024'});
+  expect(cfg.rag).toMatchObject({embeddingModel:'qwen3.7-text-embedding-flash',embeddingDimensions:1024,embeddingProfile:'qwen3.7-text-embedding-flash-1024-fp16'});
   for(const patch of [{'rag.denseCandidates':0},{'rag.bm25Candidates':201},{'rag.hybridCandidates':1.5},{'rag.rrfK':0}])expect(()=>validateValues(patch,cfg)).toThrow('CONFIGURATION_INVALID');
  });
- it('does not persist endpoint credentials and fixes the native tokenizer input limit',()=>{
-  for(const patch of [{RAG_EMBEDDING_BASE_URL:'https://user:secret@example.test/v1'},{RAG_RERANK_BASE_URL:'https://example.test?token=secret'},{RAG_TOKENIZER_MAX_INPUT_TOKENS:'32768'}])expect(()=>loadConfig('api-server',{...env,...patch})).toThrow(/^INVALID_CONFIG:/);
+ it('does not persist endpoint credentials and rejects other embedding spaces',()=>{
+  for(const patch of [{RAG_EMBEDDING_BASE_URL:'https://user:secret@example.test/v1'},{RAG_RERANK_BASE_URL:'https://example.test?token=secret'},{RAG_EMBEDDING_MODEL:'retired-model'},{RAG_EMBEDDING_PROFILE:'retired-profile'}])expect(()=>loadConfig('api-server',{...env,...patch})).toThrow(/^INVALID_CONFIG:/);
  });
  it('validates roles, ports, secrets and dependencies without exposing values',()=>{
   for (const patch of [{SERVICE_ROLE:'admin'},{DATABASE_URL:'secret-invalid-url'},{PORT:'NaN'},{DATABASE_POOL_MAX:'0'},{APP_TOKEN_SECRET:'short'},{REDIS_QUEUE_URL:''}]) {
@@ -56,11 +62,10 @@ describe('role configuration',()=>{
   }
  });
  it('rejects production mock/bypass but allows disabled capabilities',()=>{
-  const production={...env,APP_ENV:'production',DATABASE_SSL_MODE:'verify-full',APP_PUBLIC_BASE_URL:'https://api.example.test',APP_JWT_PRIVATE_KEY:'cA==',APP_JWT_PUBLIC_KEY:'cA==',HUAHUO_AGENT_TO_SERVER_API_KEY:'a'.repeat(43),HUAHUO_SERVER_TO_AGENT_API_KEY:'b'.repeat(43)};
+  const production={...env,APP_ENV:'production',DATABASE_SSL_MODE:'verify-full',APP_PUBLIC_BASE_URL:'https://api.example.test',APP_JWT_PRIVATE_KEY:'cA==',APP_JWT_PUBLIC_KEY:'cA=='};
   expect(()=>loadConfig('api-server',production)).not.toThrow();
-  expect(()=>loadConfig('api-server',{...production,HUAHUO_AGENT_TO_SERVER_API_KEY:undefined})).toThrow('INVALID_CONFIG:HUAHUO_SERVICE_API_KEY');
-  expect(()=>loadConfig('api-server',{...production,HUAHUO_SERVER_TO_AGENT_API_KEY:undefined})).toThrow('INVALID_CONFIG:HUAHUO_SERVICE_API_KEY');
-  expect(()=>loadConfig('api-server',{...production,HUAHUO_AGENT_TO_SERVER_API_KEY:'a'.repeat(43),HUAHUO_SERVER_TO_AGENT_API_KEY:'a'.repeat(43)})).toThrow('INVALID_CONFIG:HUAHUO_SERVICE_API_KEY_DIRECTIONAL_COLLISION');
+  expect(loadConfig('api-server',production)).not.toHaveProperty('agentToServerServiceKey');
+  expect(()=>loadConfig('api-server',{...production,HUAHUO_STUDIO_AUTH_ENABLED:'true'})).toThrow('INVALID_CONFIG:HUAHUO_STUDIO_AUTH_ENABLED');
   for(const patch of [{PROVIDER_MODE:'mock',ALLOW_MOCK_PROVIDERS:'true'},{DEV_AUTH_BYPASS:'true',ALLOW_DEV_AUTH:'true'},{PAYMENT_PROVIDER:'mock'}]) expect(()=>loadConfig('api-server',{...production,...patch})).toThrow();
   expect(()=>loadConfig('api-server',{...env,PROVIDER_MODE:'mock'})).toThrow();
   expect(()=>loadConfig('api-server',{...env,PROVIDER_MODE:'mock',ALLOW_MOCK_PROVIDERS:'true'})).not.toThrow();

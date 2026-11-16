@@ -13,6 +13,7 @@ import { buildAdminServer } from '../../src/apps/admin.js';
 import { AdminService } from '../../src/modules/admin/service.js';
 import type { Scope } from '../../src/modules/identity/store.js';
 import { fixtureAccessToken, insertFixtureUser, insertFixtureSession, testJwtEnv } from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL!;
 if(!migrationUrl||!/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('TEST_DB_REQUIRED');
 const env={...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),ADMIN_SESSION_SECRET:'admin-'.repeat(12),APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',SMS_PROVIDER:'disabled',REDIS_KEY_PREFIX:'p03-'+randomUUID(),ENABLE_DEMO_TASKS:'true'};
@@ -132,12 +133,12 @@ it('enqueue before ack crash and lost Redis job recover from PG; only ID enters 
 it('real API contract: task wrapper, auth, schema, result readiness and Admin CSRF/RBAC',async()=>{
  const api=await buildApiServer({config:cfg('api-server')}),admin=await buildAdminServer({config:cfg('admin')});
  const token=await fixtureAccessToken(a.userId,a.sessionId);await root.query('UPDATE user_sessions SET access_hash=$2 WHERE id=$1',[a.sessionId,hash(token)]);
- const headers={authorization:'Bearer '+token,'x-idempotency-key':randomUUID()};
+ const headers={...fixtureScopeHeaders(token),'x-idempotency-key':randomUUID()};
  try{
   const createResponse=await api.inject({method:'POST',url:'/api/v1/tasks/demo',headers,payload:{workspaceId:wa,text:'contract'}});expect(createResponse.statusCode).toBe(200);const id=createResponse.json().data.task.taskId;
-  const read=await api.inject({url:`/api/v1/tasks/${id}`,headers:{authorization:headers.authorization}});expect(read.json().data).toMatchObject({task:{taskType:'demo.digest',status:'queued'},retryActions:[{action:'runtime',allowed:false}]});
+  const read=await api.inject({url:`/api/v1/tasks/${id}`,headers:fixtureScopeHeaders(token)});expect(read.json().data).toMatchObject({task:{taskType:'demo.digest',status:'queued'},retryActions:[{action:'runtime',allowed:false}]});
   expect((await api.inject(`/api/v1/tasks/${id}`)).statusCode).toBe(401);
-  expect((await api.inject({url:`/api/v1/tasks/${id}/result`,headers:{authorization:headers.authorization}})).statusCode).toBe(409);
+  expect((await api.inject({url:`/api/v1/tasks/${id}/result`,headers:fixtureScopeHeaders(token)})).statusCode).toBe(409);
   expect((await api.inject({url:`/admin/api/v1/tasks/${id}`,headers})).statusCode).toBe(404);
   expect((await admin.inject({url:`/admin/api/v1/tasks/${id}`,headers})).statusCode).toBe(401);
   const adminPool=poolFor(cfg('admin')),adminService=new AdminService(adminPool,env.ADMIN_SESSION_SECRET);

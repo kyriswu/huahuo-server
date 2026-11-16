@@ -23,7 +23,7 @@ try{
  const password=randomBytes(24).toString('hex');
  const output=docker(['exec','-i',admin,'node','dist/entrypoints/admin-bootstrap.js'],{input:JSON.stringify({username:'e2eadmin',password}),stdio:['pipe','pipe','pipe']});
  const account=JSON.parse(output);if(!account.adminId)throw new Error('BOOTSTRAP_FAILED');
- const client=envFile('client',{TEST_API_URL:`http://${api}:3000`,TEST_ADMIN_URL:`http://${admin}:3000`,TEST_ADMIN_PASSWORD:password});
+ const client=envFile('client',{TEST_API_URL:`http://${api}:3000`,TEST_API_ADMISSION_MODE:'isolated-auth-subrequest',TEST_ADMIN_URL:`http://${admin}:3000`,TEST_ADMIN_PASSWORD:password});
  docker(['run','--rm','--network',`${project}_backend`,'--env-file',client,'-v',`${resolve('.')}:/app`,'huahuo-server-tooling:p01','node','tests/e2e/p02-http.mjs'],{stdio:'inherit'});
  docker(['exec','-i',admin,'node','dist/entrypoints/admin-revoke-sessions.js'],{input:JSON.stringify({username:'e2eadmin',reason:'P02 HTTP CLI validation'}),stdio:['pipe','pipe','pipe']});
  writeFileSync('docs/p02-http.local.json',JSON.stringify({recordedAt:new Date().toISOString(),exitCode:0,checks:['two-user HTTP','profile persistence','refresh reuse','admin cookie/CSRF/logout','bootstrap and revoke CLI'],sms:'mock',testDatabase:'isolated temporary database; removed after test'},null,2)+'\n');

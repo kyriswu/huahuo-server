@@ -36,7 +36,7 @@ test/production 两个 environment 均只允许 main 分支、0 个标签，管�
 
 1. 用测试环境实际成功 SHA 整理本期影响，准备 release plan 与 PR 上线清单。业务、SQL、ENV 变化必须修改 `scripts/release/plan.json`；计划更新表达本次需要发布，原数据库/配置/兼容验收仍执行。
 2. 创建 test PR 后启用 GitHub 原生 Auto-merge；CI 与负责人审核满足后由 GitHub 合并。AI 可直接设置，无需 owner 对普通 test 业务逐次确认。发布控制变更与 Skill 先由 owner 审核合入 main，再同步 test；main 不自动合并。
-3. 合并后的准确 test SHA 完成 push CI，main 的 `Test server release` 经 workflow_run 自动启动。main 提供控制代码、调用器、依赖及 Compose，test 提供业务及清单；GitHub 自动提供只读 API token，云身份仍用原 OIDC，不新增长期令牌。
+3. 合并后的准确 test SHA 完成 push CI，main 的 `Test server release` 经 workflow_run 自动启动。CI 的 `release:review` 只审查候选；入口读取同一准确 SHA 的清单，兼容项存在 false 时记录本项目发布前置条件未完成，不请求云凭据或调用宿主。普通手动恢复也不能绕过该门禁。main 提供控制代码、调用器、依赖及 Compose，test 提供业务及清单；GitHub 自动提供只读 API token，云身份仍用原 OIDC，不新增长期令牌。
 4. 自动入口验证 CI 类型/分支/仓库/运行 ID、当前双 SHA 与合并 PR 的完整文件清单。修改 release plan 的候选进入既有五阶段；只含文档/归属/已知控制文件的同步跳过应用部署。业务变更缺 plan 更新则失败，不能当作无变化。重命名也检查原路径，文件清单不完整则拒绝。
 5. 发布串行且不取消正在排空的发布；旧候选过期就停止。只有终态和验收通过才记录成功。CI 成功与发布成功分别记录。
 

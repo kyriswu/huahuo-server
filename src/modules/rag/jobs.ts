@@ -14,7 +14,7 @@ import type { DocumentStructure } from '../../lib/document-processing/types.js';
 import { type FileProcessingSnapshot } from './processing-profile.js';
 import { indexTocBytes, type CanonicalTocItem } from './canonical-toc.js';
 import { EmbeddingError } from './adapters/embedding.js';
-import { MilvusError } from './adapters/milvus.js';
+import { SearchIndexError } from '../../lib/search-index/types.js';
 import { RagIngestionRepository, type RagVersionRow } from './repository.js';
 import { DocumentPreparationError, downloadSourceBytes, parseDownloadedText } from './document-preparation.js';
 import {ManagedDocumentExtractor,ManagedExtractionError,type SavedExtraction} from '../ingestion/document-extraction.js';
@@ -142,7 +142,7 @@ export class RagIngestionJobs {
       return {digest:canonicalHash,bytes:storedBytes};
     } catch (error) {
       if(error instanceof ParserExecutionDeferred)throw error;
-      const mapped = error instanceof RagJobError ? error : error instanceof DocumentPreparationError||error instanceof ManagedExtractionError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : error instanceof EmbeddingError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : error instanceof MilvusError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : new RagJobError('RAG_INGEST_FAILED', error instanceof Error ? error.message : 'RAG ingestion failed', true, { cause: error });
+      const mapped = error instanceof RagJobError ? error : error instanceof DocumentPreparationError||error instanceof ManagedExtractionError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : error instanceof EmbeddingError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : error instanceof SearchIndexError ? new RagJobError(error.code, error.message, error.retryable, { cause: error }) : new RagJobError('RAG_INGEST_FAILED', error instanceof Error ? error.message : 'RAG ingestion failed', true, { cause: error });
       const latest = await this.versions.byId(this.pool, version.id);
       if(mapped.code==='RAG_STALE_ATTEMPT'){
         try{await new KnowledgeIndexJobs(this.pool,this.config,this.dependencies.kb).cleanup('file',version.id,attempt);}catch{await this.update(version.id,{cleanup_status:'failed'});throw new RagJobError('RAG_CLEANUP_FAILED','Stale index cleanup needs retry',true);}

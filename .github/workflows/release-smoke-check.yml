@@ -39,8 +39,9 @@ jobs:
         run: pnpm lint
       - name: Build
         run: pnpm build
-      - name: Validate release plan against its deployed base revision
-        run: node dist/entrypoints/release-plan.js
+      - name: Review release plan against its deployed base revision
+        # Compatibility controls deployment, not whether an incompatible change can be tested.
+        run: pnpm release:review
       - name: Unit and contract tests
         run: pnpm test
       - name: Prepare isolated integration images

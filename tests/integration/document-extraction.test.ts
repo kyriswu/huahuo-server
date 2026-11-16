@@ -22,11 +22,12 @@ import {storageFor} from '../../src/modules/storage/port.js';
 import {StorageService} from '../../src/modules/storage/service.js';
 import {mockKnowledgeIndex} from '../support/kb-index.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {sampleExtraction} from '../support/document-extraction.js';
 import type {ExtractionResponse,FileContext} from '../../src/integrations/document-extraction.js';
 import type {Attempt} from '../../src/modules/tasks/engine.js';
 import {RagQueryService} from '../../src/modules/rag/query-service.js';
-import {MilvusRepository} from '../../src/modules/rag/adapters/milvus.js';
+import {knowledgeIndex} from '../../src/modules/kb/profile.js';
 import {ProcessingNodes} from '../../src/modules/processing-nodes/service.js';
 import {ParserExecutionError} from '../../src/lib/document-parser-machine/index.js';
 import type {KbSnapshot} from '../../src/modules/kb/types.js';
@@ -109,7 +110,7 @@ async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=fa
  await root.query('INSERT INTO processing_nodes(id,config) VALUES($1,$2)',[nodeId,JSON.stringify({documentApi,name:'loopback parser',capabilities:['document'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:baseUrl+'/node-'+prefix,healthPath:'',tokenEnv:null,eciFallback:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:true})]);
  apiConfig.rag.enabled=true;workerConfig.rag.enabled=true;
  const apiPool=poolFor(apiConfig),workerPool=poolFor(workerConfig),storage=storageFor(workerConfig),memory=mockKnowledgeIndex();
- const deps={index:(snapshot:KbSnapshot)=>realKeyword?new MilvusRepository({...apiConfig.milvus,database:snapshot.target.database,collection:snapshot.target.collection,mode:snapshot.mode}):memory,
+ const deps={index:(snapshot:KbSnapshot)=>realKeyword?knowledgeIndex(apiConfig,snapshot):memory.keyword,
   embedding:()=>{throw new Error('DOCUMENT_PATH_MUST_NOT_USE_EMBEDDING');},tokenizer:()=>{throw new Error('DOCUMENT_PATH_MUST_NOT_USE_MODEL_TOKENIZER');}};
  const pipeline=new RagIngestionJobs(workerPool,workerConfig,storage,{kb:deps});
  const engine=new TaskEngine(workerPool,120000,undefined,undefined,undefined,pipeline);
@@ -119,7 +120,7 @@ async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=fa
  const api=await buildApiServer({config:apiConfig});
  deliverCallback=async(url,id,result)=>{const response=await api.inject({method:'POST',url:new URL(url).pathname,payload:{event:'extraction.completed',event_id:randomUUID(),job_id:id,state:'completed',result}});expect(response.statusCode,response.body).toBe(200);};
  const start=async()=>{
-  const response=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers:{authorization:'Bearer '+bearer,'x-idempotency-key':randomUUID()},payload:{ossUrl:baseUrl+'/source.pdf',fileName:'source.pdf',mimeType:'application/pdf'}});
+  const response=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers:{...fixtureScopeHeaders(bearer),'x-idempotency-key':randomUUID()},payload:{ossUrl:baseUrl+'/source.pdf',fileName:'source.pdf',mimeType:'application/pdf'}});
   expect(response.statusCode,response.body).toBe(200);return response.json().data as {jobId:string;documentVersionId:string};
  };
  const attempt=async(id:string)=>vi.waitFor(async()=>{const a=await engine.claim(id,randomUUID());expect(a,a?undefined:JSON.stringify((await root.query('SELECT state,attempt_no,max_attempts,available_at,clock_timestamp() AS clock,external_state FROM tasks WHERE id=$1',[id])).rows)).not.toBeNull();return a!;},{interval:20,timeout:3000});
@@ -149,11 +150,11 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    const read=vi.fn(async()=>Readable.from([Buffer.from('fake-image')]));
    await assetRepository.asset(s.scope,created.jobId,assets[0].id,{read});expect(read).toHaveBeenCalledExactlyOnceWith(assets[0].id);
    expect(Number((await root.query('SELECT count(*) FROM kb_document_keyword_builds WHERE source_id=$1 AND published',[created.documentVersionId])).rows[0].count)).toBe(1);
-   const response=await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{authorization:'Bearer '+s.bearer}});
+   const response=await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(s.bearer)}});
    expect(response.statusCode,response.body).toBe(200);expect(response.json()).toEqual(lastResponse);expect(response.body).not.toContain('data_base64');
    const other=await insertFixtureUser(root),otherToken=await insertFixtureSession(root,other,randomUUID());
-   expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{authorization:'Bearer '+otherToken}})).statusCode).toBe(404);
-   await s.repository.action(s.scope,created.jobId,'delete');expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{authorization:'Bearer '+s.bearer}})).statusCode).toBe(404);
+   expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(otherToken)}})).statusCode).toBe(404);
+   await s.repository.action(s.scope,created.jobId,'delete');expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(s.bearer)}})).statusCode).toBe(404);
    expect(errors).toHaveLength(0);
   }finally{await s.close();}
  });

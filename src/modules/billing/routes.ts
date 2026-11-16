@@ -1,14 +1,14 @@
+import { readTrustedScope } from '../identity/trusted-scope.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { ErrorSchema, success } from '../../contracts/envelope.js';
 import { DomainError } from '../identity/store.js';
-import type { IdentityService } from '../identity/service.js';
 import { BillingService } from './service.js';
 
 const empty = Type.Object({}, { additionalProperties: false });
 const any = Type.Any();
-export function registerBillingRoutes(app: FastifyInstance, identity: IdentityService, billing: BillingService) {
- const auth=async(req:FastifyRequest)=>{req.authScope=await identity.authenticate(req.headers.authorization,req.id);};
+export function registerBillingRoutes(app: FastifyInstance, billing: BillingService) {
+ const auth=async(req:FastifyRequest)=>{req.authScope=readTrustedScope(req.headers,req.id);};
  const scope=(req:FastifyRequest)=>{if(!req.authScope)throw new DomainError(401,'UNAUTHORIZED');return req.authScope;};
  const errors={400:ErrorSchema,401:ErrorSchema,404:ErrorSchema,409:ErrorSchema,503:ErrorSchema};
  app.get('/api/v1/membership',{preHandler:auth,schema:{querystring:empty,response:{200:Type.Object({success:Type.Literal(true),data:any,traceId:Type.String()}),...errors}}},async req=>success(await billing.membership(scope(req)),req.id));

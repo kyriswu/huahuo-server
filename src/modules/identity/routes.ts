@@ -1,3 +1,4 @@
+import { readTrustedScope } from './trusted-scope.js';
 import type { FastifyInstance, FastifyRequest, HTTPMethods } from 'fastify';
 import { Type, type Static, type TSchema } from '@sinclair/typebox';
 import { ErrorSchema, success } from '../../contracts/envelope.js';
@@ -26,7 +27,7 @@ export function registerIdentityRoutes(app:FastifyInstance,identity:IdentityServ
  const wid=(r:FastifyRequest)=>(r.params as {workspaceId:string}).workspaceId;
  function route(method:HTTPMethods,url:string,body:TSchema|undefined,result:TSchema,handler:(req:FastifyRequest)=>Promise<unknown>,auth=true,idem:'required'|'optional'|'forbidden'=method==='GET'?'forbidden':'required') {
   app.route({method,url,schema:{...(body?{body}:{}),...(url.includes(':workspaceId')?{params:S.obj({workspaceId:S.Id},S.Strict)}:{}),querystring:S.obj({},S.Strict),response:{200:S.Envelope(result),400:ErrorSchema,401:ErrorSchema,403:ErrorSchema,404:ErrorSchema,409:ErrorSchema,412:ErrorSchema,429:ErrorSchema,503:ErrorSchema}},
-   preHandler:async req=>{idempotencyKey(req,idem);if(auth)req.authScope=await identity.authenticate(req.headers.authorization,req.id);},
+   preHandler:async req=>{idempotencyKey(req,idem);if(auth)req.authScope=readTrustedScope(req.headers,req.id);},
    handler:async(req,reply)=>{const data=await handler(req);if(data&&typeof data==='object'&&'etag' in data)reply.header('ETag',String(data.etag));return success(data,req.id);}});
  }
  route('POST','/api/v1/auth/sms-code',S.SmsBody,S.SmsResult,r=>identity.sendCode(r.body as Static<typeof S.SmsBody>,r.ip,idempotencyKey(r,'optional')),false,'optional');

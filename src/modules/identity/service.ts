@@ -7,7 +7,7 @@ import { createSmsProvider, type SmsProvider } from '../../integrations/sms.js';
 import { SmsProviderError } from '../../integrations/aliyun-sms.js';
 import { constantEqual, mac, maskedPhone, normalizePhone, otpCode, token } from './crypto.js';
 import { loadEd25519Keys, publicJwks, signAccessToken, verifyAccessToken, type JwtSettings } from './jwt.js';
-import { DomainError, transaction, lock, audit, type Scope, rateLimit } from './store.js';
+import { DomainError, transaction, lock, audit, assertScope, type Scope, rateLimit } from './store.js';
 export type ClientType='app'|'web';
 export interface LoginInput { phone:string; smsRequestId:string; smsCode:string; clientType:ClientType; clientId:string; agreementAccepted:boolean; agreementVersion:string; privacyVersion:string; clientVersion:string; timeZone?:string; }
 export interface TokenPair { tokenType:'Bearer'; accessToken:string; refreshToken:string; accessTokenExpiresAt:string; expiresIn:number; rotated:boolean; }
@@ -139,6 +139,10 @@ export class IdentityService {
   }
   async logout(scope:Scope,all=false){
     await transaction(this.pool,async tx=>{
+      // Serialize account-wide revocation before taking session share locks;
+      // concurrent logout calls must not deadlock while upgrading those locks.
+      await lock(tx,`auth.logout:${scope.userId}`);
+      await assertScope(tx,scope);
       await tx.query(`UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 ${all?'':'AND id=$2'}`,all?[scope.userId]:[scope.userId,scope.sessionId]);
       await audit(tx,scope,all?'auth.logout_all':'auth.logout',scope.sessionId);
     });return {revoked:true,scope:all?'all':'current'};

@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error Release tooling uses dependency-free JavaScript.
-import { testReleaseIntent, resolveTestReleaseTrigger } from '../../scripts/release/test-release-trigger.mjs';
+import { testReleaseIntent, readAutomaticReleaseReadiness, resolveTestReleaseTrigger } from '../../scripts/release/test-release-trigger.mjs';
 const repo = 'kyriswu/huahuo-server', control = 'a'.repeat(40), target = 'b'.repeat(40);
 const context = () => ({ repository: repo, eventName: 'workflow_run', ref: 'refs/heads/main', controlSha: control, expectedTargetSha: target,
   trigger: { id: 17, path: '.github/workflows/release-smoke-check.yml', head_sha: target, head_branch: 'test', event: 'push', status: 'completed', conclusion: 'success', head_repository: { full_name: repo } } });
+const readyPlan = () => ({ version: 1, id: 'fixture-release', baseRevision: 'c'.repeat(40),
+  compatibility: { database: true, api: true, tasks: true, configuration: true } });
+function planContent(value: unknown) {
+  const bytes = Buffer.from(JSON.stringify(value));
+  return { type: 'file', path: 'scripts/release/plan.json', encoding: 'base64', size: bytes.length, content: bytes.toString('base64') };
+}
 function fixture(files: { filename: string; previous_filename?: string }[]) {
   const pr = { number: 9, merged: true, merged_at: '2026-11-15T00:00:00Z', merge_commit_sha: target, changed_files: files.length,
     base: { ref: 'test', repo: { full_name: repo } }, head: { repo: { full_name: repo } } };
@@ -11,6 +17,50 @@ function fixture(files: { filename: string; previous_filename?: string }[]) {
   return { pr, read };
 }
 describe('native test deployment intent (read-only API fixtures)', () => {
+  it.each([true, false])('reads compatibility only from the exact tested commit (ready=%s)', async ready => {
+    const plan = readyPlan(); plan.compatibility.api = ready;
+    const paths: string[] = [];
+    expect(await readAutomaticReleaseReadiness(target, async (path: string) => {
+      paths.push(path); return planContent(plan);
+    })).toBe(ready);
+    expect(paths).toEqual([`/contents/scripts/release/plan.json?ref=${target}`]);
+  });
+  it.each([
+    { ...planContent(readyPlan()), type: 'symlink' },
+    { ...planContent(readyPlan()), path: 'unreviewed.json' },
+    { ...planContent(readyPlan()), size: 65537 },
+    { ...planContent(readyPlan()), content: 'invalid!' },
+    planContent({ ...readyPlan(), compatibility: { api: true } }),
+    planContent({ ...readyPlan(), compatibility: { ...readyPlan().compatibility, api: 'false' } }),
+  ])('fails closed for malformed candidate readiness (%#)', async content => {
+    await expect(readAutomaticReleaseReadiness(target, async () => content)).rejects.toThrow('TEST_RELEASE_PLAN_NOT_VERIFIED');
+  });
+  it.each(['workflow_run', 'workflow_dispatch'])('never requests cloud work for incompatible %s', async eventName => {
+    const c = { ...context(), eventName }, f = fixture([{ filename: 'scripts/release/plan.json' }]);
+    const plan = readyPlan(); plan.compatibility.api = false;
+    const urls: string[] = [];
+    const request = async (url: string) => {
+      urls.push(url);
+      return { ok: true, json: async () => url.endsWith('/main') ? { ref: 'refs/heads/main', object: { type: 'commit', sha: control } }
+        : url.endsWith('/test') ? { ref: 'refs/heads/test', object: { type: 'commit', sha: target } }
+          : url.includes('/actions/workflows/') ? { workflow_runs: [c.trigger] }
+            : url.includes('/contents/') ? planContent(plan)
+              : f.read(url.replace('https://api.github.com/repos/' + repo, '')) };
+    };
+    const result = resolveTestReleaseTrigger(c, 'synthetic-token', request);
+    if (eventName === 'workflow_run') await expect(result).resolves.toMatchObject({ deploy: false, reason: 'release-prerequisites-required', automaticReleaseReady: false });
+    else await expect(result).rejects.toThrow('TEST_RELEASE_PREREQUISITES_REQUIRED');
+    expect(urls.every(url => url.startsWith('https://api.github.com/repos/' + repo + '/'))).toBe(true);
+  });
+  it('keeps compatible automatic deployment enabled after exact CI and plan checks', async () => {
+    const c = context(), f = fixture([{ filename: 'scripts/release/plan.json' }]);
+    const request = async (url: string) => ({ ok: true, json: async () => url.endsWith('/main') ? { ref: 'refs/heads/main', object: { type: 'commit', sha: control } }
+      : url.endsWith('/test') ? { ref: 'refs/heads/test', object: { type: 'commit', sha: target } }
+        : url.includes('/actions/workflows/') ? { workflow_runs: [c.trigger] }
+          : url.includes('/contents/') ? planContent(readyPlan())
+            : f.read(url.replace('https://api.github.com/repos/' + repo, '')) });
+    await expect(resolveTestReleaseTrigger(c, 'synthetic-token', request)).resolves.toMatchObject({ deploy: true, automaticReleaseReady: true });
+  });
   it('deploys a merged PR that updates the reviewed release plan', async () => {
     await expect(testReleaseIntent(context(), fixture([{ filename: 'scripts/release/plan.json' }, { filename: 'src/business.ts' }]).read))
       .resolves.toEqual({ deploy: true, reason: 'reviewed-release-plan' });

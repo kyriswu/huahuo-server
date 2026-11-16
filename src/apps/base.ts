@@ -28,6 +28,10 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   // Request timeout bounds receiving the request, not the handler's total work.
   requestTimeout: config.httpRequestTimeoutMs,
   connectionTimeout: config.httpConnectionTimeoutMs,
+  // Business ports are reachable only through trusted ingress/internal callers;
+  // standalone processes default to no trust. The configured proxy chain must
+  // have no untrusted bypass.
+  trustProxy: (_address: string, hop: number) => hop < config.httpTrustProxyHops,
   // Finish API requests already reaching the retiring upstream; dependencies
   // remain available until onClose and the existing drain deadline still applies.
   ...(config.role === 'api-server' ? { return503OnClosing: false } : {}),
@@ -48,7 +52,13 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   });
   await app.register(swagger, { openapi: { info: { title: `Huahuo ${config.role}`, version: '0.1.0' } } });
   app.addHook('onRequest', async (req, reply) => { reply.header('X-Trace-Id', req.id).header('Cache-Control', 'no-store'); });
-  app.addHook('preClose', async () => { closeStateStreams(app);await lifecycle.close(); });
+  app.addHook('preClose', async () => {
+    // Retiring API streams keep their subscriptions and dependencies until their
+    // response finishes, bounded by the process's existing DB drain deadline.
+    // Admin trials are intentionally ephemeral and close immediately.
+    if (config.role !== 'api-server') closeStateStreams(app);
+    await lifecycle.close();
+  });
   app.addHook('onClose', async () => { await deps.close(); });
   app.setErrorHandler<FastifyError>((error, req, reply) => {
     if (error instanceof DomainError) {

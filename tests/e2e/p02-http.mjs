@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { createApiRequest } from './api-request.mjs';
 const api=process.env.TEST_API_URL,admin=process.env.TEST_ADMIN_URL;
+const apiRequest=createApiRequest(api,{admissionMode:process.env.TEST_API_ADMISSION_MODE});
 const req=async(base,path,method='GET',body,headers={})=>{
- const r=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...headers},...(body?{body:JSON.stringify(body)}:{})});
+ const options={method,headers:{'Content-Type':'application/json',...headers},...(body?{body:JSON.stringify(body)}:{})};
+ const r=await (base===api?apiRequest(path,options):fetch(base+path,options));
  const data=await r.json();return {status:r.status,data:data.data,error:data.error,headers:r.headers};
 };
 for(const base of [api,admin]){

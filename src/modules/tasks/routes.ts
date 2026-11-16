@@ -1,16 +1,16 @@
+import { readTrustedScope } from '../identity/trusted-scope.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { ErrorSchema,success } from '../../contracts/envelope.js';
 import { Envelope,Id,Text,Strict,Nullable } from '../identity/schemas.js';
-import type { IdentityService } from '../identity/service.js';
 import { idempotencyKey } from '../identity/routes.js';
 import { DomainError } from '../identity/store.js';
 import { TaskService } from './service.js';
 export const TaskSchema=Type.Object({taskId:Id,taskType:Type.String(),status:Type.String(),state:Type.String(),workspaceId:Nullable(Id),version:Type.Integer(),attempt:Type.Integer(),resultId:Nullable(Id),createdAt:Type.String(),updatedAt:Type.String(),error:Type.Optional(Type.Object({code:Type.String(),userMessage:Type.String(),retryable:Type.Boolean()}))});
 export const MutationSchema=Type.Object({task:TaskSchema});
 export const taskErrors={400:ErrorSchema,401:ErrorSchema,403:ErrorSchema,404:ErrorSchema,409:ErrorSchema,429:ErrorSchema,503:ErrorSchema};
-export function registerTaskRoutes(app:FastifyInstance,identity:IdentityService,service:TaskService,demoEnabled:boolean){
- const auth=async(req:FastifyRequest)=>{req.authScope=await identity.authenticate(req.headers.authorization,req.id);idempotencyKey(req,req.method==='GET'?'forbidden':'required');};
+export function registerTaskRoutes(app:FastifyInstance,service:TaskService,demoEnabled:boolean){
+ const auth=async(req:FastifyRequest)=>{req.authScope=readTrustedScope(req.headers,req.id);idempotencyKey(req,req.method==='GET'?'forbidden':'required');};
  const scope=(req:FastifyRequest)=>{if(!req.authScope)throw new DomainError(401,'UNAUTHORIZED');return req.authScope;};
  const key=(req:FastifyRequest)=>idempotencyKey(req,'required')!;
  const id=(req:FastifyRequest)=>(req.params as {taskId:string}).taskId;

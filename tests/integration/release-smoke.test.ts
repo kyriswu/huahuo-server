@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../src/config/config.js';
@@ -20,13 +22,30 @@ const config = loadConfig('api-server', {
 const root = poolFor(loadConfig('migrate', { DATABASE_URL: migrationUrl }));
 let app: Awaited<ReturnType<typeof buildApiServer>>;
 let baseUrl: string;
+// Loopback admission fixture: exercise the real auth callback and business API
+// without requiring the Docker gateway in this database integration suite.
+const gateway = createServer(async (request, response) => {
+  try {
+    const headers = { ...request.headers };
+    for (const name of Object.keys(headers)) if (name.startsWith('x-huahuo-')) delete headers[name];
+    if (request.url?.startsWith('/api/v1/') && headers.authorization) {
+      const admission = await app.inject({ url: '/internal/v1/gateway/auth', headers: { authorization: headers.authorization } });
+      if (admission.statusCode !== 204) { response.writeHead(admission.statusCode, admission.headers); response.end(admission.rawPayload); return; }
+      delete headers.authorization;
+      for (const name of ['x-huahuo-user-id', 'x-huahuo-session-id', 'x-huahuo-auth-method']) headers[name] = String(admission.headers[name]);
+    }
+    const result = await app.inject({ url: request.url ?? '/', headers });
+    response.writeHead(result.statusCode, result.headers); response.end(result.rawPayload);
+  } catch { response.writeHead(500); response.end(); }
+});
 
 beforeAll(async () => {
   await migrate(loadConfig('migrate', { DATABASE_URL: migrationUrl }));
   app = await buildApiServer({ config });
-  baseUrl = await app.listen({ host: '127.0.0.1', port: 0 });
+  gateway.listen(0, '127.0.0.1'); await once(gateway, 'listening');
+  baseUrl = `http://127.0.0.1:${(gateway.address() as { port: number }).port}`;
 }, 20000);
-afterAll(async () => { await app?.close(); await root.end(); });
+afterAll(async () => { gateway.close(); await once(gateway, 'close'); await app?.close(); await root.end(); });
 
 async function fixture() {
   const userId = randomUUID(), sessionId = randomUUID(), workspaceId = randomUUID();

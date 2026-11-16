@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import type { Env, Role } from '../../src/config/config.js';
-import { checkReleaseConfiguration, checkReleaseConfigurationAssertions, checkReleaseExternal, checkReleaseRuntime, runDatabaseAssertions } from '../../src/release/gates.js';
+import { checkReleaseConfiguration, reviewReleaseConfiguration, checkReleaseConfigurationAssertions, checkReleaseExternal, checkReleaseRuntime, runDatabaseAssertions } from '../../src/release/gates.js';
 import { readReleasePlan, type ReleasePlan } from '../../src/release/plan.js';
 import { env } from '../helpers.js';
 
@@ -40,6 +42,25 @@ describe('release gate configuration and local child-process fixtures (no databa
     plan.compatibility[key] = false;
     const parsed = await readFixture();
     expect(() => checkReleaseConfiguration(parsed, 'migrate', {})).toThrow('RELEASE_PLAN_INCOMPATIBLE');
+    expect(reviewReleaseConfiguration(parsed, 'migrate', env).role).toBe('migrate');
+    expect(() => reviewReleaseConfiguration(parsed, 'migrate', { ...env, DATABASE_URL: 'invalid' })).toThrow('INVALID_CONFIG:DATABASE_URL');
+  });
+  it('read-only incompatible candidate inspection retains required configuration checks', async () => {
+    plan.compatibility.configuration = false;
+    plan.configuration.mode = 'candidate';
+    plan.configuration.changes = [{ key: 'REQUIRED_VALUE', operation: 'add', roles: ['api-server'], required: true, hasDefault: false }];
+    expect(() => reviewReleaseConfiguration(plan, 'api-server', env)).toThrow('RELEASE_CONFIGURATION_MISSING');
+    expect(reviewReleaseConfiguration(plan, 'api-server', { ...env, REQUIRED_VALUE: 'fixture' }).role).toBe('api-server');
+  });
+  it('the configuration CLI reports a read-only pass without claiming automatic deployment readiness', async () => {
+    plan.compatibility.api = false; await readFixture();
+    const args = ['--disable-warning=DEP0205', '--import', createRequire(import.meta.url).resolve('tsx'),
+      resolve('src/entrypoints/release-gate.ts')];
+    const options = { cwd: root, env: { ...env, SERVICE_ROLE: 'api-server', PATH: process.env.PATH },
+      encoding: 'utf8' as const, stdio: ['ignore', 'pipe', 'pipe'] as ['ignore', 'pipe', 'pipe'] };
+    expect(JSON.parse(execFileSync(process.execPath, [...args, 'config'], options)))
+      .toMatchObject({ status: 'passed', stage: 'config', automaticReleaseReady: false, result: { checkCount: 0 } });
+    expect(() => execFileSync(process.execPath, [...args, 'deploy'], options)).toThrow();
   });
   it.each([undefined, '', ' \t '])('requires a declared non-default value in the actual target role environment: %j', async value => {
     plan.configuration.mode = 'candidate';

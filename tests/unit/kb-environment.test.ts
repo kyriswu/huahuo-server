@@ -4,14 +4,12 @@ import { describe, expect, it } from 'vitest';
 const examples = ['.env.example', '.env.compose.local.example', '.env.compose.cloud.example', '.env.host.example',
   'specs/backend-plan/examples/.env.compose.local.example', 'specs/backend-plan/examples/.env.compose.cloud.example'];
 const contract = {
-  RAG_EMBEDDING_MODEL: 'BAAI/bge-m3', RAG_EMBEDDING_DIMENSIONS: '1024', RAG_EMBEDDING_PROFILE: 'bge-m3-1024',
-  RAG_TOKENIZER_PATH: 'resources/tokenizers/bge-m3/tokenizer.json',
-  RAG_TOKENIZER_CONFIG_PATH: 'resources/tokenizers/bge-m3/tokenizer_config.json', RAG_TOKENIZER_MAX_INPUT_TOKENS: '8192',
+  RAG_EMBEDDING_MODEL: 'qwen3.7-text-embedding-flash', RAG_EMBEDDING_DIMENSIONS: '1024', RAG_EMBEDDING_PROFILE: 'qwen3.7-text-embedding-flash-1024-fp16',
   KB_NOTE_HYBRID_COLLECTION: 'huahuo_kb_note_hybrid_chunks',
   KB_DOCUMENT_KEYWORD_COLLECTION: 'huahuo_kb_keyword_chunks',
 };
 const retired = new Set(['BILLING_POLICY_VERSION','TAG_EXTRACTOR_PROVIDER','MAX_UPLOAD_BYTES','STORAGE_QUOTA_BYTES',
-  'RAG_INGESTION_ENABLED','RAG_MAX_SOURCE_BYTES','RAG_DOWNLOAD_TIMEOUT_MS','TASK_MAX_ATTEMPTS',
+  'RAG_TOKENIZER_PATH','RAG_TOKENIZER_CONFIG_PATH','RAG_TOKENIZER_MAX_INPUT_TOKENS','RAG_INGESTION_ENABLED','RAG_MAX_SOURCE_BYTES','RAG_DOWNLOAD_TIMEOUT_MS','TASK_MAX_ATTEMPTS',
   'TOOL_TOKEN_SECRET','INTERNAL_API_BASE_URL','TOOLS_PUBLIC_BASE_URL','MILVUS_BM25_ANALYZER',
   'MILVUS_SEARCH_CONCURRENCY','RAG_DENSE_CANDIDATES','RAG_BM25_CANDIDATES','RAG_HYBRID_CANDIDATES','RAG_RRF_K',
   'RAG_INGEST_BATCH_SIZE','RAG_INDEX_CONCURRENCY','RAG_EMBEDDING_TIMEOUT_MS','RAG_EMBEDDING_MAX_RETRIES',

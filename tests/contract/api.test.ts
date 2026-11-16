@@ -4,6 +4,30 @@ import { buildAdminServer } from '../../src/apps/admin.js';
 import { buildBase } from '../../src/apps/base.js';
 import { config, dependencies } from '../helpers.js';
 describe('P01 routes and App-compatible base envelope (no Dart runtime)',()=>{
+ it('trusts only the adjacent proxy hop when explicitly configured',async()=>{
+  for(const hops of [0,1]){
+   const app=await buildBase({config:{...config(),httpTrustProxyHops:hops},dependencies:dependencies()});
+   app.get('/test-ip',async req=>({ip:req.ip}));
+   try{
+    const response=await app.inject({url:'/test-ip',remoteAddress:'10.0.0.2',headers:{'x-forwarded-for':'203.0.113.66, 198.51.100.8'}});
+    expect(response.json().ip).toBe(hops===1?'198.51.100.8':'10.0.0.2');
+   }finally{await app.close();}
+  }
+ });
+ it('uses the client beyond two trusted proxies without accepting a forged earlier address',async()=>{
+  const app=await buildBase({config:{...config(),httpTrustProxyHops:2},dependencies:dependencies()});
+  app.get('/test-ip',async req=>({ip:req.ip,ips:req.ips}));
+  try{
+   const address=await app.listen({host:'127.0.0.1',port:0});
+   // The loopback socket represents the trusted ingress; the rightmost XFF address is the
+   // trusted outer proxy. Only the next address is the client's address.
+   for(const forwarded of ['198.51.100.8, 10.0.0.8','203.0.113.66, 198.51.100.8, 10.0.0.8']){
+    const response=await fetch(`${address}/test-ip`,{headers:{'x-forwarded-for':forwarded},signal:AbortSignal.timeout(3000)});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ip:'198.51.100.8',ips:['127.0.0.1','10.0.0.8','198.51.100.8']});
+   }
+  }finally{await app.close();}
+ });
  it('exposes health, OpenAPI and trace correlation; API has no business/admin routes',async()=>{
   const app=await buildApiServer({config:config(),dependencies:dependencies()});
   try {

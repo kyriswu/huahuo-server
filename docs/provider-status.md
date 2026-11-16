@@ -1,4 +1,12 @@
+## 原生入口联调边界（2026-11-16）
+
+真实Nginx与Agent构建产物、Server鉴权代码联调通过；短信、签发账户存储是隔离替身，真实JWT/会话另由独立PG/Redis测试验证。模型请求0，没有修改共享数据库、云端服务或证书。宿主候选与实际安装分开记录，见[验收](acceptance/ingress-auth.md)。
+
 # Provider 与业务存储状态
+
+## 搜索底层适配器（2026-11-16）
+
+Milvus已接入关键词、纯向量和原生混合端口；另有应用层组合实现，可分别绑定独立关键词/向量后端再做RRF融合，上层模型Rerank独立。ES为后续KeywordIndex提供器，未安装SDK、未连接服务。关键词class替身通过真实隔离PG任务/发布/查询，48项定向集成中的Milvus为本轮tmpfs真实实例；Embedding/解析为替身。914项unit/contract和类型/Lint/构建通过，不冒充真实模型、ES或线上验收。业务默认目标与Qwen/FP16工作区规格保持，无本次共享集合操作，见[接口约定](runbooks/milvus.md#底层接口与后端替换)。
 
 ## 默认冒烟不调用供应商（2026-11-15）
 
@@ -207,9 +215,9 @@ OSS 与 ECI 统一读取 `ALIYUN_RAM_ACCESS_KEY_ID`、`ALIYUN_RAM_ACCESS_KEY_SEC
 | 解析/图文/OCR | 复用已有自研解析和 OSS 绑定 | 本次未改解析器；集成使用明确的 Mock 解析产物 |
 | 资料关键词 | 2000 码点 / 零 overlap / Milvus 原生 BM25 | 真实临时 Milvus；模型和模型 tokenizer 调用为零 |
 | 笔记混合 | 500 码点 / 约 50 字 overlap / 原生 Hybrid+RRF | 真实临时 Milvus，确定性 1024 维 Embedding 替身 |
-| Tokenizer | 官方 BAAI/bge-m3 固定文件与 SHA-256 | 真实文件编码验证；输入上限8192 tokens |
-| Embedding | BAAI/bge-m3，原生1024维、bge-m3-1024 profile | 凭据沿用，未调用付费上游，不把替身测试当真实模型成功 |
-| Rerank | 独立HTTP适配器与Note时间预算 | 关键词不调用；替身验证失败回退及在途修订复核 |
+| 输入预算 | UTF-8字节数+16，保守限制128000 | 不是模型实际tokenizer或计费量；不加载旧模型tokenizer |
+| Embedding | qwen3.7-text-embedding-flash，原生1024维，Milvus FP16 | 本机业务空间公网模型列表200并包含模型；推理仍为替身，未进行付费推理验证 |
+| Rerank | qwen3.7-text-rerank，DashScope原生API | 模型列表200；关键词不调用，保留既有200ms预算及失败回退，真实延迟/效果未验 |
 | 业务正文 | Note原文、资料 canonical 对象、独立导入原文 | 四张索引表不保存切片正文或向量 |
 
 ## 验收状态

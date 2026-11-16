@@ -1,7 +1,7 @@
 import { appendFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { resolveTestReleaseRevision } from './test-release-source.mjs';
-import { githubReader, readReleaseEventContext, REPOSITORY, verifyCiTrigger } from './release-events.mjs';
+import { githubReader, isSha, readReleaseEventContext, REPOSITORY, verifyCiTrigger } from './release-events.mjs';
 const fail = code => { throw Error(code); };
 const controlFiles = new Set([
   '.github/workflows/test-server-release.yml', '.github/workflows/main-release-readiness.yml',
@@ -44,8 +44,34 @@ export async function testReleaseIntent(context, read) {
 }
 export async function resolveTestReleaseTrigger(context, token, fetchImpl = fetch) {
   const revision = await resolveTestReleaseRevision(context, token, fetchImpl);
-  const intent = await testReleaseIntent(context, githubReader(token, fetchImpl));
-  return { ...revision, ...intent };
+  const read = githubReader(token, fetchImpl);
+  const intent = await testReleaseIntent(context, read);
+  if (!intent.deploy) return { ...revision, ...intent };
+  const automaticReleaseReady = await readAutomaticReleaseReadiness(revision.targetSha, read);
+  if (!automaticReleaseReady && context.eventName === 'workflow_dispatch') fail('TEST_RELEASE_PREREQUISITES_REQUIRED');
+  return { ...revision, ...intent, automaticReleaseReady,
+    ...(!automaticReleaseReady ? { deploy: false, reason: 'release-prerequisites-required' } : {}) };
+}
+
+/** Read JSON at the exact tested commit; never execute candidate files on the trusted runner. */
+export async function readAutomaticReleaseReadiness(target, read) {
+  if (!isSha(target)) fail('TEST_RELEASE_PLAN_NOT_VERIFIED');
+  const path = 'scripts/release/plan.json';
+  const response = await read(`/contents/${path}?ref=${target}`);
+  if (response?.type !== 'file' || response.path !== path || response.encoding !== 'base64'
+    || !Number.isSafeInteger(response.size) || response.size < 1 || response.size > 65536
+    || typeof response.content !== 'string' || response.content.length > 90000) fail('TEST_RELEASE_PLAN_NOT_VERIFIED');
+  const encoded = response.content.replace(/\n/g, '');
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.length !== response.size || bytes.toString('base64') !== encoded) fail('TEST_RELEASE_PLAN_NOT_VERIFIED');
+  let plan;
+  try { plan = JSON.parse(bytes.toString('utf8')); } catch { fail('TEST_RELEASE_PLAN_NOT_VERIFIED'); }
+  const keys = ['database', 'api', 'tasks', 'configuration'];
+  if (plan?.version !== 1 || !/^[a-z0-9][a-z0-9-]{2,63}$/.test(plan.id ?? '') || !isSha(plan.baseRevision)
+    || !plan.compatibility || typeof plan.compatibility !== 'object' || Array.isArray(plan.compatibility)
+    || Object.keys(plan.compatibility).length !== keys.length
+    || keys.some(key => typeof plan.compatibility[key] !== 'boolean')) fail('TEST_RELEASE_PLAN_NOT_VERIFIED');
+  return keys.every(key => plan.compatibility[key] === true);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
@@ -55,7 +81,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     await appendFile(process.env.GITHUB_OUTPUT, `deploy=${result.deploy}\n`);
     console.log(JSON.stringify({ status: result.deploy ? 'candidate-verified' : 'skipped', ...result }));
     if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY,
-      `Test candidate: ${result.targetSha}\n\n${result.deploy ? 'CI/source verified; entering the existing five-stage release.' : 'No application change; no cloud command or deployment executed.'}\n`);
+      `Test candidate: ${result.targetSha}\n\n${result.deploy ? 'CI/source verified; entering the existing five-stage release.'
+        : result.reason === 'release-prerequisites-required'
+          ? 'Candidate review passed; this project has unmet release prerequisites. No cloud credentials or deployment command requested.'
+          : 'No application change; no cloud command or deployment executed.'}\n`);
   } catch (error) {
     console.error(JSON.stringify({ status: 'failed', code: /^TEST_RELEASE_[A-Z_]+$/.test(error?.message) ? error.message : 'TEST_RELEASE_TRIGGER_FAILED' }));
     process.exitCode = 1;

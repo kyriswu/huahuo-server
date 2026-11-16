@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-const { OpenAICompatibleEmbeddingClient } = await import(pathToFileURL(resolve('dist/modules/rag/adapters/embedding.js')).href);
+const { BailianEmbeddingClient } = await import(pathToFileURL(resolve('dist/modules/rag/adapters/embedding.js')).href);
 
 // Run inside the API container as well as on the host. Credentials stay in the
 // environment; reports contain only synthetic request hashes and timing data.
@@ -17,14 +17,14 @@ const {applyValues}=await import(pathToFileURL(resolve('dist/modules/runtime-set
 const base=loadConfig('api-server',env),pool=poolFor(base);
 let runtime;
 try{const state=await new RuntimeSettings(pool,base).load();runtime=applyValues(base,state.values,state.revision);}finally{await pool.end();}
-const endpoint = new URL(`${env.RAG_EMBEDDING_BASE_URL?.replace(/\/$/u, '')}/embeddings`);
+const endpoint = new URL(`${env.RAG_EMBEDDING_BASE_URL?.replace(/\/$/u, '')}/services/embeddings/text-embedding/text-embedding`);
 if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || !env.RAG_EMBEDDING_API_KEY) throw new Error('EMBEDDING_PROBE_CONFIG_REQUIRED');
 const input = 'PostgreSQL MVCC 花火 Note latency probe';
-const body = JSON.stringify({ model: env.RAG_EMBEDDING_MODEL, input: [input], encoding_format: 'float' });
+const body = JSON.stringify({ model: env.RAG_EMBEDDING_MODEL, input: { texts: [input] }, parameters: { text_type: 'document' } });
 const count = Number(env.EMBEDDING_PROBE_COUNT ?? 3);
 if (!Number.isInteger(count) || count < 1 || count > 20) throw new Error('PROBE_COUNT_INVALID');
 const proxy = key => { try { const u = new URL(env[key]); return `${u.protocol}//${u.hostname}:${u.port}`; } catch { return env[key] ? 'configured' : null; } };
-console.log(JSON.stringify({ event: 'config', environment: env.APP_ENV, endpoint: endpoint.origin + endpoint.pathname, model: env.RAG_EMBEDDING_MODEL, dimensions: Number(env.RAG_EMBEDDING_DIMENSIONS), sendDimensions: false, requestHash: createHash('sha256').update(body).digest('hex'), bodyBytes: Buffer.byteLength(body), node: process.version, nodeUseEnvProxy: env.NODE_USE_ENV_PROXY ?? null, proxies: Object.fromEntries(['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'grpc_proxy'].map(key => [key, proxy(key)])) }));
+console.log(JSON.stringify({ event: 'config', environment: env.APP_ENV, endpoint: endpoint.origin + endpoint.pathname, model: env.RAG_EMBEDDING_MODEL, dimensions: Number(env.RAG_EMBEDDING_DIMENSIONS), requestHash: createHash('sha256').update(body).digest('hex'), bodyBytes: Buffer.byteLength(body), node: process.version, nodeUseEnvProxy: env.NODE_USE_ENV_PROXY ?? null, proxies: Object.fromEntries(['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'grpc_proxy'].map(key => [key, proxy(key)])) }));
 if (env.NODE_USE_ENV_PROXY === '1' && (env.HTTPS_PROXY || env.https_proxy)) throw new Error('NATIVE_PROBE_DIRECT_ONLY_USE_ADAPTER_TIMINGS_FOR_PROXY');
 const agent = new https.Agent({ keepAlive: true });
 try {
@@ -56,7 +56,7 @@ try {
 for (let call = 0; call < count; call++) {
   const start = performance.now();
   let attempt = 0;
-  const client = new OpenAICompatibleEmbeddingClient({ baseUrl: env.RAG_EMBEDDING_BASE_URL, apiKey: env.RAG_EMBEDDING_API_KEY, model: env.RAG_EMBEDDING_MODEL, dimensions: Number(env.RAG_EMBEDDING_DIMENSIONS), sendDimensions: false, timeoutMs: runtime.rag.embeddingTimeoutMs, maxRetries: runtime.rag.embeddingMaxRetries, fetchImpl: async (...args) => {
+  const client = new BailianEmbeddingClient({ baseUrl: env.RAG_EMBEDDING_BASE_URL, apiKey: env.RAG_EMBEDDING_API_KEY, model: env.RAG_EMBEDDING_MODEL, dimensions: Number(env.RAG_EMBEDDING_DIMENSIONS), timeoutMs: runtime.rag.embeddingTimeoutMs, maxRetries: runtime.rag.embeddingMaxRetries, fetchImpl: async (...args) => {
     const at = performance.now();
     try {
       const response = await fetch(...args);

@@ -1,11 +1,10 @@
+import { readTrustedScope } from '../identity/trusted-scope.js';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { DocumentSectionSchema, SectionIdSchema, TocFields } from '../../contracts/document-sections.js';
 import { ErrorSchema, success } from '../../contracts/envelope.js';
 import { DomainError } from '../identity/store.js';
-import type { IdentityService } from '../identity/service.js';
 import { idempotencyKey } from '../identity/routes.js';
-import { AgentServiceKeyAuthenticator } from '../internal-auth/api-key.js';
 import { Envelope, Id, Strict, Text } from '../identity/schemas.js';
 import type { RagIngestionRepository } from './repository.js';
 import type { RagQueryService } from './query-service.js';
@@ -19,11 +18,11 @@ const queryResult=Type.Object({mode:Type.Union([Type.Literal('dense'),Type.Liter
 const detail=Type.Object({jobId:Id,documentVersionId:Id,status:Type.String(),currentStage:Type.String(),taskState:Type.Union([Type.String(),Type.Null()]),mode:Type.Union([Type.Literal('structured_document'),Type.Literal('plain_text')]),fileName:Type.String(),mimeType:Type.String(),sourceSha256:Type.Union([Type.String(),Type.Null()]),sourceSizeBytes:Type.Union([Type.Integer(),Type.Null()]),parserProvider:Type.Union([Type.String(),Type.Null()]),parserVersion:Type.Union([Type.String(),Type.Null()]),canonicalMarkdownUri:Type.Union([Type.String(),Type.Null()]),rawMarkdownUri:Type.Union([Type.String(),Type.Null()]),parentId:Type.Optional(Type.String()),sourceType:Type.Optional(Type.String()),...TocFields,tocError:Type.Optional(Type.Union([Type.String(),Type.Null()])),deletedAt:Type.Optional(Type.Union([Type.String(),Type.Null()])),cleanupStatus:Type.Optional(Type.String()),processingComplete:Type.Optional(Type.Boolean()),error:Type.Union([Type.Object({code:Type.String(),message:Type.Union([Type.String(),Type.Null()]),retryable:Type.Boolean()}),Type.Null()]),createdAt:Type.String(),updatedAt:Type.String()},Strict);
 const scope=(req:FastifyRequest)=>{if(!req.authScope)throw new DomainError(401,'UNAUTHORIZED');return req.authScope;};
 export function registerRagRoutes(
-  app: FastifyInstance, identity: IdentityService, repository: RagIngestionRepository,
+  app: FastifyInstance, repository: RagIngestionRepository,
   storage: Pick<StoragePort, 'read'>, queryService?: RagQueryService,
 ) {
   const guard = async (req: FastifyRequest) => {
-    req.authScope = await identity.authenticate(req.headers.authorization, req.id);
+    req.authScope = readTrustedScope(req.headers, req.id);
   };
   const readGuard = async (req: FastifyRequest) => {
     idempotencyKey(req, 'forbidden');
@@ -60,7 +59,6 @@ export function registerRagRoutes(
   }, async req => success(await repository.section(scope(req), req.params.jobId, req.params.sectionId, storage), req.id));
 
   if (queryService) {
-    const agentAuth = new AgentServiceKeyAuthenticator(identity.config);
     const timings = new WeakMap<FastifyRequest, NoteQueryTiming>();
     const queryHandler = async (req: FastifyRequest) => success(await queryService.query(scope(req), req.body as { query: string; sourceType?: 'file' | 'note' | 'text'; assetMode?: 'ids' | 'links'; mode?: 'dense' | 'keyword' | 'hybrid'; topK?: number; documentKey?: string;  }, timings.get(req)), req.id);
     const timingHooks = {
@@ -80,7 +78,6 @@ export function registerRagRoutes(
       ...timingHooks,
       preHandler: async (req: FastifyRequest) => {
         idempotencyKey(req, 'optional');
-        agentAuth.verify(typeof req.headers['x-huahuo-service-key'] === 'string' ? req.headers['x-huahuo-service-key'] : undefined);
         await queryGuard(req);
       },
       schema: querySchema,
