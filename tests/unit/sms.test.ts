@@ -39,7 +39,7 @@ describe('Aliyun SMS configuration', () => {
   it('checks the actual five-role release configuration without network access', () => {
     const assertion=new Script(readFileSync('scripts/release/changes/20261117-sms-live-only/verify-config.mjs','utf8'));
     const api={...credentials,SERVICE_ROLE:'api-server',SMS_ALIYUN_SIGN_NAME:'触达科技',SMS_ALIYUN_TEMPLATE_CODE:'SMS_508520316',SMS_ALIYUN_CODE_PARAM:'code',SMS_ALIYUN_REGION_ID:'cn-hangzhou',SMS_ALIYUN_CONNECT_TIMEOUT_MS:'3000',SMS_ALIYUN_READ_TIMEOUT_MS:'3000'};
-    const verify=(env:Record<string,string>)=>assertion.runInNewContext({process:{env}});
+    const verify=(env:Record<string,string|undefined>)=>assertion.runInNewContext({process:{env}});
     expect(()=>verify(api)).not.toThrow();
     for(const role of ['admin','worker','scheduler','migrate'])expect(()=>verify({SERVICE_ROLE:role})).not.toThrow();
     for(const patch of [{SMS_PROVIDER:'live'},{SHOW_TEST_OTP:'false'},{SMS_ALIYUN_TEMPLATE_CODE:'SMS_123456'},{SMS_ALIYUN_CODE_PARAM:'wrong'},{ALIYUN_RAM_ACCESS_KEY_ID:''},{SERVICE_ROLE:'unknown'}])expect(()=>verify({...api,...patch})).toThrow('SMS_RELEASE_CONFIGURATION_INVALID');
