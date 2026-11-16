@@ -1,6 +1,8 @@
+import { createApiRequest } from './api-request.mjs';
 const api=process.env.TEST_API_URL;
 if(!api)throw new Error('TEST_API_URL_REQUIRED');
-const request=async(path,options={})=>{const r=await fetch(api+path,{...options,headers:{'content-type':'application/json',...(options.headers??{})}});const body=await r.json();return {status:r.status,body};};
+const apiRequest=createApiRequest(api,{admissionMode:process.env.TEST_API_ADMISSION_MODE});
+const request=async(path,options={})=>{const r=await apiRequest(path,{...options,headers:{'content-type':'application/json',...(options.headers??{})}});const body=await r.json();return {status:r.status,body};};
 const sms=await request('/api/v1/auth/sms-code',{method:'POST',body:JSON.stringify({phone:'13800000001',purpose:'sign_in'})});
 if(sms.status!==200||!sms.body.data.testCode)throw new Error(`SMS:${sms.status}`);
 const login=await request('/api/v1/auth/login',{method:'POST',body:JSON.stringify({phone:'13800000001',smsRequestId:sms.body.data.smsRequestId,smsCode:sms.body.data.testCode,clientType:'web',clientId:'p03-http-web',agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p03',timeZone:'Asia/Shanghai'})});

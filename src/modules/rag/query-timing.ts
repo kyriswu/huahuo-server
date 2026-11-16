@@ -2,7 +2,7 @@ import { performance } from 'node:perf_hooks';
 import type { EmbeddingAttempt } from './adapters/embedding.js';
 import type { RerankFallback } from './search.js';
 
-type Stage = 'auth' | 'pg_scope' | 'milvus_ready' | 'embedding' | 'milvus_search' | 'pg_hydrate' | 'rerank' | 'pg_recheck';
+type Stage = 'auth' | 'pg_scope' | 'index_ready' | 'embedding' | 'index_search' | 'pg_hydrate' | 'rerank' | 'pg_recheck';
 
 /** One per request; no query, content, user identifiers or credentials. */
 export class NoteQueryTiming {

@@ -6,6 +6,7 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
 import { once } from 'node:events';
+import { streamState } from '../../src/lib/state-stream.js';
 
 const children: ChildProcess[] = [];
 afterEach(async () => {
@@ -131,6 +132,55 @@ describe('application drain and shutdown', () => {
     } finally { finish?.(); await app.close(); }
   });
 
+  it.each(['api-server', 'admin'] as const)('%s applies its shutdown policy to a real state SSE subscription', async role => {
+    let dependenciesClosed = false, unsubscribed = false, terminal = false;
+    let changed: () => void = () => undefined;
+    const app = await buildBase({ config: config(role), dependencies: {
+      ...dependencies(), close: async () => { dependenciesClosed = true; },
+    } });
+    let entered!: () => void;
+    const preClosed = new Promise<void>(resolve => { entered = resolve; });
+    app.addHook('preClose', async () => { entered(); });
+    app.get('/state-stream', async (_request, reply) => streamState(reply,
+      () => ({ terminal }), update => { changed = update; return () => { unsubscribed = true; }; },
+      state => state.terminal));
+    const address = await app.listen({ host: '127.0.0.1', port: 0 });
+    const abort = new AbortController();
+    let closing: Promise<void> | undefined;
+    let body: Promise<string> | undefined;
+    try {
+      const response = await fetch(address + '/state-stream', { signal: abort.signal });
+      expect(response.headers.get('content-type')).toContain('text/event-stream');
+      body = response.text();
+      await app.lifecycle.drain();
+      expect((await app.inject('/health/ready')).statusCode).toBe(503);
+      expect((await app.inject('/health/live')).statusCode).toBe(200);
+      expect(app.lifecycle.activeRequests).toBe(1);
+      expect(unsubscribed).toBe(false);
+      closing = app.close();
+      await preClosed;
+      if (role === 'api-server') {
+        expect(app.lifecycle.phase).toBe('closing');
+        expect(dependenciesClosed).toBe(false);
+        expect(unsubscribed).toBe(false);
+        expect(app.lifecycle.activeRequests).toBe(1);
+        terminal = true;
+        changed();
+        expect(await body).toContain('data: {"terminal":true}');
+      } else {
+        expect(await body).not.toContain('data: {"terminal":true}');
+      }
+      await closing;
+      expect(app.lifecycle.activeRequests).toBe(0);
+      expect(unsubscribed).toBe(true);
+      expect(dependenciesClosed).toBe(true);
+    } finally {
+      terminal = true; changed(); abort.abort();
+      await body?.catch(() => undefined);
+      await (closing ?? app.close());
+    }
+  });
+
   it('honors SIGUSR2 then SIGTERM and finishes work lasting beyond the old ten-second deadline', async () => {
     const fixture = start();
     const address = (await fixture.wait('ready')).address!;
@@ -158,6 +208,19 @@ describe('application drain and shutdown', () => {
     await fixture.wait('request-started'); fixture.child.kill('SIGTERM');
     expect(await fixture.exit).toEqual({ code: 124, signal: null });
     expect(await response).toBe('interrupted');
+    expect(fixture.messages.some(message => message.event === 'dependencies-closed')).toBe(false);
+  }, 10000);
+
+  it('bounds an unfinished API state SSE by the same process drain deadline', async () => {
+    const fixture = start(10000, 1000);
+    const address = (await fixture.wait('ready')).address!;
+    const response = await fetch(address + '/state-stream');
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+    const body = response.text().then(() => 'completed', () => 'interrupted');
+    await fixture.wait('stream-started');
+    fixture.child.kill('SIGTERM');
+    expect(await fixture.exit).toEqual({ code: 124, signal: null });
+    expect(await body).toBe('interrupted');
     expect(fixture.messages.some(message => message.event === 'dependencies-closed')).toBe(false);
   }, 10000);
 

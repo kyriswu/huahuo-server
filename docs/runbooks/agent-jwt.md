@@ -1,3 +1,6 @@
+> 当前运行契约已改为网关统一认证、内部可信身份头；Agent 不再执行下述跨服务 JWT 验签。
+> JWT 签发规范仍由 Server 保留用于外部入口；当前接入请看 [internal-auth.md](internal-auth.md)。
+
 # huahuo-agent JWT 接入规范
 
 统一用户模型已部署到原 `huahuo` 库的新 `public`，版本1基线与readiness通过。旧Schema仅封存在 `initialization_backup`，不参与运行查询，产品用户和会话未复制。JWT私钥未变，JWKS已真实核对为EdDSA、Ed25519、`server-current`；Server仍依据新 `public` 的用户与会话执行最终校验。

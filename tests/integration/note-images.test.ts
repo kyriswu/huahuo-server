@@ -18,6 +18,7 @@ import { RagIngestionRepository } from '../../src/modules/rag/repository.js';
 import { TextIngestionService } from '../../src/modules/text-ingestion/service.js';
 import { TextIngestionSourceType } from '../../src/modules/text-ingestion/types.js';
 import { insertFixtureUser, insertFixtureSession, testJwtEnv } from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 import { unseal } from '../../src/lib/crypto.js';
 
 const url = process.env.TEST_DATABASE_MIGRATION_URL;
@@ -112,7 +113,7 @@ describe('canonical Note images with real isolated PostgreSQL and local storage'
   it('renders fresh URLs outside stored receipts and never reads image bytes to create a view', async () => {
     const f = await fixture(), id = await image(f), original = `![图](asset://${id})`, api = await buildApiServer({ config });
     try {
-      const response = await api.inject({ method: 'POST', url: `/api/v1/workspaces/${f.workspaceId}/notes`, headers: { authorization: `Bearer ${f.bearer}`, 'idempotency-key': randomUUID() }, payload: { title: '编辑视图', parts: { raw: original } } });
+      const response = await api.inject({ method: 'POST', url: `/api/v1/workspaces/${f.workspaceId}/notes`, headers: { ...fixtureScopeHeaders(f.bearer), 'idempotency-key': randomUUID() }, payload: { title: '编辑视图', parts: { raw: original } } });
       expect(response.statusCode, response.body).toBe(200);
       const note = response.json().data;
       expect(note.parts.raw.contentMarkdown).toBe(original); expect(note.parts.raw.displayMarkdown).toContain('playbackToken=');

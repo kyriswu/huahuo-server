@@ -1,5 +1,9 @@
 # Admin 独立部署的服务地址
 
+2026-11-16 入口契约：`API_BIND_HOST` / `API_HOST_PORT` 直接控制 API 容器的受限宿主监听；Admin 使用独立端口。公开入口由宿主维护，详见[入口鉴权契约](gateway-auth.md)。内部调用使用部署方提供的稳定地址，不绑定某个发布实例。
+
+Agent 的调用地址使用其自身配置 `HUAHUO_SERVER_BASE_URL`；本仓的 `API_SERVICE_BASE_URL` 用于下述解析回调，二者不互相代替。Agent / Server 的 IP、服务名及横向扩展约定见[内部身份传递](internal-auth.md#ip服务名与扩容)。
+
 当前部署边界为 API + Worker + Scheduler 一组，Admin 可单独部署到另一台机器。本轮只整理需要通过网络访问的 API 地址；数据库、OSS、缓存共享和其他角色跨机拆分留待后续，不改现有数据链路。
 
 Admin 页面请求它自身的 `/admin/api/v1/*`，管理会话和权限仍由 Admin 后端处理。API/Worker/Scheduler 的现有任务交接使用持久队列，不调用 Docker exec 或容器管理 API。本轮不为它们添加额外 RPC 接口。

@@ -1,7 +1,7 @@
+import { readTrustedScope } from '../identity/trusted-scope.js';
 import { Type } from '@sinclair/typebox';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { success, ErrorSchema } from '../../contracts/envelope.js';
-import type { IdentityService } from '../identity/service.js';
 import { idempotencyKey } from '../identity/routes.js';
 import { DomainError } from '../identity/store.js';
 import { Envelope, Id, Strict } from '../identity/schemas.js';
@@ -9,11 +9,11 @@ import { assertCreateTextIngestionInput, assertUpdateTextIngestionInput } from '
 import { CreateTextIngestionSchema, UpdateTextIngestionSchema, TextIngestionJobSchema } from './schemas.js';
 import type { TextIngestionService } from './service.js';
 
-export function registerTextIngestionRoutes(app: FastifyInstance, identity: IdentityService, service: TextIngestionService): void {
+export function registerTextIngestionRoutes(app: FastifyInstance, service: TextIngestionService): void {
   const path = '/api/v1/text-ingestions';
   const params = Type.Object({ id: Id }, Strict), empty = Type.Object({}, Strict);
   const errors = { 400: ErrorSchema, 401: ErrorSchema, 404: ErrorSchema, 409: ErrorSchema, 412: ErrorSchema, 413: ErrorSchema, 428: ErrorSchema, 503: ErrorSchema };
-  const guard = async (req: FastifyRequest) => { req.authScope = await identity.authenticate(req.headers.authorization, req.id); };
+  const guard = async (req: FastifyRequest) => { req.authScope = readTrustedScope(req.headers, req.id); };
   const scope = (req: FastifyRequest) => { if (!req.authScope) throw new DomainError(401, 'UNAUTHORIZED'); return req.authScope; };
   app.post(path, { preValidation: async req => { await guard(req); assertCreateTextIngestionInput(req.body); },
     schema: { body: CreateTextIngestionSchema, querystring: empty, response: { 200: Envelope(TextIngestionJobSchema), ...errors } },

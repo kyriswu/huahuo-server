@@ -15,7 +15,7 @@ export interface RagSearchCandidate {
   chunkCount: number;
   denseScore: number;
   keywordScore: number;
-  /** Native Milvus Hybrid score; never recomputed or fused locally. */
+  /** Retrieval fusion score, supplied by a native or application-composed index. */
   rrfScore: number;
   rerankScore?: number;
   embeddingProfile?: string;
@@ -85,9 +85,9 @@ export interface HttpRerankOptions {
   fetchImpl?: typeof fetch;
 }
 
-interface RerankProviderRow { index?: unknown; relevance_score?: unknown; score?: unknown }
+interface RerankProviderRow { index?: unknown; relevance_score?: unknown }
 
-/** OpenAI-compatible rerank adapter. It accepts the common {index,relevance_score} response shape. */
+/** Native DashScope rerank API. Only scores and input indexes are trusted. */
 export class HttpRerankAdapter implements RerankAdapter {
   constructor(private readonly options: HttpRerankOptions) {}
 
@@ -96,26 +96,29 @@ export class HttpRerankAdapter implements RerankAdapter {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30_000);
     try {
-      const response = await (this.options.fetchImpl ?? fetch)(`${this.options.baseUrl.replace(/\/$/u, '')}/rerank`, {
+      const response = await (this.options.fetchImpl ?? fetch)(`${this.options.baseUrl.replace(/\/$/u, '')}/services/rerank/text-rerank/text-rerank`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}),
         },
-        body: JSON.stringify({ model: this.options.model, query, documents: candidates.map((candidate) => candidate.content), top_n: candidates.length, return_documents: false }),
+        body: JSON.stringify({ model: this.options.model, input: { query, documents: candidates.map((candidate) => candidate.content) }, parameters: { top_n: candidates.length } }),
+        redirect: 'error',
         signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
       });
-      if (!response.ok) throw new RerankError('RERANK_PROVIDER_UNAVAILABLE', `Rerank provider HTTP ${response.status}`, response.status >= 500 || response.status === 429);
+      if (!response.ok) { await response.body?.cancel(); throw new RerankError('RERANK_PROVIDER_UNAVAILABLE', `Rerank provider HTTP ${response.status}`, response.status >= 500 || response.status === 429); }
       let payload: unknown;
       try { payload = await response.json(); } catch (error) { throw new RerankError('RERANK_RESPONSE_INVALID', 'Rerank provider returned invalid JSON', false, { cause: error }); }
-      const resultObject = payload && typeof payload === 'object' ? payload as { results?: unknown; data?: unknown } : {};
-      const rawRows = Array.isArray(resultObject.results) ? resultObject.results : Array.isArray(resultObject.data) ? resultObject.data : [];
+      const resultObject = payload && typeof payload === 'object' ? payload as { output?: { results?: unknown } } : {};
+      const rawRows = Array.isArray(resultObject.output?.results) ? resultObject.output.results : [];
       const rows = rawRows as RerankProviderRow[];
       if (rows.length !== candidates.length) throw new RerankError('RERANK_RESPONSE_INVALID', 'Rerank provider returned an unexpected result count');
+      const seen = new Set<number>();
       return rows.map((row) => {
-        const index = Number(row?.index);
-        const score = Number(row?.relevance_score ?? row?.score);
-        if (!Number.isInteger(index) || index < 0 || index >= candidates.length || !Number.isFinite(score)) throw new RerankError('RERANK_RESPONSE_INVALID', 'Rerank provider returned an invalid result');
+        const index = row?.index;
+        const score = row?.relevance_score;
+        if (typeof index!=='number'||!Number.isInteger(index) || index < 0 || index >= candidates.length || seen.has(index) || typeof score!=='number'||!Number.isFinite(score)||score<0||score>1) throw new RerankError('RERANK_RESPONSE_INVALID', 'Rerank provider returned an invalid result');
+        seen.add(index);
         return { ...candidates[index]!, rerankScore: score };
       }).sort((left, right) => right.rerankScore - left.rerankScore);
     } catch (error) {

@@ -14,6 +14,11 @@ const fail = (code: string): never => { throw new Error(code); };
 
 export function checkReleaseConfiguration(plan: ReleasePlan, role: Role, env: Env = process.env): AppConfig {
   if (!Object.values(plan.compatibility).every(value => value === true)) fail('RELEASE_PLAN_INCOMPATIBLE');
+  return reviewReleaseConfiguration(plan, role, env);
+}
+
+/** Read-only candidate inspection is useful even when coordinated deployment is required. */
+export function reviewReleaseConfiguration(plan: ReleasePlan, role: Role, env: Env = process.env): AppConfig {
   const config = loadConfig(role, env);
   if (config.appEnv === 'production' && plan.smoke !== 'authenticated') fail('RELEASE_AUTHENTICATED_SMOKE_REQUIRED');
   for (const change of plan.configuration.changes) {

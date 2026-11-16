@@ -1,4 +1,20 @@
+## 统一入口与Agent配套修改参照（2026-11-16）
+
+只读复核真实App的api_endpoints.dart、http_auth_repository.dart，SHA256仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1和d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。App继续从环境读取两个Base URL；统一域名部署时配置Server origin和Agent的/agent前缀，不修改内部业务路径。本轮没有写App，用户另行明确授权的Agent后端已配套调整；后端代理联调不冒充移动端验收。见[证据](acceptance/ingress-auth.md)。
+
+## Qwen模型切换参照（2026-11-16）
+
+只读真实App的api_endpoints.dart与http_auth_repository.dart，Git HEAD bf23c1b14d847de5561c1ba66bd4192dc308b356、工作树干净；SHA256仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1及d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。本次仅替换后端模型/派生向量与修复内部RAG配置入口，当前App未发现RAG消费；没有修改App或运行Flutter，未将后端测试称为移动端联调。见[专项验收](acceptance/qwen37-vector-switch.md)。
+
 # App 只读参照基线
+
+## 搜索底层端口封装（2026-11-16）
+
+本轮只读复核api_endpoints.dart与http_auth_repository.dart，SHA256仍分别为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1、d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。公开/内部RAG请求与正文响应不改，变化是底层索引端口、后端工厂和SDK适配位置；阶段诊断名改为index_ready/index_search。未写App、未运行Flutter或独立Agent；914项unit/contract和48项隔离真实PG/Redis/Milvus不是移动端或真实ES验收，见[底层说明](runbooks/milvus.md#底层接口与后端替换)。
+
+## 全仓架构审计参照（2026-11-16）
+
+本轮只读核对实际 `../huahuo-ai/lib`；当前客户端未找到 rag/ingestions、text-ingestions、kb/documents、kb/notes 或 basePartRevisionId 的消费代码，不能把历史 Server 端点当作已接通当前 App。`lib/core/network/api_endpoints.dart` 仍为双 Base URL，其 SHA256 为 `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1`；认证客户端 `lib/features/auth/data/http_auth_repository.dart` 为 `d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5`，与前次相同。未写App或运行Flutter。用户进一步明确底层只有Note/File两条入库线路，未来业务名称另定；源码检查与8项隔离复现见[审计记录](progress.md)。
 
 ## 文档解析客户端协议修复（2026-11-16）
 

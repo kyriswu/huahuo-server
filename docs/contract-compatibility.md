@@ -1,3 +1,17 @@
+## 原生认证子请求与配套Agent（2026-11-16）
+
+业务路径/载荷和可信身份头保持：公开Server为/api/v1，Agent公开前缀/agent，内部API仍为/api。Server认证子请求不再直接返回302，而以401和登录提示头交给入口处理；Cookie刷新/清理采用独立响应头。Agent删除重复注销和匿名跳转，保留原生用户隔离。内部Server地址必须为稳定origin。首次切换仍与旧线上鉴权不兼容，需两端和宿主入口一起切换；见[契约](runbooks/gateway-auth.md)和[验收](acceptance/ingress-auth.md)。
+
+## 搜索底层端口收敛（2026-11-16）
+
+用户最新决定先按关键词、向量、混合检索能力封装底层，业务名称与获取方式留在上层映射。KeywordIndex支持替换提供器，HybridIndex可使用Milvus原生能力或组合独立关键词/向量索引；模型Rerank不进入存储接口。公开/内部HTTP路由、请求和正文响应沿用现有在途实现；Server-Timing及日志阶段名milvus_ready/milvus_search改为index_ready/index_search。上层Note/File/text来源分派、最新200来源限制和其余审计问题没有在本次底层封装中改写。
+
+既有Collection Schema、构建ID、point ID和业务快照/configHash输入与本轮开始时工作区一致，无数据库迁移。实际SDK类型、原生查询表达式与Schema管理只在Milvus适配器；过滤端口保留必填用户/工作区/授权ID，并只接受受控来源条件。914项单元/契约与48项定向真实隔离PG/Redis/Milvus集成通过；替代关键词class是测试适配器，不能替代未来ES验收。完整说明见[底层接口](runbooks/milvus.md#底层接口与后端替换)。
+
+## 内部RAG运行配置与Qwen切换（2026-11-16）
+
+公开与内部RAG请求Schema、响应及授权边界沿用当前在途实现；内部/internal/v1/rag/query现与公开入口读取同一请求级运行配置。隔离真实PG通过Admin保存候选7时四个入口均读取7，改为11后新请求读取11、在途请求保持7。配置/入口是真实依赖，检索spy与真实Milvus集成证据分别记录。新模型与FP16不兼容旧模型向量/任务快照；本次共享PG元数据与旧Milvus逻辑行均0，显式删除重建无需回填，不能泛化到非空历史库。模型网络按执行位置配置，本机test也走公网，云端test/main走私网；没有根据分支或APP_ENV自动切换。见[验收](acceptance/qwen37-vector-switch.md)。
+
 # 契约兼容性（P01 历史与 P02 增量）
 
 ## 解析排队与图片复用（2026-11-16）
@@ -288,3 +302,47 @@ App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本阶段核对 `
 - 不新增工作区产品概念；现有技术归属与权限过滤保留。知识图谱继续基于标签关系。
 
 真实客户端源文件、hash 和测试夹具位置见 app-reference.md。本阶段未运行或修改 Flutter；集成通过只证明相应 HTTP/JSON 契约，不能代替真机验收。
+
+## Note / File 入库线路梳理与调整说明（2026-11-16）
+
+后续用户进一步决定先封装关键词/向量/混合这些技术能力；本节保留上层来源分派的分析。下面的AI调整任务不作为本次底层工作的执行范围，Note/File映射与业务名称后续再收敛。最新已实现边界见文首“搜索底层端口收敛”与检索手册。
+
+用户确认的是底层 Note / File 两条 ingestion 线路，未来在产品中叫什么另定。当前实现已有两种索引模式，并没有三套索引引擎。前次审计使用“文档存在两套模型”概括过重，更准确的问题是：原始记录来源被混用为入库/查询类别，造成 File 线路内的来源覆盖不完整。以下是源码事实与后续AI任务边界，本轮没有修改业务实现或执行迁移。
+
+### 当前完整调用链
+
+| 层次 | Note线路 | File线路 |
+| --- | --- | --- |
+| 接入 | Note创建/更新raw；note-imports最终创建Note | rag/ingestions接收文件URL；text-ingestions接收手工文本或FILE_UPLOAD链接 |
+| 原始正文 | notes + note_part_revisions的raw版本 | rag_ingestion_versions指向canonical对象；text_ingestion_jobs保存raw_content/产物引用 |
+| 任务 | kb.note-index / kb.note-cleanup | rag.document-ingest / rag.document-cleanup；text.ingest用于另一种接入来源 |
+| 编排 | NoteIndexService → NoteIndexJobs → KnowledgeIndexJobs | RagIngestionJobs或TextIngestionJobs准备正文 → 同一个KnowledgeIndexJobs |
+| 索引模式 | note-hybrid | document-keyword（file和text来源都使用它） |
+| 切分与模型 | 当前最多500码点、可带50码点重叠；qwen3.7-text-embedding-flash原生1024维/FP16、BM25，查询可选qwen3.7-text-rerank；规格以model-profile.ts为准 | 当前最多2000码点、零重叠、BM25；不调用Embedding |
+| PostgreSQL索引记录 | kb_note_hybrid_builds / chunks | kb_document_keyword_builds / chunks |
+| Milvus目标 | config.kb.noteCollection | config.kb.documentCollection |
+| 查询 | RagQueryService；notes/query指定note | RagQueryService；documents/query目前仅指定file，漏掉同线路的text来源 |
+
+Note索引依赖功能开关；只改outline/germination不会按raw变化重建正文索引。导入到Note的TXT/Markdown或可读DOCX仍走Note线路：目标记录决定线路，不能仅凭文件扩展名或“导入”这个动作决定线路。Admin解析试用是临时探针，不是第三条业务入库线路。
+
+### 已确认的具体问题
+
+1. `src/modules/kb/types.ts` 的 IndexMode 已经只有两值，但 KbSourceType 是 note/file/text。`text-ingestion/types.ts` 的注释还明确获取方式区别于note/file，执行时却以 `indexSource({type:'text',...})` 把第三种来源送入公共来源类型。需要分开“线路”和“原始记录引用”，不能让同一字段同时承担两个职责。
+2. `rag/routes.ts` 的 documents/query 强制 sourceType=file，`query-service.ts` 再按 b.source_type 做等值筛选。因此 text-ingestions 接入的数据虽已在File的关键词索引中，却被该入口排除。上一轮隔离PG+模拟召回已复现：直接指定text可查到，file文档视图无结果。
+3. `kb/repository.ts` 的 sourceState 按file/text选择不同表；`rag/image-links.ts` 也按file走rag_document_assets、按text读取解析manifest。这里的差异属于回源适配。直接把text全部重命名为file，会把text_ingestion_jobs的ID拿去查rag_ingestion_versions；只把查询条件扩大，也会让后续图片解析拿错来源。查询结果必须携带可信的内部原始记录引用，用它选择回源适配器。
+4. File线路不同入口的生命周期能力不齐：rag入口有delete/cleanup、目录/章节和解析产物读取；text入口有修改/重试，没有同等的删除入口。需要统一索引层对当前版本、可见性、删除和旧索引回收的保证；业务接口是否都需要同样能力单独判断，不要求为了接口对称而新增产品功能。
+5. source.type参与build ID、point ID、互斥锁键和清理选择条件，PG及Milvus中也已有file/text元数据。类型收敛必须评估既有ID、存量数据与索引的一致性，不能只改枚举/路由就宣告完成。旧标记若保留，只能有明确的内部来源语义，不得继续向调用方形成第三条入库线路。
+
+### 交给AI的调整任务
+
+目标：将入库与检索统一为Note / File两条技术线路，复用已有KnowledgeIndexJobs；获取方式、内容格式、原始记录引用分别表达，业务产品命名留待后续确定。
+
+- 首先给出最小修改方案和原始记录引用映射。优先复用现有两种IndexMode、两个索引目标、Task/Outbox及解析器；不以新增统一业务文档表或合并所有来源表为验收条件，不新增第三套索引器。
+- 将text-ingestion按File接入适配处理；Note导入仍以落地Note为准。File查询覆盖所有已发布、授权且当前有效的File来源，调用方无需知道原数据来自哪张表。
+- 将回源、图片、权限、当前版本检查与清理按可信原始记录引用分派，避免公共查询类别与存储位置混用。共享索引层保证发布/替换/删除一致；获取方式特有的下载、解析和正文保存可留在适配器。
+- 主要核对 kb/{types,repository,jobs}.ts、rag/{jobs,routes,query-service,image-links}.ts、text-ingestion/{types,service,jobs,routes}.ts、NoteIndexService及相关测试。不要连带调整切分参数、模型、计费或其他审计项。
+- 同步Server公开/内部RAG参数、结果、OpenAPI和Agent调用契约；先只读核对独立Agent，所需调用方变更写清配套要求。旧接口要么保留为薄接入适配，要么明确随协调发布退出，不保留两份执行算法。
+- 检查存量PG与Milvus来源标记及ID计算。若需数据变更，新增编号迁移并列出有界回填/重建和验收依据；不改已执行0001及后续历史、不加物理外键、不清库、不删已有卷、不调用真实付费模型、不自动部署。
+- 验收覆盖：Note新建/修改/删除仍走Note；文本、TXT/Markdown和已支持的结构化文件接入同属File；File查询同时返回两种旧来源；Note与File互不串线；跨用户/工作区拒绝；正文/图片引用正确；旧版本不可见且清理不误删当前版本；重试不重复发布；存量索引可查且无新增孤儿点。真实PG/Redis与模拟模型/Milvus结果分别报告。
+
+本轮证据沿用 `.local/architecture-review/reproductions.log`，没有为此次文字梳理重复跑测试。现有最新200个来源的查询范围限制、内部RAG运行时配置漏接属于另列审计项，不能把该限制当作File来源统一后的完整检索验收。

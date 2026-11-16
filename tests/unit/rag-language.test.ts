@@ -6,7 +6,7 @@ import {
   detectChunkLanguage,
   MILVUS_OUTPUT_FIELDS,
   MULTI_ANALYZER_PARAMS,
-} from '../../src/modules/rag/adapters/milvus-schema.js';
+} from '../../src/integrations/search-index/milvus-schema.js';
 
 describe('RAG language routing', () => {
   it.each([
@@ -29,12 +29,12 @@ describe('RAG language routing', () => {
 });
 
 describe('Milvus schema contract', () => {
-  it('uses one text field and a native BM25 function with configurable dense dimensions', () => {
-    const fields = buildMilvusSchema('note-hybrid');
+  it('uses one text field, native BM25 and fixed FP16 dense dimensions', () => {
+    const fields = buildMilvusSchema('hybrid');
     const field = (name: string) => fields.find(value => value.name === name);
     expect(field('id')).toMatchObject({ is_primary_key: true, autoID: false, max_length: 256 });
-    expect(field('dense_vector')).toMatchObject({ data_type: DataType.FloatVector, dim: 1024 });
-    expect(buildMilvusSchema('note-hybrid').find(value => value.name === 'dense_vector')?.dim).toBe(1024);
+    expect(field('dense_vector')).toMatchObject({ data_type: DataType.Float16Vector, dim: 1024 });
+    expect(buildMilvusSchema('hybrid').find(value => value.name === 'dense_vector')?.dim).toBe(1024);
     expect(field('text')).toMatchObject({ max_length: 65535, enable_analyzer: true, multi_analyzer_params: MULTI_ANALYZER_PARAMS });
     expect(field('sparse_vector')).toMatchObject({ data_type: DataType.SparseFloatVector, is_function_output: true });
     expect(BM25_FUNCTION).toMatchObject({ type: FunctionType.BM25, input_field_names: ['text'], output_field_names: ['sparse_vector'] });
@@ -43,8 +43,8 @@ describe('Milvus schema contract', () => {
   });
 
   it('keeps analyzer settings independent across collection creation attempts', () => {
-    const first = buildMilvusSchema('note-hybrid').find(field => field.name === 'text');
-    const second = buildMilvusSchema('note-hybrid').find(field => field.name === 'text');
+    const first = buildMilvusSchema('hybrid').find(field => field.name === 'text');
+    const second = buildMilvusSchema('hybrid').find(field => field.name === 'text');
     expect(first?.multi_analyzer_params).toEqual(second?.multi_analyzer_params);
     expect(first?.multi_analyzer_params).not.toBe(second?.multi_analyzer_params);
     expect(MULTI_ANALYZER_PARAMS.analyzers.zh).toEqual(MULTI_ANALYZER_PARAMS.analyzers.mixed);

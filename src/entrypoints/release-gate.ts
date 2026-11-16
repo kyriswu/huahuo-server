@@ -1,5 +1,5 @@
 import { readReleasePlan } from '../release/plan.js';
-import { checkReleaseConfiguration, checkReleaseConfigurationAssertions, checkReleaseExternal, checkReleaseHistory, checkReleaseRuntime, verifyReleaseDatabase } from '../release/gates.js';
+import { reviewReleaseConfiguration, checkReleaseConfigurationAssertions, checkReleaseExternal, checkReleaseHistory, checkReleaseRuntime, verifyReleaseDatabase } from '../release/gates.js';
 import type { Role } from '../config/config.js';
 
 const mode = process.argv[2];
@@ -8,7 +8,9 @@ try {
   const role = process.env.SERVICE_ROLE as Role;
   if (!['api-server', 'admin', 'worker', 'scheduler', 'migrate'].includes(role)) throw new Error('RELEASE_ROLE_INVALID');
   const plan = await readReleasePlan();
-  const config = checkReleaseConfiguration(plan, role);
+  // These modes only inspect a candidate. The deployment controller must still
+  // enforce compatibility before any migration or replacement of running roles.
+  const config = reviewReleaseConfiguration(plan, role);
   let result: unknown = {};
   if (mode === 'config') result = await checkReleaseConfigurationAssertions(plan, role);
   else if (mode === 'db-preflight') {
@@ -20,7 +22,8 @@ try {
     if (role !== 'api-server') throw new Error('RELEASE_API_ROLE_REQUIRED');
     result = await checkReleaseExternal(plan);
   }
-  console.log(JSON.stringify({ status: 'passed', stage: mode, role, result }));
+  console.log(JSON.stringify({ status: 'passed', stage: mode, role,
+    automaticReleaseReady: Object.values(plan.compatibility).every(value => value === true), result }));
 } catch (error) {
   const code = error instanceof Error && /^(?:RELEASE_|MIGRATION_|DATABASE_|INVALID_CONFIG:)[A-Z0-9_:]+$/.test(error.message) ? error.message : 'RELEASE_GATE_FAILED';
   console.error(JSON.stringify({ status: 'failed', code })); process.exitCode = 1;

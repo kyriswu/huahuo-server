@@ -14,6 +14,7 @@ import { attachResource } from '../../src/modules/storage/references.js';
 import { transaction } from '../../src/modules/identity/store.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
 import { insertFixtureUser,insertFixtureSession,testJwtEnv } from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!migrationUrl||!/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('TEST_DB_REQUIRED');
 const dir=`/tmp/huahuo-p05-${randomUUID()}`;
@@ -122,10 +123,10 @@ describe('P05 real scoped resource lifecycle',()=>{
  });
  it('actual App JSON body and object headers work through Fastify with no Bearer on transfer',async()=>{
   const u=await fixture();const app=await buildApiServer({config:cfg});try{
-   const auth={authorization:`Bearer ${u.bearer}`,'x-idempotency-key':randomUUID()};const init=await app.inject({method:'POST',url:'/api/v1/media/upload-token',headers:auth,payload:{...metadata,sizeBytes:13,workspaceId:u.workspaceId}});expect(init.statusCode,init.body).toBe(200);const t=init.json().data;
+   const auth={...fixtureScopeHeaders(u.bearer),'x-idempotency-key':randomUUID()};const init=await app.inject({method:'POST',url:'/api/v1/media/upload-token',headers:auth,payload:{...metadata,sizeBytes:13,workspaceId:u.workspaceId}});expect(init.statusCode,init.body).toBe(200);const t=init.json().data;
    const put=await app.inject({method:'PUT',url:new URL(t.uploadUrl).pathname,headers:t.headers,payload:bytes});expect(put.statusCode,put.body).toBe(200);
    const done=await app.inject({method:'POST',url:`/api/v1/media/uploads/${t.uploadId}/complete`,headers:{...auth,'x-idempotency-key':randomUUID()},payload:{workspaceId:u.workspaceId}});expect(done.statusCode,done.body).toBe(200);
-   const playback=await app.inject({url:`/api/v1/media/resources/${t.resourceId}/playback`,headers:{authorization:auth.authorization}});expect(playback.statusCode,playback.body).toBe(200);const url=new URL(playback.json().data.url);const download=await app.inject({url:url.pathname+url.search,headers:{range:'bytes=0-12'}});expect(download.statusCode).toBe(206);expect(download.rawPayload).toEqual(bytes);const invalid=await app.inject({url:url.pathname+url.search,headers:{range:'bytes=999-'}});expect(invalid.statusCode).toBe(416);expect(invalid.headers['content-range']).toBe('bytes */13');
+   const playback=await app.inject({url:`/api/v1/media/resources/${t.resourceId}/playback`,headers:fixtureScopeHeaders(u.bearer)});expect(playback.statusCode,playback.body).toBe(200);const url=new URL(playback.json().data.url);const download=await app.inject({url:url.pathname+url.search,headers:{range:'bytes=0-12'}});expect(download.statusCode).toBe(206);expect(download.rawPayload).toEqual(bytes);const invalid=await app.inject({url:url.pathname+url.search,headers:{range:'bytes=999-'}});expect(invalid.statusCode).toBe(416);expect(invalid.headers['content-range']).toBe('bytes */13');
   }finally{await app.close();}
  });
 });

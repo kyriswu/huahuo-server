@@ -1,6 +1,7 @@
 import { buildBase } from '../../src/apps/base.js';
 import { serve } from '../../src/entrypoints/runtime.js';
 import { config, dependencies } from '../helpers.js';
+import { streamState } from '../../src/lib/state-stream.js';
 
 // Real loopback HTTP/process signals with fake dependency health; no DB/cloud access.
 const cfg = config();
@@ -16,5 +17,13 @@ app.get('/slow', async () => {
   return { done: true };
 });
 app.get('/business', async () => ({ ok: true }));
+app.get('/state-stream', async (_request, reply) => {
+  let terminal = false;
+  await streamState(reply, () => ({ terminal }), changed => {
+    const timer = setTimeout(() => { terminal = true; changed(); }, Number(process.env.FIXTURE_WORK_MS ?? 11000));
+    process.send?.({ event: 'stream-started' });
+    return () => clearTimeout(timer);
+  }, state => state.terminal);
+});
 await serve(app, cfg, { initialTimeoutMs: fixtureBudget, readTimeoutMs: async () => fixtureBudget });
 process.send?.({ event: 'ready', address: app.listeningOrigin });
