@@ -32,6 +32,7 @@ export interface ReleasePlanSummary {
   changedFileCount: number;
   serviceCount: number;
   smoke: ReleasePlan['smoke'];
+  automaticReleaseReady: boolean;
 }
 type ErrorCode = 'RELEASE_PLAN_INVALID' | 'RELEASE_PLAN_FILE_INVALID' | 'RELEASE_PLAN_GIT_FAILED'
   | 'RELEASE_PLAN_BASE_INVALID' | 'RELEASE_PLAN_MIGRATION_HISTORY_CHANGED'
@@ -140,10 +141,9 @@ async function migrationsAt(root: string, revision: string): Promise<Map<string,
   }
   return files;
 }
-/** Compares committed candidate HEAD with the declared deployed base, never merge-base. */
-export async function validateReleasePlan(input: ReleasePlan, root = process.cwd()): Promise<ReleasePlanSummary> {
+/** Reviews committed candidate HEAD against its deployed base; this does not authorize deployment. */
+export async function reviewReleasePlan(input: ReleasePlan, root = process.cwd()): Promise<ReleasePlanSummary> {
   const plan = parsePlan(input);
-  if (Object.values(plan.compatibility).some(value => !value)) fail('RELEASE_PLAN_INCOMPATIBLE');
   root = await realpath(root);
   if (await realpath((await git(root, ['rev-parse', '--show-toplevel'])).trim()) !== root) fail('RELEASE_PLAN_GIT_FAILED');
   const revision = (await git(root, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
@@ -166,7 +166,15 @@ export async function validateReleasePlan(input: ReleasePlan, root = process.cwd
   for (const dependency of plan.dependencies) await file(root, dependency.checkFile);
   if (plan.backfill.reference) await file(root, plan.backfill.reference);
   return { id: plan.id, baseRevision: plan.baseRevision, revision, migrationCount: added.length,
-    changedFileCount: changed.length, serviceCount: plan.services.length, smoke: plan.smoke };
+    changedFileCount: changed.length, serviceCount: plan.services.length, smoke: plan.smoke,
+    automaticReleaseReady: Object.values(plan.compatibility).every(value => value === true) };
+}
+
+/** Automatic deployment remains fail-closed, independently of successful CI review. */
+export async function validateReleasePlan(input: ReleasePlan, root = process.cwd()): Promise<ReleasePlanSummary> {
+  const plan = parsePlan(input);
+  if (Object.values(plan.compatibility).some(value => !value)) fail('RELEASE_PLAN_INCOMPATIBLE');
+  return reviewReleasePlan(plan, root);
 }
 
 /** Validate the reviewed check file without executing it. */
