@@ -19,7 +19,9 @@
   "configuration": {
     "mode": "reuse",
     "changes": [],
-    "reviewedFiles": []
+    "reviewedFiles": [
+      "compose.yaml"
+    ]
   },
   "dependencies": [],
   "backfill": {
