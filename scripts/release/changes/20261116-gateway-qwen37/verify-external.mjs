@@ -4,7 +4,7 @@ import { createMilvusClient } from '../../../../dist/integrations/search-index/m
 
 // Bounded read-only schema check. Never ensureReady/create/drop, read documents,
 // generate embeddings, rerank, or start a historical reindex from a release.
-const config = loadConfig('migrate'), client = createMilvusClient(config.milvus);
+const config = loadConfig('api-server'), client = createMilvusClient(config.milvus);
 const checked = response => {
   if (response.status?.error_code !== 'Success') throw new Error('QWEN_MILVUS_READ_FAILED');
   return response;
