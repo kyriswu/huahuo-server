@@ -3,11 +3,14 @@ import type {AppConfig} from '../../config/config.js';
 import {DomainError,assertScope,transaction,type Scope} from '../identity/store.js';
 import {kbSnapshot,kbEmbedding,kbTokenizer,knowledgeIndex,type IndexFactory} from '../kb/profile.js';
 import {sourceContent} from '../kb/repository.js';
-import {tablesFor,type KbBuild,type KbSourceType,type KbSnapshot,type HybridIndex} from '../kb/types.js';
+import {tablesFor,type KbBuild,type KbSourceType,type KbSnapshot} from '../kb/types.js';
+import type {HybridIndex,KeywordIndex} from '../../lib/search-index/types.js';
+import {requireIndexKind} from '../../lib/search-index/factory.js';
 import {digest} from '../kb/split.js';
 import type {EmbeddingClient} from './adapters/embedding.js';
 import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,type RerankAdapter,type RagSearchCandidate} from './search.js';
 import {NoteQueryTiming} from './query-timing.js';
+import { NOTE_EMBEDDING_MODEL, NOTE_EMBEDDING_PROFILE } from './model-profile.js';
 import {imageResourceId,markdownImages,rewriteImageUrls,type MarkdownImage} from '../../lib/markdown-images.js';
 export type RagQueryMode='keyword'|'dense'|'hybrid';
 export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:KbSourceType;topK?:number;documentKey?:string;workspaceId?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
@@ -17,7 +20,7 @@ export const ragImageKey=(image:RagImageRequest)=>JSON.stringify([image.sourceTy
 export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveImages?:(scope:Scope,images:RagImageRequest[])=>Promise<ReadonlyMap<string,RagImageLink>>;}
 interface ChunkRow{build_id:string;point_id:string;ordinal:number;source_start:number;source_end:number;content_hash:string;chunk_count:number;}
 export class RagQueryService {
- private indexes=new Map<string,{target:string;index:HybridIndex;active:number;revision:number;retired:boolean}>();private fallbackTotal=0;
+ private indexes=new Map<string,{target:string;index:HybridIndex|KeywordIndex;active:number;revision:number;retired:boolean}>();private fallbackTotal=0;
  constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly dependencies:RagQueryDependencies={}){}
  private reranker():RerankAdapter|undefined{
   const config=this.config;
@@ -71,25 +74,25 @@ export class RagQueryService {
   if(!builds.length)return {mode,query,results:[]};
   const selected=kbSnapshot(this.config,note?'note-hybrid':'document-keyword','markdown');
   if(builds.some(b=>b.snapshot.target.connectionId!==selected.target.connectionId||b.snapshot.target.database!==selected.target.database||b.snapshot.target.collection!==selected.target.collection))throw new DomainError(503,'KB_TARGET_CHANGED');
-  if(note&&builds.some(b=>b.snapshot.embedding?.model!=='BAAI/bge-m3'||b.snapshot.embedding.dimensions!==1024||b.snapshot.embedding.profile!=='bge-m3-1024'))throw new DomainError(503,'KB_PROFILE_CHANGED');
+  if(note&&builds.some(b=>b.snapshot.embedding?.model!==NOTE_EMBEDDING_MODEL||b.snapshot.embedding.dimensions!==1024||b.snapshot.embedding.profile!==NOTE_EMBEDDING_PROFILE))throw new DomainError(503,'KB_PROFILE_CHANGED');
   const rows=await transaction(this.pool,async tx=>{await assertScope(tx,scope);const {chunks}=tablesFor(selected.mode);return (await tx.query<ChunkRow>(`SELECT c.*,b.chunk_count FROM ${chunks} c JOIN ${tablesFor(selected.mode).builds} b ON b.id=c.build_id WHERE c.build_id=ANY($1::uuid[]) AND b.published AND b.status='ready' AND c.index_status='ready'`,[builds.map(b=>b.id)])).rows;});
   if(!rows.length)return {mode,query,results:[]};
   const lease=this.acquireIndex(selected),index=lease.index;
   const limit=Math.max(topK,mode==='keyword'?this.config.milvus.bm25Candidates:this.config.milvus.hybridCandidates);
   try{
-   await timing.measure('milvus_ready',()=>index.ensureReady());
+   await timing.measure('index_ready',()=>index.ensureReady());
    const byWorkspace=new Map<string,ChunkRow[]>();const byBuild=new Map(builds.map(b=>[b.id,b]));
    for(const row of rows){const b=byBuild.get(row.build_id)!;const group=byWorkspace.get(b.workspace_id)??[];group.push(row);byWorkspace.set(b.workspace_id,group);}
    let vector:number[]|undefined;
    if(mode!=='keyword'){
-    const tokenizer=await kbTokenizer(selected);if(await tokenizer.count(query)>8192)throw new DomainError(400,'RAG_QUERY_TOO_LONG');
+    const tokenizer=await kbTokenizer(selected);if(await tokenizer.count(query)>tokenizer.maxInputTokens)throw new DomainError(400,'RAG_QUERY_TOO_LONG');
     const embedder=this.dependencies.embedding??kbEmbedding(this.config,selected);
-    vector=(await timing.measure('embedding',()=>embedder.embed([query],{onAttempt:a=>timing.embeddingAttempts.push(a)})))[0];
+    vector=(await timing.measure('embedding',()=>embedder.embed([query],{textType:'query',onAttempt:a=>timing.embeddingAttempts.push(a)})))[0];
     if(!vector||vector.length!==1024)throw new DomainError(503,'KB_EMBEDDING_DIMENSION');
    }
    const hits=[];
    for(const [workspaceId,group] of byWorkspace){const options={scope:{userId:scope.userId,workspaceId,pointIds:group.map(c=>c.point_id)},limit};
-    hits.push(...await timing.measure('milvus_search',()=>mode==='keyword'?index!.searchKeyword(query,options):mode==='dense'?index!.search(vector!,options):index!.hybridSearch(vector!,query,options)));
+    hits.push(...await timing.measure('index_search',()=>mode==='keyword'?index.searchKeyword(query,options):mode==='dense'?requireIndexKind(index,'hybrid').search(vector!,options):requireIndexKind(index,'hybrid').hybridSearch(vector!,query,options)));
    }
    const best=new Map<string,(typeof hits)[number]>();for(const h of hits)if(!best.has(h.chunkKey)||best.get(h.chunkKey)!.score<h.score)best.set(h.chunkKey,h);
    // Source lookup, not a duplicate chunk-text column, is the authority.

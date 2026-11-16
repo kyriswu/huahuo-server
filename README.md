@@ -1,77 +1,263 @@
-# 花火后端 · Server 侧 RAG 文档入库
+# 花火 Server
 
-Fastify 5 / Node 26.11.0 / PostgreSQL / Redis，严格 TypeScript + ESM。Node 和 pnpm 由项目根目录的 Volta pin 统一管理；容器也使用同一 Node 基线。已完成 P02 身份/工作区和 P03 持久任务、Outbox、BullMQ Worker/Scheduler、事件游标与取消恢复。短信支持阿里云官方 SDK，已完成一次真实发送与送达回执验证；真实 AI/ASR/支付任务、AI 报告 P09 尚未实施。P14 已有 Admin 示例工作台，业务页面待定。
+花火应用的独立后端，使用 Fastify、TypeScript/ESM、PostgreSQL、Redis 和 BullMQ。一个仓库、一份应用镜像，按 API、Admin、Worker、Scheduler 四个角色分别运行；宿主入口统一鉴权并转发，数据库迁移由一次性 `migrate` 执行。
 
-## App 源码与短信工具
+本文说明首次运行、依赖、服务关系、开发与发布入口。实际配置以代码、`compose.yaml` 和环境模板为准；功能状态与验收边界见 [开发进度](docs/progress.md)。
 
-当前只读 App 根目录是 `../huahuo-ai`，源文件在其 `lib/`，参照配置和各阶段启动规范已更新。当前 App 尚无 Git commit 或远端地址；旧 `huahuo-app` 文档记录只作历史证据。
+## 运行环境与工具
 
-`pnpm sms preview < request.json` 验证单条模板短信，`SMS_PROVIDER=live pnpm sms send < request.json` 显式发送，`pnpm sms query < query.json` 查询送达。输入、环境配置和登录验证码接入见[短信手册](docs/runbooks/sms.md)。当前开发环境保留原模拟模式，运行中的业务容器尚未更新。
+| 工具或依赖 | 版本 / 要求 | 用途 |
+| --- | --- | --- |
+| Git | 支持项目正常分支、PR 与完整提交历史 | 代码、发布基准及迁移差异核对 |
+| [Volta](https://docs.volta.sh/guide/getting-started) | 项目的 Node / pnpm 版本管理工具 | 进入仓库后使用 `package.json` 中的 pin |
+| Node.js | 宿主与 CI：`26.11.0`；engines：`>=26.11.0 <27` | 开发、构建、测试及宿主脚本 |
+| pnpm | `10.15.1` | 安装依赖；提交并使用 `pnpm-lock.yaml` |
+| [Docker + Compose 插件](https://docs.docker.com/compose/install/) | 使用 `docker compose`；macOS 可用 Docker Desktop，Linux 可用 Engine 与 Compose 插件 | 本地依赖、应用容器和隔离集成测试 |
+| Bash、curl | 宿主命令行可用；Windows 使用 WSL2/Linux 环境 | 项目 shell 脚本和健康检查 |
+| PostgreSQL | 本地/CI 镜像 `postgres:17.9-bookworm`，也支持已配置的 RDS | 业务数据、会话、运行配置、任务、Outbox |
+| Redis | 本地/CI 镜像 `redis:7.4.8-bookworm` | 缓存、BullMQ 投递、并发与节点协调 |
 
-当前同一 `compose.yaml` 运行独立 api-server、admin、worker、scheduler、redis 和一次性 migrate；业务 PostgreSQL 使用根目录 `.env` 中的阿里云连接。本地 postgres 仅保留为显式隔离测试 profile，不参与日常启动。API `http://127.0.0.1:3000/health/ready`，Admin `http://127.0.0.1:3001/health/ready`；管理身份独立于 App，无默认账号。
+Docker 构建/运行镜像目前固定为 `node:26.12.1-bookworm-slim`，与宿主的 Volta pin 分开维护。无需另装全局 TypeScript、tsx、Vite 或 pnpm 之外的 JavaScript 包管理器；项目工具由锁文件安装。
 
-项目负责应用服务、监听端口、公开 URL 和可信代理配置。域名入口、TLS 证书与自动续期由宿主机独立管理，其配置、脚本和运维文档存放在仓库之外。
+Server 进程本身不要求本机安装 CUDA 或 GPU；解析和模型服务按各自环境准备。Docker 的 CPU/内存须能覆盖计划启动的角色，配额见 compose.yaml；增加本地 Milvus 或多副本时另计资源。
 
-## Admin 工作台
+按功能准备的外部依赖：
 
-安装依赖后运行 `pnpm dev:admin-ui`，打开 `http://127.0.0.1:4173/admin/`。本地预览使用四条示例记录，无需数据库或管理员账号。
+| 能力 | 依赖与配置边界 |
+| --- | --- |
+| 文件存储 | `StoragePort` 支持本地卷、阿里云 OSS、S3；同机 API/Worker 可共用本地卷，跨主机不能各用一份不共享的目录 |
+| 知识库 | 启用索引/检索时需要兼容的 Milvus；资料走 BM25，笔记使用 qwen3.7-text-embedding-flash 原生1024维/FP16与BM25，召回后由qwen3.7-text-rerank重排 |
+| PDF / Office | Xberg 解析服务；按后台节点配置调用常驻 API 或按需唤醒 ECS，内网地址须在实际运行环境可达 |
+| 短信登录 | 阿里云 SMS 的 RAM 凭据、已审核签名和模板；默认不因启动服务就发送短信 |
+| Agent 等服务 | 内部地址直连，传递可信用户/会话身份；不携带 JWT 或 ServiceKey |
 
-`pnpm build` 和 Docker 构建会生成 Admin 页面。启动 Admin 服务后，在浏览器打开 `/admin`，使用已有管理员账号登录。页面和 `/admin/api/v1` 同源，`ADMIN_PUBLIC_BASE_URL` 要匹配浏览器实际访问的地址。登录和初始化方式见 [P02 运行手册](docs/runbooks/p02-identity.md)。
+未配置某项外部能力，不代表启动检查验证了它；也不要把 Mock、demo 任务或健康检查当作真实模型/解析验收。外部服务手册见文末。
 
-如果本机还运行着旧的 Admin 镜像，执行 `docker compose --env-file .env up -d --no-deps --build admin` 后再打开默认地址 `http://127.0.0.1:3001/admin`。
+## 服务关系
 
-## 后端运行
-
-已部署的统一认证支持 APP 和 Web 共用用户登录与 JWT：短信请求使用 `purpose:"sign_in"`，登录必须提供 `clientType:"app"|"web"` 和稳定的 `clientId`。用户主表为 `users`，手机号身份和响应掩码来自 `user_identities`，协议记录为 `user_agreement_acceptances`；仅 active 用户可以访问用户业务接口。Access Token 继续使用 Ed25519/EdDSA，Server 发布 JWKS，Agent 按既定契约验签。请求示例和会话生命周期见[认证手册](docs/runbooks/p02-identity.md)。
-
-继续使用原阿里云 `huahuo` 数据库，未新建数据库或清库。旧 `public` 已原样改名封存为 `initialization_backup`，58表4149行及对象身份、存储文件和视图内容摘要核验一致；新 `public` 已按唯一 `migrations/0001_initial_schema.sql` 初始化，版本1重放幂等，全库物理外键为0。产品用户和会话未复制，新 `users/user_sessions` 均为0；四角色已部署统一用户代码且healthy，readiness和JWKS真实验证通过。DB账号密码、环境配置与JWT私钥未变。详情见[RDS基线验收](docs/runbooks/rds-relations.md)。
-
-本机没有 pnpm 时使用现有工具容器，不需要安装全局依赖：
-
-```bash
-bash scripts/tooling.sh install --frozen-lockfile
-# 使用已有 .env；新环境按 .env.example 填写配置，不重新生成已有凭据。
-node scripts/app-reference.mjs
-
-docker compose --env-file .env config --quiet
-docker compose --env-file .env build
-docker compose --env-file .env up -d redis
-docker compose --env-file .env up -d --no-deps --force-recreate migrate
-docker compose --env-file .env wait migrate
-# 确认迁移成功退出 0 后才启动应用：
-docker compose --env-file .env up -d --no-build
-docker compose --env-file .env ps -a
-node scripts/app-reference.mjs --diff
+```mermaid
+flowchart LR
+    Client[App / Web] --> Gateway[宿主 Nginx 入口]
+    Gateway --> Auth[API JWT / 会话校验]
+    Gateway --> API[api-server]
+    Gateway --> Agent[独立 Agent]
+    Browser[本机管理页面 / 宿主代理] --> Admin[admin 独立端口]
+    API --> PG[(PostgreSQL)]
+    Admin --> PG
+    Scheduler[scheduler] --> PG
+    Scheduler --> Queue[(Redis / BullMQ)]
+    Queue --> Worker[worker]
+    Worker --> PG
+    API --> Files[本地共享卷 / OSS / S3]
+    Worker --> Files
+    Worker -.文档解析.-> Parser[Xberg 解析服务]
+    Worker --> Index[Milvus]
+    Worker -.笔记向量化.-> Models[Embedding / Rerank API]
+    API --> Index
+    API -.笔记查询.-> Models
 ```
 
-日常 `compose:*`、`db:migrate`、`infra:*` 命令统一读取 `.env`；`infra:*` 只管理 Redis。本地 PG 原数据卷保留，不能删除或重新初始化。`pnpm test:integration` 使用本机已有镜像启动独立临时 PostgreSQL/Redis（tmpfs、随机库与凭据、回环随机端口），不依赖业务栈、不读取 `.env`，结束后仅清理本次资源。旧 `verify`、E2E 和容器隔离脚本仍保留业务栈保护，检测到当前 API 使用云 PG 时会拒绝执行，不能用旧配置重启当前业务栈。源码仅写本仓库；同级 App 只读、不挂容器、不影响构建。完整操作和后续迁移顺序见 [本地开发](docs/runbooks/local-development.md)，登录/草稿/Admin CLI 见 [P02 运行手册](docs/runbooks/p02-identity.md)，任务恢复和状态接口见 [P03 运行手册](docs/runbooks/p03-tasks.md)，验收结果见 [阶段进度](docs/progress.md)。
+API 先在 PostgreSQL 事务中保存业务任务和 Outbox，Scheduler 再投递至 Redis/BullMQ，Worker 领取后通过 PG 租约执行并发布结果；Redis 不是业务结果的唯一存储。各角色使用自己的数据库账号，连接同一业务库与相应 Redis 逻辑库/命名空间。Admin 管理会话、配置和节点状态也依赖这些共享服务。
 
-部署配置以根目录 `.env` / `.env.example` 为准，保留连接、凭据、监听、部署总开关、固定模型规格、tokenizer路径和集合绑定。节点、文档解析、RAG召回/批次/并发/超时、任务、业务容量和功能开关统一由Admin「运行配置」写入PostgreSQL；不再用ENV覆盖业务参数，详见[配置边界](docs/runbooks/runtime-configuration.md)。Compose本地/云端示例供各自部署方式使用，宿主调试示例保留宿主地址差异；独立GPU模块和解析服务镜像的模板各有用途。重复的 `.env.document-parser.example` 已合并到主模板。PostgreSQL与Redis仍各一个实例，角色URL和逻辑库不代表新增服务。
+| 角色 | 主要职责 | 默认宿主端口 |
+| --- | --- | --- |
+| `api-server` | 用户 API、上传下载、事件流、认证回调 | 受限业务 `127.0.0.1:3000`；指标 `9464` |
+| `admin` | 独立管理员鉴权、工作台、运行配置 | 直接发布 `127.0.0.1:3001`；指标 `9465` |
+| `worker` | 消费任务、处理文件、索引、节点启动步骤 | 仅指标 `9466`，不开放业务端口 |
+| `scheduler` | 恢复/扫描任务、Outbox 投递、时间窗、节点空闲监控 | 仅指标 `9467`，不开放业务端口 |
+| `migrate` | 校验历史并执行尚未应用的编号迁移 | 一次性成功退出，不是常驻服务 |
 
-项目脚本使用 Volta 固定的 Node 26.11.0 与 pnpm 10.15.1；新机器首次设置时执行 `volta install node@26.11.0`，再按 Volta 的 pnpm 支持启用 `VOLTA_FEATURE_PNPM=1` 并执行 `volta install pnpm@10.15.1`。纯检查/构建也可 `bash scripts/tooling.sh typecheck`。`app:reference`、`verify`、`test:integration`、Compose 与容器隔离脚本在宿主执行：其 Node 脚本等价入口见操作手册，不能给业务容器挂 Docker socket。
+默认宿主映射绑定 loopback；容器内健康端口不等于宿主对外端口。API 不装载 Admin 路由。一个容器只运行一个角色，不用 PM2/supervisor 在容器内混跑。
 
+宿主入口调用 Server 的鉴权接口，验证 JWT、账号和会话后转发 `/api/v1/...` 与 `/agent/api/...`。业务接口消费可信身份，继续校验资源权限；Admin 使用自己的独立端口与管理会话。入口、域名、证书和切流由宿主独立维护，不进入应用 Compose 或项目发布脚本。Server 只维护[入口鉴权契约](docs/runbooks/gateway-auth.md)、应用监听、公开 URL 和可信代理配置。`pnpm compose` 直接调用 Docker Compose，不依赖业务分支。
 
-P01—P06 既有服务已复用；数据库使用唯一初始化基线 `migrations/0001_initial_schema.sql`，不保留旧迁移链或旧用户表别名。素材标签默认不配置模型也能人工管理；Admin「功能开关」中的 `features.tagProvider=disabled` 会如实记录未配置，不返回假提取结果。`deterministic` 只供显式开发 fixture（同时 `ALLOW_MOCK_PROVIDERS=true`，生产拒绝）。`llm`/`dify` 接口配置已预留但真实 transport 到 P08 接通。
+当前按 **API + Worker + Scheduler 同机成组，Admin 可独立部署** 使用，不要求拆仓库。Admin 跨机需连接原业务库和 Redis，并沿用该角色的账号及密钥；API/Worker 跨机前还须处理共享文件。更大范围的共享存储改造按实际拆分需要安排，见 [角色部署](docs/runbooks/role-deployment.md)。
 
-标签图谱只从有效 `note_tags` 映射派生，返回有界主题/素材节点及共同标签证据。新增的 Server 侧 RAG 文档入库是独立的 OSS URL 任务边界，不依赖 Note/Resource 关联；接口和状态见 [RAG 入库手册](docs/runbooks/rag-url-ingestion.md)。
+## 首次准备
 
+### 1. 获取代码并安装工具
 
-知识库使用两种并列模式：真实 Note 正文进入 `huahuo_kb_note_hybrid_chunks`，由 BAAI/bge-m3（1024维）与 BM25 原生混合检索；资料进入 `huahuo_kb_keyword_chunks`，只用 BM25，不依赖 Embedding、模型 tokenizer 或 Rerank。正文保留在所属业务，四张索引表只存状态、修订、位置、哈希和点 ID，切片正文写 Milvus。原解析与图文逻辑复用，业务 Worker 统一编排发布与清理。见[知识库检索手册](docs/runbooks/milvus.md)。
+先准备 GitHub 仓库访问权限与 Git 认证。开发分支使用 `test`；功能修改从它创建工作分支，再通过 PR 合回 `test`。`main` 当前承担受保护的发布控制代码，不等于生产环境，详见 [团队发布](docs/runbooks/team-releases.md)。
 
-对象存储统一走 `StoragePort`。除 Local/S3 外，`STORAGE_DRIVER=aliyun-oss` 使用 `src/integrations/object-storage/aliyun-oss.ts`，默认华北二（北京）Endpoint 为 `https://oss-cn-beijing.aliyuncs.com`；访问密钥只通过环境变量/Secret 注入。OSS 是全局对象存储配置，RAG 的 `RAG_SOURCE_ALLOWED_HOSTS` 只负责入库源 URL 的安全 allowlist。
+```bash
+git clone git@github.com:kyriswu/huahuo-server.git
+cd huahuo-server
+git switch test
 
-所有阿里云 AK 鉴权统一使用 `ALIYUN_RAM_ACCESS_KEY_ID`、`ALIYUN_RAM_ACCESS_KEY_SECRET`；根 `.env` 只配置一组，OSS 与 ECI 共用。服务各自保留地域、Endpoint、Bucket 等业务配置。旧 OSS 专用 AK 变量已移除，不作回退；Compose 仅向 API/Worker 注入共享变量。修改后须在下次构建并重建业务服务时生效。
+# 先安装并启用 Volta；下面安装项目固定版本。
+volta install node@26.11.0
+export VOLTA_FEATURE_PNPM=1
+volta install pnpm@10.15.1
 
-Milvus 连接保留在部署环境，检索参数在Admin「RAG 与检索」。文件资料进入 `document-keyword` / BM25，不调用 Embedding 或 Rerank；UTF-8 文本、Markdown、CSV 本地解析。在Admin填写完整提取配置、启用文档解析模式和兼容节点后，现有文件任务也接受 PDF/Office，通过 Xberg 完整config/稳定UUID提取正文与KB元数据，再进入同一关键词流水线；关闭时继续返回 `RAG_FILE_TYPE_UNSUPPORTED`。接口和恢复约定见[文档提取手册](docs/runbooks/document-extraction.md)。
+node --version
+pnpm --version
+docker version
+pnpm compose version
+pnpm install --frozen-lockfile
+```
 
-数据库使用普通关联ID和查询索引，禁止物理外键及模拟外键触发器；规则见[AGENTS.md](AGENTS.md)，关联清单、应用层校验和数据库验收见[RDS关联规范](docs/runbooks/rds-relations.md)。
+将 `VOLTA_FEATURE_PNPM=1` 放入所用 shell 的启动配置，保持后续终端一致，见 [Volta 的 pnpm 支持说明](https://docs.volta.sh/advanced/pnpm)。无需同时使用 nvm/Corepack 管理本项目的同一套工具。Docker daemon 须已启动，项目脚本不会切换到远程 Docker context。
 
-ECI GPU 抢占式实例底层模块位于 `src/integrations/gpu-spot/`，默认关闭，采用市场价策略，支持幂等申请、同步/异步缺货重试、状态观察与归属核验后的释放。配置参考 `.env.gpu-spot.example`；调用与持久化责任见 [GPU 运行手册](docs/runbooks/gpu-spot.md)。一次明确授权的真实单实例试申请已完成启动验证并释放，见 [试申请验收](docs/acceptance/gpu-spot-trial.md)；尚未接入长期 Task/Worker 或部署角色。
+只做构建或运行 Server 不依赖 Flutter/App 仓库。需要核对 App 契约时，将已有 App 放在同级 `../huahuo-ai`，仅使用 `pnpm app:reference` / `pnpm app:reference:diff` 只读核对；不在本项目安装 Flutter 或修改 App。
 
-文档解析运行库位于 `src/lib/document-parser-machine/`，已连接现有文件Worker和FILE_UPLOAD：节点由Admin管理，Redis统一去重、排队和并发，空闲后由Scheduler节省停机；也支持常驻API。部署总开关默认关闭，配置参考主 `.env.example`；`pnpm document-parser:machine status` 只读查询协调状态，操作见[解析机手册](docs/runbooks/document-parser-machine.md)。本机不在解析节点内网，真实PDF/Office验证由内网测试机完成。
+### 2. 准备环境文件
 
-北京 T4 单卡的四档有序候选、指定 Nginx 镜像与三交换机配置已保存在本地 `.env.gpu-spot`；一次申请由 ECI 按规格优先级和多可用区策略调度，目标一台实例。凭据按用户指定读取根 `.env` 的 `ALIYUN_RAM_ACCESS_KEY_ID/SECRET`。构建后 `pnpm gpu:preflight` 只读核对网络归属，配置仍可保持 disabled；真实网络预检通过不代表 GPU 库存、镜像运行或计算已验证。
+`.env` 是日常 Compose 的默认配置，真实凭据不提交到 Git。已有文件、密钥和数据库账号保持不变；新环境从相应模板复制后填写，模板中的占位符不是可用凭据。
 
-Prometheus 使用独立指标端口 9464–9467，环境标签读取现有 `.env` 的 `APP_ENV`；测试机设 `APP_ENV=test` 和私网 `METRICS_BIND_HOST`。抓取配置及成功率/P95 查询见 [指标接入手册](docs/runbooks/prometheus.md)。
+| 模板 | 场景 |
+| --- | --- |
+| [.env.example](.env.example) | 主配置说明，准备已有共享数据库/云服务的连接 |
+| [.env.compose.local.example](.env.compose.local.example) | 全新的独立本地 PG/Redis，显式启用 `local-db` profile |
+| [.env.compose.cloud.example](.env.compose.cloud.example) | 测试/云端 Compose，数据库与服务使用实际可达地址 |
+| [.env.host.example](.env.host.example) | Node 在宿主调试；数据库/Redis 地址须能从宿主访问 |
 
-发布冒烟与 GitHub Actions 调用方式见[发布冒烟手册](docs/runbooks/release-smoke.md)；`Server CI` 在 PR、main push 或手动运行时执行隔离检查，生产验收由部署完成后调用。
+```bash
+# 仅首次且没有 .env 时复制；随后编辑真实配置。
+if [ ! -f .env ]; then cp .env.example .env; fi
+```
+
+至少确认以下项目：
+
+- `APP_ENV`：本地 `development`，测试 `test`，生产 `production`。Docker 的 `NODE_ENV=production` 不代表业务环境是生产。
+- 数据库：为 API/Admin/Worker/Scheduler/migrate 分别填写 `DATABASE_*_URL` 和所需 TLS/CA；不要把所有角色改成数据库管理员。RDS 账号、库、网络和权限须已准备。
+- Redis：容器通过 `redis:6379` 或实际共享私网地址连接，宿主调试使用宿主可达地址；逻辑 DB 和前缀保持一致，`127.0.0.1` 在容器中指向容器自身。
+- 鉴权：准备 `APP_TOKEN_SECRET`、`ADMIN_SESSION_SECRET`、Ed25519 JWT 密钥（仅签发与网关统一认证使用）。服务间 ServiceKey 已移除。JWT 的 PEM 按模板要求进行 Base64 编码；不要为重新部署轮换已有密钥。
+- 地址：`APP_PUBLIC_BASE_URL` 给客户端使用，`ADMIN_PUBLIC_BASE_URL` 对应管理页面 Origin，`API_SERVICE_BASE_URL` 给其他服务/解析回调使用。地址必须从调用方可达，不能把容器名或 localhost 当作跨机地址。
+- 存储和可选外部服务：选择实际存储驱动，配置 Bucket/前缀、Milvus、模型等；不要为了健康检查随意启用短信、模型或云资源操作。
+
+**本地开发与当前测试服共用数据库及云资源。** 本地迁移、改配置或开停节点可能直接影响测试服，不能把它当作可随意清空的本地数据。需要完全独立环境时使用新的 Compose project、独立凭据/卷和 `local-db` 模板；自动化集成测试已有独立依赖，不必改业务 `.env`。
+
+### 3. 构建、迁移并启动
+
+以下用于准备好的开发配置或全新隔离环境；现有测试/生产更新使用后文发布流程。连接共享库时先核对已审迁移与仍在运行的测试版本，确认兼容后才执行迁移，不能把它当作每次启动前的数据库重置。
+
+```bash
+pnpm compose --env-file .env config --quiet
+pnpm compose --env-file .env build
+
+# 常规共享/RDS 模式只需本地 Redis：
+pnpm compose --env-file .env up -d redis
+# 仅全新 local-db 环境，改用：
+# docker compose --env-file .env --profile local-db up -d postgres redis
+
+# 迁移单独执行；成功后才继续启动。
+pnpm compose --env-file .env run --rm --no-deps migrate
+
+# 四个应用角色及独立 HTTP 网关。
+pnpm compose --env-file .env up -d --no-build api-server admin worker scheduler
+pnpm compose --env-file .env ps -a
+curl --fail http://127.0.0.1:3000/health/ready
+curl --fail http://127.0.0.1:3001/health/ready
+```
+
+`run --rm migrate` 成功后容器会移除；由 Compose 创建的 migrate 显示 `Exited (0)` 也是正常状态。应用启动不自动迁移；首次依赖尚未 ready 时查看日志并确认其健康，不靠清库或重新生成密码解决连接失败。
+
+Admin 页面为 `http://127.0.0.1:3001/admin`，没有默认管理员或公开注册。首次账号使用 [Admin bootstrap](docs/runbooks/p02-identity.md) 的 stdin JSON 方式创建；已有账号时不重复初始化。
+
+## 配置放在哪里
+
+- **ENV / 部署配置**：连接、凭据、监听、公开/内部服务地址、部署总开关、固定模型规格和 tokenizer/集合绑定。
+- **Admin → 运行配置 / PostgreSQL**：业务功能、任务并发/重试、文件额度、RAG 预算及发布排空预算。修改业务参数不要再添加一条重复 ENV 覆盖路径。
+- **处理节点**：已有节点的运行参数在后台修改，新增节点通过受审查的代码清单/迁移发布；登记后默认接收匹配任务，无单独启用开关。凭据保留在运行环境，不写进节点 JSON。
+
+环境按部署用途区分：`development` 是本地开发，`test` 是线上测试，`production` 是线上生产。分支名、Docker 的 NODE_ENV 和服务器是否能访问内网都不能代替 APP_ENV。
+
+云端开停机与解析 API 调用是两个独立权限：`PROCESSING_NODES_CLOUD_CONTROL_ENABLED` 控制云操作，`PROCESSING_NODES_ENABLED` 控制私网解析调用。线上测试、线上生产的云控制默认开启；本地保留按完整 RAM 凭据或节点调用配置判断的原有规则，显式 false 始终优先。非本地部署使用各自配置，不能沿用开发环境的 APP_ENV：
+
+```dotenv
+# 线上测试使用 test；线上生产使用 production。
+APP_ENV=test
+PROCESSING_NODES_CLOUD_CONTROL_ENABLED=true
+# ALIYUN_RAM_ACCESS_KEY_ID / ALIYUN_RAM_ACCESS_KEY_SECRET 沿用已授权的实际凭据。
+# PROCESSING_NODES_ENABLED 按既有内网解析配置保留，不随云控制一起修改。
+```
+
+本期测试发布在写库前核对五角色的 APP_ENV，并核对四常驻角色的云控制开关和完整 RAM 凭据；migrate 不注入云凭据。旧 ENV 若显式为 false，需先按[测试配置片段](resources/processing-nodes/test-control.env.example)改为 true 并重新创建容器。此断言只验证本地配置，不调用云接口，RAM 实际权限和网络仍需验收；解析 API 是否可达不影响云端开机。详见 [运行配置](docs/runbooks/runtime-configuration.md) 和[本期验收边界](docs/acceptance/cloud-control-environments.md)。
+
+改 `.env` 后需按发布流程重新创建对应容器；`docker restart` 不会重新读取新的 ENV。不要把开发环境文件直接覆盖到测试服。
+
+## 日常开发与检查
+
+| 命令 | 作用 |
+| --- | --- |
+| `pnpm typecheck` | 严格 TypeScript 检查，覆盖后端、测试与 Admin UI |
+| `pnpm lint` | 代码和脚本规范检查 |
+| `pnpm build` | 清理并生成后端 dist、source maps 与 Admin UI |
+| `pnpm test` | 单元与契约测试；外部异常分支可以使用明确的替身 |
+| `pnpm test:integration` | 临时 PG/Redis，包含发布基准到候选的迁移演练；不读取业务 `.env` |
+| `pnpm db:generate descriptive_name` | 生成新编号迁移草稿，填写审查后才能发布 |
+| `pnpm release:check` | 构建后检查干净候选提交与发布计划；不是部署命令 |
+
+首次集成测试先准备本机镜像，运行器不会自动拉取：
+
+```bash
+docker pull postgres:17.9-bookworm
+docker pull redis:7.4.8-bookworm
+pnpm test:integration
+# 可选：再准备 milvusdb/milvus:v2.6.26，运行 pnpm test:integration --milvus。
+```
+
+临时依赖使用随机测试库、凭据、回环端口及归属标记，结束只清理本轮资源，不清开发库或已有数据卷。真实模型、解析器、OSS、节点开停与中心监控必须在可达环境另做实际验收；替身或健康通过不能代替它们。见 [真实服务待办](docs/acceptance/pending-live-verification.md)。
+
+CI 的 APP_ENV 也使用 test，但隔离运行器会显式关闭云控制及真实供应商，不继承业务凭据；它与测试服务器的部署授权分开。
+
+宿主直接运行不会自动加载 `.env`，应明确选择宿主环境文件，在不同终端运行需要的角色，例如：
+
+```bash
+node --env-file=.env.host --import tsx src/entrypoints/api-server.ts
+# Worker 另准备其自己的环境文件与 DATABASE_URL：
+node --env-file=.env.host.worker --import tsx src/entrypoints/worker.ts
+# Admin / Scheduler 同理；不要将 API 数据库账号复用给其他角色。
+```
+
+`.env.host` 需自行从模板准备；宿主直连 Redis/PG 还需实际可达地址或受控端口，不假定 Compose 已公开它们。仅预览 Admin UI 可运行 `pnpm dev:admin-ui`，默认 `http://127.0.0.1:4173/admin/` 是示例模式；真实管理操作使用运行中的 Admin 服务。
+
+没有宿主 pnpm 时可用 `bash scripts/tooling.sh install --frozen-lockfile` 及 `bash scripts/tooling.sh typecheck` 等工具容器命令；容器只挂 Server。Compose 编排、隔离依赖和 App 参照脚本仍在宿主执行，不能给业务容器挂 Docker socket。
+
+## 上线、下线与恢复
+
+当前约定：**业务 PR → test → 同 SHA push CI → main 中的测试发布流程 → 原测试服务器**。普通 test PR 可使用 GitHub 原生 Auto-merge，main 控制代码由 owner 审核；main/test 同步通过 PR。正式生产执行器尚未接入，不能把 main 或 production environment 的存在当作生产已部署。
+
+1. 从目标实际成功部署 SHA 整理累计变更，更新 `scripts/release/plan.json`；不要拿分支最新头冒充已部署版本。SQL、ENV、任务协议、权限、存储和外部依赖都纳入审查。
+2. 完成检查和隔离演练；准备实际配置快照、必要迁移/配置断言及选定冒烟。缺少认证凭据不能跳过后宣称成功。
+3. 已审候选合入后，固定流程执行五阶段：**预检/构建/配置 → 迁移 → 迁移验收 → 容器切换退出 → 冒烟清理**。无 pending 迁移也核对历史并显示“无需执行”。
+4. 共享队列按 **Worker → Scheduler → API** 交接，Admin 独立处理；先让新 Worker ready、全部旧 Worker 停领新任务，再交接其他角色。旧任务的租约、结果、回调及幂等不能丢。
+5. 从入口撤出旧实例后排空并退出：SIGUSR2 撤 readiness，SIGTERM/SIGINT 进入退出。readiness 变 503 本身不会自动切换路由；仍落到 draining API 的合法请求在退出前继续按契约处理。
+
+`deployment.drainTimeoutMs` 存在数据库，默认 10 分钟、允许 10—60 分钟；任务提前结束即退出，到期仍未完成用 `124` 标识强退。`OK_WITH_FORCED_DRAIN` 表示更新完成但发生过强退，不等于无损。Compose 的 3630 秒是保护上限，不是固定等待时间。
+
+发布失败先查既有调用、容器及已提交迁移，再决定恢复；客户端超时不证明远端未执行。回退应用不撤销已提交迁移、不运行旧迁移器。只清理明确归属且不再使用的应用资源，保留当前和上一个成功镜像；不删业务数据卷。
+
+本地仅暂停本项目服务可用 `docker compose --env-file .env stop api-server admin worker scheduler`，它不是线上发布流程。域名入口、反向代理、证书及宿主切流由部署侧独立维护，不在本仓库添加相关配置或脚本。完整规则见 [团队发布](docs/runbooks/team-releases.md)、[标准发布](docs/runbooks/standard-release.md) 和 [排空协议](docs/runbooks/application-lifecycle.md)。
+
+## 开发规范
+
+- 后端只在本仓库修改；同级 App 只读参照，不合并为父级 workspace，也不运行会写 App 的 Flutter 命令。
+- 使用严格 TypeScript + ESM、项目 pin 和锁文件；真实配置、凭据、签名 URL、原始敏感日志不进入 Git。
+- 数据库关联使用普通 ID 与必要索引，**不新增物理外键或模拟外键触发器**；存在性、归属、并发和清理由 Service/Repository 在事务边界处理。
+- 测试服已上线，`0001_initial_schema.sql` 与所有已执行迁移冻结；后续新增编号，不改历史 SQL/checksum、不在启动时 DROP 或重置。
+- CI 使用独立 PG/Redis，不携带生产凭据或调用真实付费业务。分别记录单元替身、真实依赖、实际环境验收，不能混写证据。
+- 具体工作约束以 [AGENTS.md](AGENTS.md) 为准；发布准备使用 [huahuo-release Skill](.agents/skills/huahuo-release/SKILL.md)，普通开发不自动获得部署权限。
+
+## 观察与排查
+
+`/health/live` 表示进程存活，`/health/ready` 表示当前实例可接流；两者不证明真实业务全链路成功。Prometheus 使用各角色独立 `/metrics`，默认宿主端口 `9464–9467`；环境标签来自 APP_ENV，production 映射为 prod。中心采集使用实际私网地址，并覆盖每个实例。
+
+Docker JSON 日志继续交给现有 Dozzle。按角色、时间和路由找到 5xx 后，以 traceId 关联脱敏异常链和 stack；启动保留 source maps 参数以定位 TypeScript 行号。操作见 [Prometheus](docs/runbooks/prometheus.md)、[应用日志](docs/runbooks/application-logs.md)。
+
+## 目录与进一步阅读
+
+| 路径 / 手册 | 内容 |
+| --- | --- |
+| `src/apps/`、`src/entrypoints/` | 应用工厂与独立角色入口 |
+| `src/modules/`、`src/integrations/`、`src/lib/` | 领域业务、外部适配器与公共运行库 |
+| `migrations/`、`infra/` | 编号迁移和本地基础设施初始化 |
+| `admin-ui/`、`resources/` | Admin 页面及 tokenizer、节点/服务配置资源 |
+| `tests/`、`scripts/` | 测试、宿主工具和固定发布/验收脚本 |
+| [认证与 Admin](docs/runbooks/p02-identity.md) | 用户 JWT、会话、管理员初始化 |
+| [运行配置](docs/runbooks/runtime-configuration.md) | ENV/数据库边界、节点及业务参数 |
+| [文档提取](docs/runbooks/document-extraction.md) / [解析机](docs/runbooks/document-parser-machine.md) | 异步解析、稳定 UUID、云操作与协调 |
+| [知识库](docs/runbooks/milvus.md) / [文本入库](docs/runbooks/text-ingestion.md) | BM25、笔记混合检索及原文管理 |
+| [短信](docs/runbooks/sms.md) / [对象存储](docs/runbooks/user-storage-layout.md) | 供应商配置与存储布局 |
+| [发布规范](docs/runbooks/standard-release.md) / [发布冒烟](docs/runbooks/release-smoke.md) | 候选、迁移、配置、退出及验收 |
+| [进度](docs/progress.md) / [验收记录](docs/acceptance/) | 当前实现和已知未验收事项 |

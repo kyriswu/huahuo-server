@@ -1,11 +1,12 @@
 import { beforeAll, afterAll, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
 import { TaskService } from '../../src/modules/tasks/service.js';
 import { TaskWorkers, QueuePublisher } from '../../src/modules/tasks/queue.js';
 import { insertFixtureUser, insertFixtureSession, testJwtEnv } from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
 import { hash } from '../../src/modules/tasks/model.js';
 import { TaskScheduler } from '../../src/modules/tasks/scheduler.js';
@@ -13,7 +14,7 @@ import { TaskScheduler } from '../../src/modules/tasks/scheduler.js';
 const migrationUrl = process.env.TEST_DATABASE_MIGRATION_URL!;
 if (!migrationUrl || !/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1))) throw new Error('TEST_DB_REQUIRED');
 const env = { ...process.env, ...testJwtEnv, APP_ENV: 'test', LOG_LEVEL: 'silent', APP_TOKEN_SECRET: 'test-'.repeat(12),
-  APP_PUBLIC_BASE_URL: 'http://localhost:3000', SMS_PROVIDER: 'disabled', ENABLE_DEMO_TASKS: 'true',
+  APP_PUBLIC_BASE_URL: 'http://localhost:3000', ENABLE_DEMO_TASKS: 'true',
   REDIS_KEY_PREFIX: 'release-' + randomUUID(), WORKER_QUEUES: 'content', TASK_LEASE_MS: '5000' };
 const apiConfig = loadConfig('api-server', { ...env, DATABASE_URL: process.env.TEST_DATABASE_API_URL });
 const workerConfig = loadConfig('worker', { ...env, DATABASE_URL: process.env.TEST_DATABASE_WORKER_URL });
@@ -97,7 +98,7 @@ it('updates all shared-queue consumers before API handover, including late reque
   let next: TaskWorkers | undefined;
   const accept = async (api: typeof oldApi, text: string, key = randomUUID()) => {
     const response = await api.inject({ method: 'POST', url: '/api/v1/tasks/demo',
-      headers: { authorization: `Bearer ${bearer}`, 'x-idempotency-key': key }, payload: { workspaceId, text } });
+      headers: { ...fixtureScopeHeaders(bearer), 'x-idempotency-key': key }, payload: { workspaceId, text } });
     expect(response.statusCode).toBe(200);
     return response.json().data.task.taskId as string;
   };
@@ -138,7 +139,7 @@ it('updates all shared-queue consumers before API handover, including late reque
     expect(attempts).toHaveLength(ids.length);
     expect(attempts.every(attempt => attempt.attempt_no === 1 && attempt.owner === nextConfig.instanceId)).toBe(true);
     expect(await accept(nextApi, text, key)).toBe(backlog);
-    const result = await nextApi.inject({ url: `/api/v1/tasks/${backlog}/result`, headers: { authorization: `Bearer ${bearer}` } });
+    const result = await nextApi.inject({ url: `/api/v1/tasks/${backlog}/result`, headers: { ...fixtureScopeHeaders(bearer) } });
     expect(result.statusCode).toBe(200);
     expect(result.json().data).toMatchObject({ taskId: backlog, digest: hash(text), byteCount: Buffer.byteLength(text) });
     expect((await root.query('SELECT count(*)::int n FROM task_results WHERE task_id=ANY($1::uuid[])', [ids])).rows[0].n).toBe(ids.length);

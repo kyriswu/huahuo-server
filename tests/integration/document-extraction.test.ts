@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Readable} from 'node:stream';
 import {Redis} from 'ioredis';
-import {loadConfig} from '../../src/config/config.js';
+import {loadTestConfig as loadConfig} from '../sms-fixture.js';
 import {extractionConfig} from '../support/extraction-config.js';
 import {migrate} from '../../src/db/migrate.js';
 import {poolFor} from '../../src/plugins/dependencies.js';
@@ -22,11 +22,12 @@ import {storageFor} from '../../src/modules/storage/port.js';
 import {StorageService} from '../../src/modules/storage/service.js';
 import {mockKnowledgeIndex} from '../support/kb-index.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {sampleExtraction} from '../support/document-extraction.js';
 import type {ExtractionResponse,FileContext} from '../../src/integrations/document-extraction.js';
 import type {Attempt} from '../../src/modules/tasks/engine.js';
 import {RagQueryService} from '../../src/modules/rag/query-service.js';
-import {MilvusRepository} from '../../src/modules/rag/adapters/milvus.js';
+import {knowledgeIndex} from '../../src/modules/kb/profile.js';
 import {ProcessingNodes} from '../../src/modules/processing-nodes/service.js';
 import {ParserExecutionError} from '../../src/lib/document-parser-machine/index.js';
 import type {KbSnapshot} from '../../src/modules/kb/types.js';
@@ -89,8 +90,9 @@ const server=createServer((req,res)=>{void(async()=>{
  }
  res.writeHead(404);res.end('{}');
  })().catch(error=>{errors.push(error);res.writeHead(500);res.end('{}');});});
-beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw new Error('TEST_ADDRESS');baseUrl=`http://127.0.0.1:${address.port}`;});
-afterAll(async()=>{await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);redis.disconnect();await root.end();await new Promise<void>(done=>server.close(()=>done()));await rm(directory,{recursive:true,force:true});});
+let originalNodes:Record<string,unknown>[]=[];
+beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();originalNodes=(await root.query('SELECT * FROM processing_nodes')).rows;await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw new Error('TEST_ADDRESS');baseUrl=`http://127.0.0.1:${address.port}`;});
+afterAll(async()=>{await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query('DELETE FROM processing_nodes');for(const row of originalNodes)await root.query('INSERT INTO processing_nodes(id,config,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5)',[row.id,JSON.stringify(row.config),row.revision,row.created_at,row.updated_at]);redis.disconnect();await root.end();await new Promise<void>(done=>server.close(()=>done()));await rm(directory,{recursive:true,force:true});});
 
 async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=false,serviceDefaults=false){
  scenario=state;autoCallback=state==='success'||state==='failed-file';getCount=0;postCount=0;sourceReads=0;deleteCount=0;failGet=state==='get-error';hold=state==='pending'||state==='cancel-error';onGet=undefined;beforeAsyncReply=undefined;replyJobId=undefined;requests.splice(0);errors.splice(0);remoteJobs.clear();
@@ -103,12 +105,12 @@ async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=fa
  const extraction=extractionConfig(mode);if(!extraction.enabled)throw Error('TEST_CONFIG_REQUIRED');
  await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');
  const documentApi={mode:'async' as const,parameters:serviceDefaults?null:extraction.parameters,timeoutSeconds:3120,pollMs:100,maxResponseBytes:67108864};
- await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
+ await root.query('DELETE FROM processing_nodes');
  const nodeId=randomUUID(),nodePrefix=prefix+':processing-node:{'+nodeId+'}';
  await root.query('INSERT INTO processing_nodes(id,config) VALUES($1,$2)',[nodeId,JSON.stringify({documentApi,name:'loopback parser',capabilities:['document'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:baseUrl+'/node-'+prefix,healthPath:'',tokenEnv:null,eciFallback:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:true})]);
  apiConfig.rag.enabled=true;workerConfig.rag.enabled=true;
  const apiPool=poolFor(apiConfig),workerPool=poolFor(workerConfig),storage=storageFor(workerConfig),memory=mockKnowledgeIndex();
- const deps={index:(snapshot:KbSnapshot)=>realKeyword?new MilvusRepository({...apiConfig.milvus,database:snapshot.target.database,collection:snapshot.target.collection,mode:snapshot.mode}):memory,
+ const deps={index:(snapshot:KbSnapshot)=>realKeyword?knowledgeIndex(apiConfig,snapshot):memory.keyword,
   embedding:()=>{throw new Error('DOCUMENT_PATH_MUST_NOT_USE_EMBEDDING');},tokenizer:()=>{throw new Error('DOCUMENT_PATH_MUST_NOT_USE_MODEL_TOKENIZER');}};
  const pipeline=new RagIngestionJobs(workerPool,workerConfig,storage,{kb:deps});
  const engine=new TaskEngine(workerPool,120000,undefined,undefined,undefined,pipeline);
@@ -118,7 +120,7 @@ async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=fa
  const api=await buildApiServer({config:apiConfig});
  deliverCallback=async(url,id,result)=>{const response=await api.inject({method:'POST',url:new URL(url).pathname,payload:{event:'extraction.completed',event_id:randomUUID(),job_id:id,state:'completed',result}});expect(response.statusCode,response.body).toBe(200);};
  const start=async()=>{
-  const response=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers:{authorization:'Bearer '+bearer,'x-idempotency-key':randomUUID()},payload:{ossUrl:baseUrl+'/source.pdf',fileName:'source.pdf',mimeType:'application/pdf'}});
+  const response=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers:{...fixtureScopeHeaders(bearer),'x-idempotency-key':randomUUID()},payload:{ossUrl:baseUrl+'/source.pdf',fileName:'source.pdf',mimeType:'application/pdf'}});
   expect(response.statusCode,response.body).toBe(200);return response.json().data as {jobId:string;documentVersionId:string};
  };
  const attempt=async(id:string)=>vi.waitFor(async()=>{const a=await engine.claim(id,randomUUID());expect(a,a?undefined:JSON.stringify((await root.query('SELECT state,attempt_no,max_attempts,available_at,clock_timestamp() AS clock,external_state FROM tasks WHERE id=$1',[id])).rows)).not.toBeNull();return a!;},{interval:20,timeout:3000});
@@ -148,11 +150,11 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    const read=vi.fn(async()=>Readable.from([Buffer.from('fake-image')]));
    await assetRepository.asset(s.scope,created.jobId,assets[0].id,{read});expect(read).toHaveBeenCalledExactlyOnceWith(assets[0].id);
    expect(Number((await root.query('SELECT count(*) FROM kb_document_keyword_builds WHERE source_id=$1 AND published',[created.documentVersionId])).rows[0].count)).toBe(1);
-   const response=await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{authorization:'Bearer '+s.bearer}});
+   const response=await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(s.bearer)}});
    expect(response.statusCode,response.body).toBe(200);expect(response.json()).toEqual(lastResponse);expect(response.body).not.toContain('data_base64');
    const other=await insertFixtureUser(root),otherToken=await insertFixtureSession(root,other,randomUUID());
-   expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{authorization:'Bearer '+otherToken}})).statusCode).toBe(404);
-   await s.repository.action(s.scope,created.jobId,'delete');expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{authorization:'Bearer '+s.bearer}})).statusCode).toBe(404);
+   expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(otherToken)}})).statusCode).toBe(404);
+   await s.repository.action(s.scope,created.jobId,'delete');expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(s.bearer)}})).statusCode).toBe(404);
    expect(errors).toHaveLength(0);
   }finally{await s.close();}
  });
@@ -175,7 +177,7 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    const created=await s.start();expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect((await s.task(created.jobId)).state).toBe('waiting_external');expect(getCount).toBe(0);
    await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
    expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();expect((await s.task(created.jobId)).state).toBe('reconciling');
-   await root.query(`UPDATE processing_nodes SET config=jsonb_set(jsonb_set(config,'{documentApi,timeoutSeconds}','4000'),'{enabled}','false'),revision=revision+1 WHERE id=$1`,[s.nodeId]);
+   await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{documentApi,timeoutSeconds}','4000'),revision=revision+1 WHERE id=$1`,[s.nodeId]);
    await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect(postCount).toBe(1);expect(sourceReads).toBe(1);expect((await s.task(created.jobId)).state).toBe('succeeded');
   }finally{await s.close();}
@@ -273,7 +275,7 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    expect(decodeDocumentReference((await s.task(created.jobId)).external_reference)).toMatchObject({phase:'job',jobId});expect(postCount).toBe(1);
   }finally{await s.close();}
  });
- it('recovers pre-submit admission on its original disabled node without submitting twice',async()=>{
+ it('recovers pre-submit admission on its original node without submitting twice',async()=>{
   const s=await setup('async');
   const crash=vi.spyOn(ProcessingNodes.prototype,'withNode').mockImplementationOnce(async function(this:ProcessingNodes,capability,input){
    const node=await this.bind(input.requestId,capability),runtime=await this.runtime(node);
@@ -282,7 +284,6 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
   try{
    const created=await s.start();expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();expect(postCount).toBe(0);
    const before=await s.task(created.jobId);expect(before.external_reference).toMatch(/^xberg-bound:/);expect(before.external_state).toBe('none');
-   await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
    await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect(postCount).toBe(1);
    const assignments=(await root.query('SELECT request_id,settled FROM processing_node_assignments WHERE request_id LIKE $1',[created.jobId+':%'])).rows;

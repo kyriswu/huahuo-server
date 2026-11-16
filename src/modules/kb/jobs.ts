@@ -4,11 +4,13 @@ import type { Attempt } from '../tasks/engine.js';
 import { DomainError,transaction } from '../identity/store.js';
 import { indexChunks, type BoundVectorStoreAdapter } from '../../lib/rag-indexing/index.js';
 import type { EmbeddingAdapter } from '../../lib/rag-indexing/index.js';
-import { indexKeywordChunks } from './keyword-indexing.js';
+import { indexKeywordChunks } from '../../lib/search-index/keyword-indexing.js';
+import { requireIndexKind } from '../../lib/search-index/factory.js';
+import type { HybridIndex, KeywordIndex } from '../../lib/search-index/types.js';
 import { splitKnowledgeContent,digest,type KbDraft } from './split.js';
 import { kbTokenizer,kbEmbedding,knowledgeIndex,type IndexFactory } from './profile.js';
 import { createBuild,sourceContent,sourceState,modeForSource } from './repository.js';
-import { tablesFor,type KbBuild,type KbSource,type KbSnapshot,type KbSourceType,type HybridIndex } from './types.js';
+import { tablesFor,type KbBuild,type KbSource,type KbSnapshot,type KbSourceType } from './types.js';
 import type { TokenCounter } from '../../lib/document-processing/types.js';
 export class KbJobError extends Error{constructor(readonly code:string,readonly retryable=true){super(code);}}
 export interface KbDependencies {index?:IndexFactory;embedding?:(snapshot:KbSnapshot)=>EmbeddingAdapter;tokenizer?:(snapshot:KbSnapshot)=>Promise<TokenCounter>;}
@@ -16,7 +18,7 @@ interface StoredChunk{ordinal:number;point_id:string;source_start:number;source_
 export class KnowledgeIndexJobs {
  constructor(readonly pool:pg.Pool,readonly config:AppConfig,readonly dependencies:KbDependencies={}){}
  async close():Promise<void>{}
- private index(snapshot:KbSnapshot):HybridIndex{return this.dependencies.index?.(snapshot)??knowledgeIndex(this.config,snapshot);}
+ private index(snapshot:KbSnapshot):HybridIndex|KeywordIndex{return this.dependencies.index?.(snapshot)??knowledgeIndex(this.config,snapshot);}
  private async lease(tx:pg.PoolClient|pg.Client,attempt:Attempt){
   const r=await tx.query("SELECT id FROM tasks WHERE id=$1 AND workspace_id=$2 AND user_id=$3 AND state='running' AND lease_owner=$4 AND version=$5 AND attempt_no=$6 AND lease_until>clock_timestamp() FOR UPDATE",[attempt.task.id,attempt.task.workspace_id,attempt.task.user_id,attempt.owner,attempt.version,attempt.attempt]);
   if(!r.rowCount)throw new KbJobError('KB_LEASE_LOST');
@@ -66,16 +68,18 @@ export class KnowledgeIndexJobs {
      if(mode==='note-hybrid'&&rows.length&&!drafts)drafts=(await splitKnowledgeContent(source.content,mode,{format:source.format,tokenizer:tokenizer!})).chunks;
      await transaction(this.pool,check);
      const writes=new Set<Promise<void>>();
-     const write=(points:import('./types.js').IndexPoint[],options?:{signal?:AbortSignal})=>{const p=index.upsert(points,options);writes.add(p);void p.finally(()=>writes.delete(p)).catch(()=>{});return p;};
+     const write=(p:Promise<void>)=>{writes.add(p);void p.finally(()=>writes.delete(p)).catch(()=>{});return p;};
      let items:import('../../lib/rag-indexing/index.js').IndexItemResult[];
      try{
       if(mode==='note-hybrid'){
+       const hybrid=requireIndexKind(index,'hybrid');
        const records=rows.map(row=>{const draft=drafts!.find(c=>c.ordinal===row.ordinal)!;if(draft.contentHash!==row.content_hash)throw new KbJobError('KB_PLAN_CHANGED',false);return {id:row.point_id,embeddingText:draft.embeddingText,metadata:{content:draft.content}};});
-       const store:BoundVectorStoreAdapter={target:build.snapshot.target,upsert:async(vs,o)=>write(vs.map(v=>({id:v.id,sourceId:source.id,sourceType:source.type,userId:source.userId,workspaceId:source.workspaceId,content:String(v.metadata.content),embedding:v.embedding})),o),delete:async selector=>{if(!selector.ids)throw new Error('KB_POINT_IDS_REQUIRED');await index.deletePoints(selector.ids);}};
-       items=(await indexChunks(records,{embeddingAdapter:embedder!,tokenizer:tokenizer!,vectorStoreAdapter:store,options:{...build.snapshot.indexing,maxEmbeddingTokens:8192}})).items;
+       const store:BoundVectorStoreAdapter={target:build.snapshot.target,upsert:async(vs,o)=>write(hybrid.upsert(vs.map(v=>({id:v.id,sourceId:source.id,sourceType:source.type,userId:source.userId,workspaceId:source.workspaceId,content:String(v.metadata.content),embedding:v.embedding})),o)),delete:async selector=>{if(!selector.ids)throw new Error('KB_POINT_IDS_REQUIRED');await index.deletePoints(selector.ids);}};
+       items=(await indexChunks(records,{embeddingAdapter:embedder!,tokenizer:tokenizer!,vectorStoreAdapter:store,options:{...build.snapshot.indexing,maxEmbeddingTokens:tokenizer!.maxInputTokens}})).items;
       }else{
+       const keyword=requireIndexKind(index,'keyword');
        const points=rows.map(row=>({id:row.point_id,sourceId:source.id,sourceType:source.type,userId:source.userId,workspaceId:source.workspaceId,content:source.content.slice(row.source_start,row.source_end)}));
-       items=await indexKeywordChunks(points,{ensureReady:()=>index.ensureReady(),upsert:write,deletePoints:ids=>index.deletePoints(ids),searchKeyword:(q,o)=>index.searchKeyword(q,o),close:()=>index.close()},build.snapshot.indexing);
+       items=await indexKeywordChunks(points,{kind:'keyword',ensureReady:()=>keyword.ensureReady(),upsert:(rows,o)=>write(keyword.upsert(rows,o)),deletePoints:(ids,o)=>keyword.deletePoints(ids,o),searchKeyword:(q,o)=>keyword.searchKeyword(q,o),close:()=>keyword.close()},{...build.snapshot.indexing,maxContentChars:build.snapshot.rules.maxChars});
       }
      }finally{await Promise.allSettled([...writes]);}
      await transaction(this.pool,async tx=>{await check(tx);await tx.query(`UPDATE ${chunks} SET index_status='ready' WHERE build_id=$1 AND point_id=ANY($2::text[])`,[id,items.filter(r=>r.status==='indexed').map(r=>r.id)]);});

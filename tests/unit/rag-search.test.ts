@@ -30,16 +30,28 @@ describe('RAG query ranking helpers', () => {
     expect(reranked[0]?.chunkKey).toBe('c1');
   });
 
-  it('maps an OpenAI-compatible rerank response back to original candidates', async () => {
+  it('maps a native DashScope rerank response back to original candidates', async () => {
     const candidates = [row('c0'), row('c1')];
     const reranker = new HttpRerankAdapter({
       baseUrl: 'https://rerank.test/v1',
       model: 'rerank-test',
-      fetchImpl: async () => new Response(JSON.stringify({ results: [{ index: 1, relevance_score: 0.95 }, { index: 0, relevance_score: 0.2 }] }), { status: 200 }),
+      fetchImpl: async () => new Response(JSON.stringify({ output: { results: [{ index: 1, relevance_score: 0.95 }, { index: 0, relevance_score: 0.2 }] } }), { status: 200 }),
     });
     const result = await reranker.rerank('question', candidates);
     expect(result.map((item) => item.chunkKey)).toEqual(['c1', 'c0']);
     expect(result[0]?.rerankScore).toBe(0.95);
+  });
+
+  it('sends native input/parameters and rejects duplicate or malformed result indexes',async()=>{
+    const fetchImpl=vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify({output:{results:[{index:1,relevance_score:0.9},{index:0,relevance_score:0.1}]}})));
+    const adapter=new HttpRerankAdapter({baseUrl:'https://rerank.test/api/v1',apiKey:'fixture-key',model:'qwen3.7-text-rerank',fetchImpl});
+    await adapter.rerank('question',[row('c0'),row('c1')]);
+    expect(fetchImpl.mock.calls[0]![0]).toBe('https://rerank.test/api/v1/services/rerank/text-rerank/text-rerank');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]!.body))).toEqual({model:'qwen3.7-text-rerank',input:{query:'question',documents:['content c0','content c1']},parameters:{top_n:2}});
+    for(const results of [[{index:0,relevance_score:0.9},{index:0,relevance_score:0.8}],[{index:0,relevance_score:1.1},{index:1,relevance_score:0.8}],[{index:'0',relevance_score:0.9},{index:1,relevance_score:0.8}]]){
+      fetchImpl.mockResolvedValueOnce(new Response(JSON.stringify({output:{results}})));
+      await expect(adapter.rerank('question',[row('c0'),row('c1')])).rejects.toMatchObject({code:'RERANK_RESPONSE_INVALID'});
+    }
   });
 
   it('cancels a slow HTTP reranker at the Note deadline and retains Milvus order', async () => {

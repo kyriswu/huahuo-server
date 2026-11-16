@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261115-native-flow",
-  "baseRevision": "5b844ba89e28032d4d47435d8727f9a4a0b143bc",
+  "id": "20261117-sms-live-only",
+  "baseRevision": "b729842c687251e7bb5620d8ac506a50f7412353",
   "services": [
     "api-server",
     "admin",
@@ -10,18 +10,112 @@
   ],
   "database": {
     "migrations": [],
-    "verifySql": "scripts/release/changes/20261115-native-flow/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261117-sms-live-only/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": "原生自动触发发布与 main 准备升级；本次以空迁移在既有测试机真实验证自动链路，不接正式生产。"
+      "reason": "No SQL or data changes. All environments use Aliyun SMS. Existing provider_mode remains for history; simulated receipts and OTPs are rejected without rewriting historical rows."
     }
   },
   "configuration": {
-    "mode": "reuse",
-    "changes": [],
+    "mode": "candidate",
+    "changes": [
+      {
+        "key": "SMS_PROVIDER",
+        "operation": "remove",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler",
+          "migrate"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "SHOW_TEST_OTP",
+        "operation": "remove",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler",
+          "migrate"
+        ],
+        "required": false,
+        "hasDefault": false
+      },
+      {
+        "key": "SMS_ALIYUN_SIGN_NAME",
+        "operation": "change",
+        "roles": [
+          "api-server"
+        ],
+        "required": true,
+        "hasDefault": false
+      },
+      {
+        "key": "SMS_ALIYUN_TEMPLATE_CODE",
+        "operation": "change",
+        "roles": [
+          "api-server"
+        ],
+        "required": true,
+        "hasDefault": false
+      },
+      {
+        "key": "SMS_ALIYUN_REGION_ID",
+        "operation": "change",
+        "roles": [
+          "api-server"
+        ],
+        "required": true,
+        "hasDefault": true
+      },
+      {
+        "key": "SMS_ALIYUN_CODE_PARAM",
+        "operation": "change",
+        "roles": [
+          "api-server"
+        ],
+        "required": true,
+        "hasDefault": true
+      },
+      {
+        "key": "SMS_ALIYUN_CONNECT_TIMEOUT_MS",
+        "operation": "change",
+        "roles": [
+          "api-server"
+        ],
+        "required": true,
+        "hasDefault": true
+      },
+      {
+        "key": "SMS_ALIYUN_READ_TIMEOUT_MS",
+        "operation": "change",
+        "roles": [
+          "api-server"
+        ],
+        "required": true,
+        "hasDefault": true
+      }
+    ],
     "reviewedFiles": [
-      "compose.yaml"
-    ]
+      "compose.yaml",
+      ".env.example",
+      ".env.compose.local.example",
+      ".env.compose.cloud.example",
+      ".env.host.example",
+      "specs/backend-plan/examples/.env.compose.local.example",
+      "specs/backend-plan/examples/.env.compose.cloud.example",
+      "src/config/config.ts",
+      "src/config/sms.ts",
+      "src/integrations/sms.ts",
+      "src/modules/identity/service.ts",
+      "src/modules/identity/schemas.ts",
+      "src/tools/sms.ts"
+    ],
+    "verifyFile": "scripts/release/changes/20261117-sms-live-only/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {

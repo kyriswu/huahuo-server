@@ -1,4 +1,5 @@
 import { DataType, FunctionType, type FieldType, type FunctionObject } from '@zilliz/milvus2-sdk-node';
+import type { IndexKind } from '../../lib/search-index/types.js';
 
 export type ChunkLanguage = 'zh' | 'en' | 'mixed' | 'unknown';
 
@@ -55,7 +56,7 @@ export const SPARSE_INDEX_NAME = 'huahuo_sparse_bm25';
 
 export const MILVUS_OUTPUT_FIELDS = ['id','source_id','source_type','text','index_status'];
 
-export function buildMilvusSchema(mode: 'note-hybrid'|'document-keyword'): FieldType[] {
+export function buildMilvusSchema(kind: IndexKind, dimensions=1024): FieldType[] {
   return [
     {name:'id',data_type:DataType.VarChar,is_primary_key:true,autoID:false,max_length:256},
     {name:'source_id',data_type:DataType.VarChar,max_length:256},
@@ -65,7 +66,7 @@ export function buildMilvusSchema(mode: 'note-hybrid'|'document-keyword'): Field
     {name:'text',data_type:DataType.VarChar,max_length:65535,enable_analyzer:true,multi_analyzer_params:structuredClone(MULTI_ANALYZER_PARAMS)},
     {name:'language',data_type:DataType.VarChar,max_length:16},
     {name:'index_status',data_type:DataType.VarChar,max_length:16},
-    {name:'sparse_vector',data_type:DataType.SparseFloatVector,is_function_output:true},
-    ...(mode==='note-hybrid'?[{name:'dense_vector',data_type:DataType.FloatVector,dim:1024}]:[]),
+    ...(kind!=='vector'?[{name:'sparse_vector',data_type:DataType.SparseFloatVector,is_function_output:true}]:[]),
+    ...(kind!=='keyword'?[{name:'dense_vector',data_type:DataType.Float16Vector,dim:dimensions}]:[]),
   ];
 }

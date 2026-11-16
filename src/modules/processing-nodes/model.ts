@@ -9,7 +9,7 @@ export type Capability='document'|'audio';
 export interface ProcessingNode {
  id:string;name:string;capabilities:Capability[];resourceClass:'cpu'|'gpu';mode:'ecs'|'always-on';
  regionId:string|null;instanceId:string|null;privateIp:string|null;baseUrl:string;healthPath:string;tokenEnv:string|null;
- concurrency:number;idleSeconds:number;startupSeconds:number;queueSeconds:number;enabled:boolean;revision:number;
+ concurrency:number;idleSeconds:number;startupSeconds:number;queueSeconds:number;revision:number;
  eciFallback?:EciFallback|null;
  documentApi?:DocumentApiSettings;
 }
@@ -43,6 +43,7 @@ export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig,r
  }catch(error){if(error instanceof DomainError)throw error;throw new DomainError(400,'PROCESSING_NODE_INVALID');}
 }
 export function nodeFromRow(row:Record<string,unknown>):ProcessingNode{
- const node={...row.config as Omit<ProcessingNode,'id'|'revision'>,id:row.id as string,revision:Number(row.revision)};
+ const config={...row.config as Record<string,unknown>};delete config.enabled;
+ const node={...config,id:row.id as string,revision:Number(row.revision)} as ProcessingNode;
  return {...node,...(node.capabilities.includes('document')?{documentApi:node.documentApi??defaultDocumentApi()}:{} )};
 }

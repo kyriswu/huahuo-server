@@ -7,7 +7,7 @@ import { createSmsProvider, type SmsProvider } from '../../integrations/sms.js';
 import { SmsProviderError } from '../../integrations/aliyun-sms.js';
 import { constantEqual, mac, maskedPhone, normalizePhone, otpCode, token } from './crypto.js';
 import { loadEd25519Keys, publicJwks, signAccessToken, verifyAccessToken, type JwtSettings } from './jwt.js';
-import { DomainError, transaction, lock, audit, type Scope, rateLimit } from './store.js';
+import { DomainError, transaction, lock, audit, assertScope, type Scope, rateLimit } from './store.js';
 export type ClientType='app'|'web';
 export interface LoginInput { phone:string; smsRequestId:string; smsCode:string; clientType:ClientType; clientId:string; agreementAccepted:boolean; agreementVersion:string; privacyVersion:string; clientVersion:string; timeZone?:string; }
 export interface TokenPair { tokenType:'Bearer'; accessToken:string; refreshToken:string; accessTokenExpiresAt:string; expiresIn:number; rotated:boolean; }
@@ -23,23 +23,22 @@ export class IdentityService {
     this.jwtSettings={issuer:config.jwt.issuer,audience:config.jwt.audience,serverAudience:config.jwt.serverAudience,keyId:config.jwt.keyId,accessTtlSeconds:config.jwt.accessTtlSeconds,refreshTtlSeconds:config.jwt.refreshTtlSeconds,privateKeyPem:config.jwt.privateKeyPem,publicKeyPem:config.jwt.publicKeyPem,previousPublicKeyPem:config.jwt.previousPublicKeyPem,previousKeyId:config.jwt.previousKeyId};
     this.jwtKeys=loadEd25519Keys(this.jwtSettings);
     this.sms=options.sms ?? createSmsProvider(config);
-    if (config.appEnv === 'production' && this.sms.mode === 'mock') throw new Error('PRODUCTION_MOCK_FORBIDDEN');
   }
   async sendCode(input:{phone:string;purpose:'sign_in'}, ip:string, key?:string) {
     const phone=normalizePhone(input.phone), subjectHash=mac(this.secret,phone);
     if(input.purpose!=='sign_in')throw new DomainError(400,'SMS_PURPOSE_INVALID');
-    if(this.sms.mode==='disabled')throw new DomainError(503,'SMS_NOT_CONFIGURED');
     const code=otpCode(), id=randomUUID(), hash=mac(this.secret,canonical({phone,purpose:input.purpose}));
-    const data={smsRequestId:id,cooldownSeconds:60,providerMode:this.sms.mode,...(this.config.showTestOtp&&this.sms.mode==='mock'?{testCode:code}:{})};
+    const data={smsRequestId:id,cooldownSeconds:60,providerMode:'live' as const};
     const existing=await transaction(this.pool,async tx=>{
       await lock(tx,'phone:'+subjectHash);
       if(key){
-        const r=await tx.query<{request_hash:string;response_cipher:string;delivery_status:string;valid:boolean}>("SELECT request_hash,response_cipher,delivery_status,expires_at>now() valid FROM otp_requests WHERE provider='phone' AND subject_hash=$1 AND request_key=$2",[subjectHash,key]);
+        const r=await tx.query<{request_hash:string;response_cipher:string;delivery_status:string;provider_mode:string;valid:boolean}>("SELECT request_hash,response_cipher,delivery_status,provider_mode,expires_at>now() valid FROM otp_requests WHERE provider='phone' AND subject_hash=$1 AND request_key=$2",[subjectHash,key]);
         if(r.rows[0]){
           if(r.rows[0].request_hash!==hash)throw new DomainError(409,'IDEMPOTENCY_CONFLICT');
           if(!r.rows[0].valid)throw new DomainError(409,'IDEMPOTENCY_KEY_EXPIRED');
-          if(r.rows[0].delivery_status!=='sent')throw new DomainError(409,'SMS_DELIVERY_NOT_CONFIRMED');
-          return unseal<typeof data>(r.rows[0].response_cipher,this.secret);
+          if(r.rows[0].delivery_status!=='sent'||r.rows[0].provider_mode!=='live')throw new DomainError(409,'SMS_DELIVERY_NOT_CONFIRMED');
+          const receipt=unseal<typeof data>(r.rows[0].response_cipher,this.secret);
+          return {smsRequestId:receipt.smsRequestId,cooldownSeconds:receipt.cooldownSeconds,providerMode:'live' as const};
         }
       }
       await rateLimit(tx,'sms-ip:'+mac(this.secret,ip),20,3600);
@@ -47,7 +46,7 @@ export class IdentityService {
       const recent=await tx.query("SELECT id FROM otp_requests WHERE provider='phone' AND subject_hash=$1 AND created_at>now()-interval '60 seconds' LIMIT 1",[subjectHash]);
       if(recent.rowCount)throw new DomainError(429,'SMS_RATE_LIMITED',true);
       await tx.query(`INSERT INTO otp_requests(id,provider,subject_hash,purpose,code_hash,delivery_status,provider_mode,request_key,request_hash,response_cipher,expires_at)
-       VALUES($1,'phone',$2,'sign_in',$3,'pending',$4,$5,$6,$7,now()+interval '5 minutes')`,[id,subjectHash,mac(this.secret,`${id}:${code}`),this.sms.mode,key??null,hash,seal(data,this.secret)]);
+       VALUES($1,'phone',$2,'sign_in',$3,'pending',$4,$5,$6,$7,now()+interval '5 minutes')`,[id,subjectHash,mac(this.secret,`${id}:${code}`),'live',key??null,hash,seal(data,this.secret)]);
       return null;
     });
     if(existing)return existing;
@@ -71,9 +70,9 @@ export class IdentityService {
     return transaction(this.pool,async tx=>{
       await lock(tx,'phone:'+subjectHash);
       const result=await idempotent(tx,this.secret,'login:'+subjectHash,'auth.sign-in',key,mac(this.secret,canonical(input)),async()=>{
-        const r=await tx.query<{code_hash:string;attempts:number;valid:boolean;consumed_at:Date|null;delivery_status:string}>("SELECT code_hash,attempts,expires_at>now() valid,consumed_at,delivery_status FROM otp_requests WHERE id=$1 AND provider='phone' AND subject_hash=$2 AND purpose='sign_in' FOR UPDATE",[input.smsRequestId,subjectHash]);
+        const r=await tx.query<{code_hash:string;attempts:number;valid:boolean;consumed_at:Date|null;delivery_status:string;provider_mode:string}>("SELECT code_hash,attempts,expires_at>now() valid,consumed_at,delivery_status,provider_mode FROM otp_requests WHERE id=$1 AND provider='phone' AND subject_hash=$2 AND purpose='sign_in' FOR UPDATE",[input.smsRequestId,subjectHash]);
         const otp=r.rows[0];
-        if(!otp||!otp.valid||otp.consumed_at||otp.delivery_status!=='sent')throw new DomainError(401,'SMS_CODE_EXPIRED');
+        if(!otp||!otp.valid||otp.consumed_at||otp.delivery_status!=='sent'||otp.provider_mode!=='live')throw new DomainError(401,'SMS_CODE_EXPIRED');
         if(otp.attempts>=5)throw new DomainError(429,'SMS_CODE_ATTEMPTS_EXCEEDED');
         if(!constantEqual(otp.code_hash,mac(this.secret,`${input.smsRequestId}:${input.smsCode}`))){
           await tx.query('UPDATE otp_requests SET attempts=attempts+1 WHERE id=$1',[input.smsRequestId]);
@@ -139,6 +138,10 @@ export class IdentityService {
   }
   async logout(scope:Scope,all=false){
     await transaction(this.pool,async tx=>{
+      // Serialize account-wide revocation before taking session share locks;
+      // concurrent logout calls must not deadlock while upgrading those locks.
+      await lock(tx,`auth.logout:${scope.userId}`);
+      await assertScope(tx,scope);
       await tx.query(`UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 ${all?'':'AND id=$2'}`,all?[scope.userId]:[scope.userId,scope.sessionId]);
       await audit(tx,scope,all?'auth.logout_all':'auth.logout',scope.sessionId);
     });return {revoked:true,scope:all?'all':'current'};

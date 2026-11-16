@@ -2,12 +2,16 @@ import {describe,it,expect,vi} from 'vitest';
 import {config} from '../helpers.js';
 import {defaults,validateValues,validateStoredValues,applyValues,rejectSecrets,RUNTIME_CONFIGURATION_SCHEMA_KEY,RUNTIME_CONFIGURATION_SCHEMA_VERSION} from '../../src/modules/runtime-settings/registry.js';
 import {extractionConfig} from '../support/extraction-config.js';
-import {nodeConfig,nodeDocumentConfig,type ProcessingNode} from '../../src/modules/processing-nodes/model.js';
+import {nodeConfig,nodeDocumentConfig,nodeFromRow,type ProcessingNode} from '../../src/modules/processing-nodes/model.js';
 import {loadProcessingNodesConfig} from '../../src/config/processing-nodes.js';
 import {kbSnapshot,kbEmbedding} from '../../src/modules/kb/profile.js';
 
-const node:ProcessingNode={id:'11111111-1111-4111-8111-111111111111',name:'GPU node',capabilities:['document'],resourceClass:'gpu',mode:'ecs',regionId:'cn-beijing',instanceId:'i-unit12345678',privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:false,revision:1};
+const node:ProcessingNode={id:'11111111-1111-4111-8111-111111111111',name:'GPU node',capabilities:['document'],resourceClass:'gpu',mode:'ecs',regionId:'cn-beijing',instanceId:'i-unit12345678',privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,revision:1};
 describe('typed runtime registry (no database/cloud)',()=>{
+ it('omits the retired admission field from stored nodes without mutating the stored configuration',()=>{
+  const {id,revision,...config}=node;const stored={...config,enabled:false};
+  const result=nodeFromRow({id,revision,config:stored});expect(result).not.toHaveProperty('enabled');expect(result.id).toBe(id);expect(stored.enabled).toBe(false);
+ });
  it('uses service defaults for deployed ECS and keeps overrides local to each node',()=>{
   const cpu={...node,resourceClass:'cpu' as const},defaults=nodeDocumentConfig(cpu);
   expect(defaults).toMatchObject({parameters:null,mode:'async',timeoutMs:3120000});

@@ -12,7 +12,7 @@ export const settings:SettingDefinition[]=[
  {key:'rag.hybridCandidates',category:'rag',label:'混合检索候选数',description:'融合后送入权限复核与可选重排的候选预算。',type:'number',min:1,max:200,default:30,effect:'后续查询'},
  {key:'rag.rrfK',category:'rag',label:'RRF 融合平滑参数',description:'控制多路排序融合对名次差异的敏感程度；不是返回条数。',type:'number',min:1,max:10000,default:60,effect:'后续混合查询'},
  {key:'rag.searchConcurrency',category:'rag',label:'检索客户端并发上限',description:'每个缓存检索客户端的并发预算，不是集群总额度；旧请求完成后释放旧客户端。',type:'number',min:1,max:50,default:50,effect:'后续查询客户端，不中断执行中查询'},
- {key:'rag.embeddingBatchSize',category:'rag',label:'Embedding 索引批次',description:'单批提交的切片数量，资料关键词模式不调用 Embedding。',type:'number',min:1,max:256,default:32,effect:'新索引构建快照'},
+ {key:'rag.embeddingBatchSize',category:'rag',label:'Embedding 索引批次',description:'Note 单次百炼请求最多20条，构建快照会将较大配置限制为20；资料关键词模式不调用 Embedding。',type:'number',min:1,max:256,default:20,effect:'新索引构建快照'},
  {key:'rag.indexConcurrency',category:'rag',label:'索引批次并发',description:'单次索引构建中的批次并发，独立于 Worker 队列并发。',type:'number',min:1,max:16,default:2,effect:'新索引构建快照'},
  {key:'rag.embeddingTimeoutMs',category:'rag',label:'Embedding 超时（毫秒）',description:'索引构建和查询向量请求的执行时限。',type:'number',min:1000,max:600000,default:30000,effect:'新索引构建快照及后续查询'},
  {key:'rag.embeddingMaxRetries',category:'rag',label:'Embedding 索引重试次数',description:'单批索引的额外尝试上限；查询保持现有不自动重试约定。',type:'number',min:0,max:5,default:2,effect:'新索引构建快照'},

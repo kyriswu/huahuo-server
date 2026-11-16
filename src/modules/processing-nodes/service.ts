@@ -10,7 +10,7 @@ import {assertSuperadmin,type AdminScope} from '../admin/service.js';
 type Runtime=ReturnType<typeof createDocumentParserMachine>;
 type Factory=(config:ReturnType<typeof nodeConfig>)=>Runtime;
 export type NodeObservation=MachineObservation&{checkedAt:string};
-const routing=(node:ProcessingNode)=>canonical({...node,name:'',enabled:false,revision:0,capabilities:[...node.capabilities].sort(),eciFallback:node.eciFallback??null});
+const routing=(node:ProcessingNode)=>{const value={...node} as ProcessingNode&{enabled?:boolean};delete value.enabled;return canonical({...value,name:'',revision:0,capabilities:[...node.capabilities].sort(),eciFallback:node.eciFallback??null});};
 const lifecycleRouting=(node:ProcessingNode)=>routing({...node,documentApi:defaultDocumentApi()});
 export class ProcessingNodes {
  private runtimes=new Map<string,{key:string;runtime:Runtime;connected:Promise<void>}>();
@@ -70,7 +70,7 @@ export class ProcessingNodes {
     if(!node.capabilities.includes(capability))throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
    }else{
    const row=(await tx.query(`SELECT n.* FROM processing_nodes n
-    WHERE n.config @> jsonb_build_object('enabled',true,'capabilities',jsonb_build_array($1::text))
+    WHERE n.config @> jsonb_build_object('capabilities',jsonb_build_array($1::text))
     ORDER BY (SELECT count(*)::float/(n.config->>'concurrency')::integer FROM processing_node_assignments a WHERE a.node_id=n.id AND NOT a.settled),n.created_at,n.id
     LIMIT 1`,[capability])).rows[0];
    if(!row)throw new DomainError(503,'PROCESSING_NODE_UNAVAILABLE');
@@ -156,7 +156,7 @@ export class ProcessingNodes {
     }
     const revision=expectedRevision+1;
     const config=Object.fromEntries(Object.entries(input).filter(([key])=>key!=='id'&&key!=='revision'));
-    await tx.query('UPDATE processing_nodes SET config=$2,revision=$3,updated_at=now() WHERE id=$1',[input.id,JSON.stringify(config),revision]);
+    await tx.query('UPDATE processing_nodes SET config=$2,revision=$3,updated_at=now() WHERE id=$1',[input.id,JSON.stringify({...config,enabled:true}),revision]);
     await tx.query('INSERT INTO admin_audit_events(id,admin_id,action,target_id,reason,trace_id) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),scope.adminId,'processing-node.update',input.id,JSON.stringify({before:old,after:{...input,revision}}),traceId]);
     return {...input,revision};
    }catch(error){if((error as {code:string}).code==='23505')throw new DomainError(409,'PROCESSING_NODE_IDENTITY_EXISTS');throw error;}

@@ -1,7 +1,7 @@
 import {afterAll,beforeAll,describe,it,expect,vi} from 'vitest';
 import {randomUUID,createHash} from 'node:crypto';
 import {Redis} from 'ioredis';
-import {loadConfig} from '../../src/config/config.js';
+import {loadTestConfig as loadConfig} from '../sms-fixture.js';
 import {poolFor} from '../../src/plugins/dependencies.js';
 import {migrate} from '../../src/db/migrate.js';
 import {buildAdminServer} from '../../src/apps/admin.js';
@@ -17,6 +17,7 @@ import {ProcessingNodeJobs} from '../../src/modules/processing-nodes/jobs.js';
 import {TaskEngine} from '../../src/modules/tasks/engine.js';
 import {AliyunEcsPower,type EcsInstance,type EcsPowerPort} from '../../src/integrations/ecs-power.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
+import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {BillingService} from '../../src/modules/billing/service.js';
 import {transaction} from '../../src/modules/identity/store.js';
 import {AdminDocumentTrials} from '../../src/modules/admin/document-trials.js';
@@ -25,6 +26,7 @@ import {sampleExtraction} from '../support/document-extraction.js';
 import type {FileContext} from '../../src/integrations/document-extraction.js';
 import {DocumentCallbacks} from '../../src/modules/ingestion/document-callbacks.js';
 import {defaultDocumentApi} from '../../src/config/document-extraction.js';
+import {RagQueryService} from '../../src/modules/rag/query-service.js';
 
 const database=process.env.TEST_DATABASE_MIGRATION_URL,redisUrl=process.env.REDIS_QUEUE_URL;
 if(!database||!/^huahuo_test_/.test(new URL(database).pathname.slice(1))||!redisUrl||new URL(redisUrl).hostname!=='127.0.0.1'||Number(new URL(redisUrl).pathname.slice(1))<10)throw Error('ISOLATED_DEPENDENCIES_REQUIRED');
@@ -37,7 +39,7 @@ const nodes=new ProcessingNodes(workerPool,workerConfig);
 const app=await buildAdminServer({config:adminConfig,dependencies:{pool:adminPool,check:async()=>({postgres:true,schema:true,redisCache:true,redisQueue:true}),close:async()=>undefined}});
 let superCookie='',csrf='',operatorCookie='',operatorCsrf='';
 const adminIds:string[]=[];
-const baseNode=(extra:Partial<ProcessingNode>={}):ProcessingNode=>({id:randomUUID(),name:'Test CPU node',capabilities:['document','audio'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:'http://127.0.0.1:18000/'+randomUUID(),healthPath:'',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:10,queueSeconds:10,enabled:true,revision:1,...extra});
+const baseNode=(extra:Partial<ProcessingNode>={}):ProcessingNode=>({id:randomUUID(),name:'Test CPU node',capabilities:['document','audio'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:'http://127.0.0.1:18000/'+randomUUID(),healthPath:'',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:10,queueSeconds:10,revision:1,...extra});
 const request=()=>({requestId:randomUUID(),fingerprint:createHash('sha256').update('document/config').digest('hex')});
 const headers=()=>({cookie:superCookie,origin:env.ADMIN_PUBLIC_BASE_URL,'x-csrf-token':csrf});
 async function get(){const r=await app.inject({url:'/admin/api/v1/configuration',headers:{cookie:superCookie}});expect(r.statusCode,r.body).toBe(200);return r.json().data;}
@@ -46,10 +48,11 @@ async function save(category:string,values:Record<string,unknown>,revision?:numb
 }
 async function nodeSave(node:ProcessingNode,revision=0){return app.inject({method:'PUT',url:'/admin/api/v1/processing-nodes/'+node.id,headers:headers(),payload:{node,revision}});}
 // Test-only equivalent of publishing a reviewed catalog row; Admin cannot create nodes.
-async function publishTestNode(node:ProcessingNode){const {id,revision,...config}=node;await root.query('INSERT INTO processing_nodes(id,config,revision) VALUES($1,$2,$3)',[id,JSON.stringify(config),revision]);}
+async function publishTestNode(node:ProcessingNode){const {id,revision,...config}=node;await root.query('INSERT INTO processing_nodes(id,config,revision) VALUES($1,$2,$3)',[id,JSON.stringify({...config,enabled:true}),revision]);}
+let originalNodes:Record<string,unknown>[]=[];
 beforeAll(async()=>{
- await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();
- await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
+ await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();originalNodes=(await root.query('SELECT * FROM processing_nodes')).rows;
+ await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query('DELETE FROM processing_nodes');
  const password='isolated-runtime-password-123';
  for(const role of ['superadmin','operator']){
   const username='runtime_'+role+'_'+randomUUID().slice(0,8);
@@ -62,18 +65,45 @@ beforeAll(async()=>{
 afterAll(async()=>{
  await app.close();await nodes.close();
  await root.query('DELETE FROM admin_sessions WHERE admin_id=ANY($1::uuid[])',[adminIds]);await root.query('DELETE FROM admin_users WHERE id=ANY($1::uuid[])',[adminIds]);
- await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
+ await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query('DELETE FROM processing_nodes');
+ for(const row of originalNodes)await root.query('INSERT INTO processing_nodes(id,config,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5)',[row.id,JSON.stringify(row.config),row.revision,row.created_at,row.updated_at]);
  const keys=await redis.keys(env.REDIS_KEY_PREFIX+':*');if(keys.length)await redis.del(...keys);redis.disconnect();
  await Promise.all([root.end(),adminPool.end(),workerPool.end()]);
 });
 
 describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no paid provider',()=>{
+ it('applies Admin recall updates to public and internal RAG with one stable snapshot per request',async()=>{
+  const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL});
+  const userId=await insertFixtureUser(root),bearer=await insertFixtureSession(root,userId);
+  const previous=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+  const observations:Array<{query:string;candidates:number;revision:number|undefined}>=[];
+  const spy=vi.spyOn(RagQueryService.prototype,'query').mockImplementation(async(_scope,input)=>{
+   observations.push({query:input.query,candidates:cfg.milvus.bm25Candidates,revision:currentRuntimeConfig()?.runtimeRevision});
+   if(input.query==='held'){entered();await gate;expect(cfg.milvus.bm25Candidates).toBe(7);}
+   return {mode:'keyword',query:input.query,results:[]};
+  });
+  const api=await buildApiServer({config:cfg});
+  const request=(url:string,query='snapshot')=>api.inject({method:'POST',url,headers:fixtureScopeHeaders(bearer),payload:{query,mode:'keyword'}});
+  let held:ReturnType<typeof request>|undefined;
+  try{
+   expect((await save('rag',{'rag.bm25Candidates':7})).statusCode).toBe(200);
+   for(const url of ['/api/v1/rag/query','/api/v1/kb/notes/query','/api/v1/kb/documents/query','/internal/v1/rag/query'])expect((await request(url)).statusCode).toBe(200);
+   expect(observations).toHaveLength(4);expect(observations.every(o=>o.candidates===7&&typeof o.revision==='number')).toBe(true);
+   held=request('/internal/v1/rag/query','held');void held.then(()=>undefined);await started;
+   expect((await save('rag',{'rag.bm25Candidates':11})).statusCode).toBe(200);
+   for(const url of ['/api/v1/rag/query','/internal/v1/rag/query'])expect((await request(url,'next')).statusCode).toBe(200);
+   expect(observations.filter(o=>o.query==='next').every(o=>o.candidates===11)).toBe(true);
+   release();expect((await held).statusCode).toBe(200);
+  }finally{release();await held;spy.mockRestore();await api.close();await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(previous)]);}
+ });
  it('requires admin sessions, denies App Bearer and isolates the API role',async()=>{
   expect((await app.inject({url:'/admin/api/v1/configuration',headers:{authorization:'Bearer app-token'}})).statusCode).toBe(401);
   const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL});const api=await buildApiServer({config:cfg});
   try{expect((await api.inject('/admin/api/v1/configuration')).statusCode).toBe(404);}finally{await api.close();}
   const r=await app.inject({url:'/admin/api/v1/processing-nodes',headers:{cookie:operatorCookie}});expect(r.statusCode).toBe(200);
-  expect(r.json().data.items.find((n:ProcessingNode)=>n.instanceId==='i-2zejbbo2svjieb44tqy8')).toMatchObject({enabled:false,resourceClass:'cpu',capabilities:['document']});
+  expect(r.json().data.items).toEqual([]);
  });
  it('validates CSRF, current role, typed bounds, categories and secret-free complete parameters',async()=>{
   expect((await save('tasks',{'tasks.maxAttempts':4},undefined,{cookie:superCookie,origin:env.ADMIN_PUBLIC_BASE_URL,'x-csrf-token':'bad'})).statusCode).toBe(403);
@@ -175,7 +205,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL}),api=await buildApiServer({config:cfg});
   const userId=await insertFixtureUser(root),sessionId=randomUUID(),bearer=await insertFixtureSession(root,userId,sessionId);
   try{
-   const r=await api.inject({method:'POST',url:'/api/v1/media/upload-token',headers:{authorization:'Bearer '+bearer,'x-idempotency-key':randomUUID()},payload:{sourceScene:'note_import',fileName:'large.txt',mimeType:'text/plain',sizeBytes:1001,durationSeconds:0}});
+   const r=await api.inject({method:'POST',url:'/api/v1/media/upload-token',headers:{...fixtureScopeHeaders(bearer),'x-idempotency-key':randomUUID()},payload:{sourceScene:'note_import',fileName:'large.txt',mimeType:'text/plain',sizeBytes:1001,durationSeconds:0}});
    expect(r.statusCode,r.body).toBe(400);expect(r.json().error.code).toBe('UPLOAD_METADATA_INVALID');
   }finally{await api.close();await save('storage',{'storage.maxUploadBytes':104857600});}
  });
@@ -191,6 +221,14 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   finally{release();await first;await save('rag',{'rag.rrfK':60,'rag.embeddingBatchSize':32});}
   expect(workerConfig.milvus.rrfK).toBe(60);
  });
+ it('admits registered nodes regardless of the retired toggle and rejects it as an editable API field',async()=>{
+  await root.query('DELETE FROM processing_nodes');const node=baseNode();await publishTestNode(node);
+  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false') WHERE id=$1`,[node.id]);
+  const id=randomUUID();expect((await nodes.bind(id,'document')).id).toBe(node.id);await nodes.settle(id);
+  expect((await nodes.list())[0]).not.toHaveProperty('enabled');
+  const response=await app.inject({method:'PUT',url:'/admin/api/v1/processing-nodes/'+node.id,headers:headers(),payload:{node:{...node,enabled:false},revision:1}});
+  expect(response.statusCode).toBe(400);await root.query('DELETE FROM processing_nodes');
+ });
  it('assigns by occupied capacity, preserves node affinity and shares document/audio occupancy',async()=>{
   const a=baseNode(),b=baseNode({documentApi:{...defaultDocumentApi(),mode:'async',timeoutSeconds:4000}});await publishTestNode(a);await publishTestNode(b);
   const first=await nodes.bind('first-'+a.id,'document'),second=await nodes.bind('second-'+a.id,'audio');expect(first.id).not.toBe(second.id);
@@ -198,12 +236,12 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   expect(second.documentApi).toMatchObject({mode:'async',parameters:null,timeoutSeconds:4000});
   expect((await nodes.bind('first-'+a.id,'document')).id).toBe(first.id);
   await expect(nodes.bind('first-'+a.id,'audio')).rejects.toMatchObject({code:'PROCESSING_ASSIGNMENT_CONFLICT'});
-  const disabled={...Object.fromEntries(Object.entries(first).reverse()),enabled:false} as ProcessingNode;expect((await nodeSave(disabled,1)).statusCode).toBe(200);
+  const disabled={...Object.fromEntries(Object.entries(first).reverse()),name:'Renamed node'} as ProcessingNode;expect((await nodeSave(disabled,1)).statusCode).toBe(200);
   expect((await nodes.assigned('first-'+a.id)).id).toBe(first.id);
-  expect((await nodes.bind('third-'+a.id,'document')).id).toBe(second.id);
+  expect((await nodes.bind('third-'+a.id,'document')).id).toBe(first.id);
   const change={...disabled,baseUrl:'http://127.0.0.1:19000',revision:2};expect((await nodeSave(change,2)).statusCode).toBe(409);
   await nodes.settle('first-'+a.id);await nodes.settle('second-'+a.id);await nodes.settle('third-'+a.id);
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
+  await root.query('DELETE FROM processing_nodes');
  });
  it('selects an immutable billing policy without granting the current month twice',async()=>{
   const version='runtime-'+randomUUID().slice(0,8),userId=await insertFixtureUser(root);
@@ -218,41 +256,41 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   }finally{await save('billing',{'billing.policyVersion':'credit-policy-v1'});await pool.end();}
  });
  it('refuses Admin node creation while retaining existing-node revision protection',async()=>{
-  const existing=(await nodes.list()).find(n=>n.instanceId==='i-2zejbbo2svjieb44tqy8')!;
+  const existing=baseNode();await publishTestNode(existing);
   const count=Number((await root.query('SELECT count(*) AS n FROM processing_nodes')).rows[0].n);
   const created=await nodeSave({...existing,id:randomUUID(),revision:1});expect(created.statusCode).toBe(404);expect(created.json().error.code).toBe('PROCESSING_NODE_NOT_FOUND');
   expect(Number((await root.query('SELECT count(*) AS n FROM processing_nodes')).rows[0].n)).toBe(count);
   expect((await nodeSave({...existing,name:'stale'},0)).statusCode).toBe(409);
  });
  it('stores one JSON configuration per node and increments the existing row on edits',async()=>{
-  const node=baseNode({enabled:false});await publishTestNode(node);
+  const node=baseNode();await publishTestNode(node);
   const first=await nodeSave({...node,name:'Renamed CPU'},1);expect(first.statusCode,first.body).toBe(200);
   const next=await nodeSave({...first.json().data,name:'Shared document/audio CPU'},2);expect(next.statusCode,next.body).toBe(200);
   const rows=(await root.query('SELECT * FROM processing_nodes WHERE id=$1',[node.id])).rows;
   expect(rows).toHaveLength(1);expect(Object.keys(rows[0]).sort()).toEqual(['config','created_at','id','revision','updated_at']);
-  expect(rows[0].revision).toBe(3);expect(rows[0].config).toMatchObject({name:'Shared document/audio CPU',capabilities:['document','audio'],enabled:false});
+  expect(rows[0].revision).toBe(3);expect(rows[0].config).toMatchObject({name:'Shared document/audio CPU',capabilities:['document','audio'],enabled:true});
   expect(rows[0].config).not.toHaveProperty('revision');expect(rows[0].config).not.toHaveProperty('id');
   expect((await nodes.list()).find(n=>n.id===node.id)).toMatchObject({...node,name:'Shared document/audio CPU',revision:3});
   expect((await nodeSave({...node,name:'Stale edit'},1)).statusCode).toBe(409);
   await expect(root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{concurrency}','0') WHERE id=$1`,[node.id])).rejects.toMatchObject({code:'23514'});
  });
- it('retains ambiguous execution and resumes the original node after disabling it',async()=>{
-  const node=baseNode();await publishTestNode(node);const input=request();
+ it('retains ambiguous execution and resumes its original registered node',async()=>{
+  const node=baseNode();await publishTestNode(node);const input={...request(),nodeId:node.id};
   await expect(nodes.withNode('document',input,async()=>{throw new ParserExecutionError('TEST_REMOTE_UNKNOWN');})).rejects.toMatchObject({code:'DOCUMENT_PARSER_EXECUTION_UNKNOWN'});
   expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',[input.requestId])).rows[0].settled).toBe(false);
   const status=await(await nodes.runtime(node)).machine.state.status();expect(status?.uncertain).toBe(1);
-  expect((await nodeSave({...node,enabled:false},1)).statusCode).toBe(200);
+  expect((await nodeSave({...node},1)).statusCode).toBe(200);
   expect(await nodes.withNode('document',{...input,resume:true},async ctx=>ctx.baseUrl)).toBe(node.baseUrl);
   expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',[input.requestId])).rows[0].settled).toBe(true);
   await expect(nodes.withNode('document',input,async()=>{throw Error('must not run');})).rejects.toMatchObject({code:'PROCESSING_ASSIGNMENT_SETTLED'});
  });
  it('enforces shared Redis slots across capabilities and protects routing changes until drained',async()=>{
-  const node=baseNode();await publishTestNode(node);const first=request(),second=request();
+  const node=baseNode();await publishTestNode(node);const first={...request(),nodeId:node.id},second={...request(),nodeId:node.id};
   let release!:()=>void;let started!:()=>void;const gate=new Promise<void>(r=>release=r),start=new Promise<void>(r=>started=r);let audioStarted=false;
   const work=nodes.withNode('document',first,async()=>{started();await gate;});await start;
   const audio=nodes.withNode('audio',second,async()=>{audioStarted=true;});
   try{await new Promise(r=>setTimeout(r,80));expect(audioStarted).toBe(false);expect((await(await nodes.runtime(node)).machine.state.status())?.queued).toBe(1);expect((await nodeSave({...node,concurrency:2},1)).statusCode).toBe(409);}finally{release();await work;await audio;}
-  const updated=await nodeSave({...node,enabled:false,concurrency:2},1);expect(updated.statusCode,updated.body).toBe(200);
+  const updated=await nodeSave({...node,concurrency:2},1);expect(updated.statusCode,updated.body).toBe(200);
  });
  it('keeps zero physical foreign keys and indexed ordinary node relationships',async()=>{
   expect((await root.query("SELECT count(*)::int AS n FROM pg_constraint WHERE contype='f' AND connamespace='public'::regnamespace")).rows[0].n).toBe(0);
@@ -260,7 +298,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   await expect(workerPool.query('UPDATE runtime_configuration SET revision=revision+1')).rejects.toMatchObject({code:'42501'});
  });
  it('blocks fresh admission if Redis loses durable remote occupancy',async()=>{
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode();await publishTestNode(node);const previous=request();
+  await root.query('DELETE FROM processing_nodes');const node=baseNode();await publishTestNode(node);const previous=request();
   await expect(nodes.withNode('document',previous,async()=>{throw new ParserExecutionError('TEST_REMOTE_UNKNOWN');})).rejects.toMatchObject({code:'DOCUMENT_PARSER_EXECUTION_UNKNOWN'});
   const runtime=await nodes.runtime(node),keys=await redis.keys(runtime.machine.state.keyPrefix+':*');if(keys.length)await redis.del(...keys);
   let executed=false;await expect(nodes.withNode('audio',request(),async()=>{executed=true;})).rejects.toMatchObject({code:'PROCESSING_NODE_COORDINATION_UNCERTAIN'});expect(executed).toBe(false);
@@ -271,7 +309,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
 
 describe('manual startup: durable tasks, event notifications and mock cloud only',()=>{
  it('starts from outside the parser VPC, completes at Running and never calls the private API',async()=>{
-  const node=baseNode({name:'Manual CPU node',mode:'ecs',capabilities:['document'],enabled:false,regionId:'cn-beijing',instanceId:'i-manual'+randomUUID().replaceAll('-','').slice(0,16),privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health'});
+  const node=baseNode({name:'Manual CPU node',mode:'ecs',capabilities:['document'],regionId:'cn-beijing',instanceId:'i-manual'+randomUUID().replaceAll('-','').slice(0,16),privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health'});
   node.tokenEnv='PROCESSING_NODE_TOKEN_DOCUMENT';await publishTestNode(node);
   const externalAdmin={...adminConfig,processingNodes:{...adminConfig.processingNodes,enabled:false,cloudControlEnabled:true}};
   const externalWorker={...workerConfig,processingNodes:{...workerConfig.processingNodes,enabled:false,cloudControlEnabled:true}};
@@ -317,7 +355,7 @@ describe('manual startup: durable tasks, event notifications and mock cloud only
    expect((await live.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:superCookie}})).json().data.structuredEnabled).toBe(false);
    expect((await root.query('SELECT state,attempt_no,resume_count FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'succeeded',attempt_no:3,resume_count:2});
    expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',['manual:'+taskId])).rows[0].settled).toBe(true);
-   expect((await root.query("SELECT config->'enabled' AS enabled FROM processing_nodes WHERE id=$1",[node.id])).rows[0].enabled).toBe(false);
+   expect((await root.query("SELECT config->'enabled' AS enabled FROM processing_nodes WHERE id=$1",[node.id])).rows[0].enabled).toBe(true);
    expect(cloud.start).toHaveBeenCalledTimes(1);expect(cloud.stopEconomically).not.toHaveBeenCalled();
    // Manual boots are monitored even with private API calls and automatic admission disabled.
    await controlled.startMonitors(error=>monitorErrors.push(error));
@@ -362,14 +400,14 @@ describe('Admin-only document trial, no business ingestion',()=>{
   expect((await root.query("SELECT count(*)::int AS n FROM admin_audit_events WHERE action='document-trial.start' AND target_id=$1",[id])).rows[0].n).toBe(0);
  });
  it('rejects unsupported names, unconfigured PDF and unsafe download links',async()=>{
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);
+  await root.query('DELETE FROM processing_nodes');
   for(const[fileName,expected]of [['../a.txt',400],['a.exe',400],['a.pdf',503]] as const){
    const r=await app.inject({method:'POST',url:'/admin/api/v1/document-trials/upload?'+new URLSearchParams({fileName,mimeType:'application/octet-stream'}),headers:{...headers(),'content-type':'application/octet-stream'},payload:Buffer.from('sample')});expect(r.statusCode,r.body).toBe(expected);
   }
   const url=await app.inject({method:'POST',url:'/admin/api/v1/document-trials',headers:headers(),payload:{fileUrl:'http://169.254.169.254/latest/meta-data/'}});expect(url.statusCode,url.body).toBe(400);
  });
  it('probes the configured parser API with in-memory results and zero trial database writes',async()=>{
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});await publishTestNode(node);
+  await root.query('DELETE FROM processing_nodes');const node=baseNode({capabilities:['document']});await publishTestNode(node);
   let context:FileContext;const jobId=randomUUID();
   const fetchDouble=vi.fn<typeof fetch>(async(url,options)=>{
    if(options?.method==='POST'){
@@ -390,10 +428,20 @@ describe('Admin-only document trial, no business ingestion',()=>{
    expect(()=>service.status({...scope,adminId:randomUUID()},job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');expect(await counts()).toEqual(before);
    await expect(adminPool.query('SELECT 1 FROM document_parse_callbacks LIMIT 1')).rejects.toMatchObject({code:'42501'});
    await service.close();expect(()=>service.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');
-  }finally{await service.close();await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);}
+  }finally{await service.close();await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query('DELETE FROM processing_nodes');}
+ });
+ it('checks configured health before upload and reports service unready without submitting a PDF',async()=>{
+  await root.query('DELETE FROM processing_nodes');const node=baseNode({capabilities:['document'],healthPath:'/health'});await publishTestNode(node);
+  const fetchDouble=vi.fn<typeof fetch>(async()=>new Response('{}',{status:503}));
+  const service=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble),scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]);
+  try{
+   const job=await service.start(scope,{file:{bytes:Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF'),fileName:'unready.pdf',contentType:'application/pdf',finalUrl:''}});
+   await vi.waitFor(()=>expect(service.status(scope,job.id)).toMatchObject({state:'failed',error:'ADMIN_TRIAL_SERVICE_UNREACHABLE'}));
+   expect(fetchDouble).toHaveBeenCalledTimes(1);expect(fetchDouble.mock.calls[0]![1]?.method).toBe('GET');expect(service.status(scope,job.id).remoteJobId).toBeUndefined();
+  }finally{await service.close();await root.query('DELETE FROM processing_nodes');}
  });
  it('discards an interrupted probe on close without durable recovery or a second submission',async()=>{
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);const node=baseNode({capabilities:['document']});await publishTestNode(node);
+  await root.query('DELETE FROM processing_nodes');const node=baseNode({capabilities:['document']});await publishTestNode(node);
   const fetchDouble=vi.fn<typeof fetch>(async(_url,options)=>new Promise<Response>((_resolve,reject)=>{
    options!.signal!.addEventListener('abort',()=>reject(new Error('probe interrupted')),{once:true});
   }));
@@ -404,7 +452,7 @@ describe('Admin-only document trial, no business ingestion',()=>{
    await vi.waitFor(()=>expect(fetchDouble).toHaveBeenCalledTimes(1));await service.close();
    expect(()=>service.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');expect(()=>replacement.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');
    await new Promise(resolve=>setTimeout(resolve,20));expect(fetchDouble).toHaveBeenCalledTimes(1);expect(await counts()).toEqual(before);
-  }finally{await service.close();await replacement.close();await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false')`);}
+  }finally{await service.close();await replacement.close();await root.query('DELETE FROM processing_nodes');}
  });
  it('uses the API service address for durable user-task callbacks while Admin listens independently',async()=>{
   const apiConfig=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL});

@@ -3,11 +3,17 @@ import {splitKnowledgeContent} from '../../src/modules/kb/split.js';
 import {kbSnapshot,kbTokenizer} from '../../src/modules/kb/profile.js';
 import {config} from '../helpers.js';
 const tokenizer=await kbTokenizer(kbSnapshot(config(),'note-hybrid','markdown'));
-describe('knowledge base character rules and pinned real BGE tokenizer',()=>{
- it('loads official pinned XLM-R tokenizer and counts actual tokens',async()=>{
-  expect(tokenizer.model).toBe('BAAI/bge-m3');expect(tokenizer.maxInputTokens).toBe(8192);
-  expect(tokenizer.id).toContain('21106b6d7dab2952');
-  expect(await tokenizer.count('Hello world')).toBe(4);
+describe('knowledge base character rules and conservative hosted-model input budget',()=>{
+ it('caps persisted legacy logical batch sizes at the provider HTTP limit',()=>{
+  const cfg=config();cfg.rag.embeddingBatchSize=32;
+  expect(kbSnapshot(cfg,'note-hybrid','markdown').indexing.batchSize).toBe(20);
+  cfg.rag.embeddingBatchSize=7;expect(kbSnapshot(cfg,'note-hybrid','markdown').indexing.batchSize).toBe(7);
+ });
+ it('labels conservative UTF-8 budgeting without pretending to count model tokens',async()=>{
+  expect(tokenizer.model).toBe('qwen3.7-text-embedding-flash');expect(tokenizer.maxInputTokens).toBe(128000);
+  expect(tokenizer.id).toBe('utf8-byte-upper-bound-v1');
+  expect(await tokenizer.count('Hello world')).toBe(27);
+  expect(await tokenizer.count('中文😀')).toBe(Buffer.byteLength('中文😀','utf8')+16);
  });
  it.each(['note-hybrid','document-keyword'] as const)('prefers Chinese sentence boundaries without requiring a following space in %s',async mode=>{
   const max=mode==='note-hybrid'?500:2000;
@@ -21,7 +27,7 @@ describe('knowledge base character rules and pinned real BGE tokenizer',()=>{
   for(const mode of ['note-hybrid','document-keyword'] as const){
    const {chunks}=await splitKnowledgeContent(content,mode,{tokenizer});
    expect(chunks.length).toBeGreaterThan(0);let previous=0;
-   for(const c of chunks){expect(content.slice(c.start,c.end)).toBe(c.content);expect(c.charCount).toBeLessThanOrEqual(mode==='note-hybrid'?500:2000);expect(c.coreStart).toBe(previous);expect(c.coreEnd).toBeGreaterThan(c.coreStart);expect(c.tokenCount).toBeLessThanOrEqual(8192);previous=c.coreEnd;}
+   for(const c of chunks){expect(content.slice(c.start,c.end)).toBe(c.content);expect(c.charCount).toBeLessThanOrEqual(mode==='note-hybrid'?500:2000);expect(c.coreStart).toBe(previous);expect(c.coreEnd).toBeGreaterThan(c.coreStart);expect(c.tokenCount).toBeLessThanOrEqual(128000);previous=c.coreEnd;}
    expect(chunks.map(c=>content.slice(c.coreStart,c.coreEnd)).join('')).toBe(content);
    if(mode==='document-keyword')expect(chunks.every(c=>c.start===c.coreStart&&c.tokenCount===0)).toBe(true);
   }

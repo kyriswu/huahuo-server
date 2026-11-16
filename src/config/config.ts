@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
 import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
 import { scopedConfig } from '../modules/runtime-settings/service.js';
+import { NOTE_EMBEDDING_MODEL, NOTE_EMBEDDING_PROFILE, NOTE_EMBEDDING_MAX_BATCH_SIZE, NOTE_RERANK_MODEL } from '../modules/rag/model-profile.js';
 export type Role = 'api-server' | 'admin' | 'worker' | 'scheduler' | 'migrate';
 export type Env = Record<string, string | undefined>;
 export interface AppConfig {
@@ -17,14 +18,14 @@ export interface AppConfig {
   queuePrefix:string; workerQueues:QueueName[]; taskLeaseMs:number; taskRedeliveryMs:number; schedulerIntervalMs:number; demoTasks:boolean; testTaskDelayMs:number;
   role: Role; host: string; port: number; databaseUrl: string; poolMax: number;
   httpRequestTimeoutMs: number; httpConnectionTimeoutMs: number;
+  httpTrustProxyHops: number;
   ssl: false | { rejectUnauthorized: true; ca?: string };
   statementTimeout: number; redisCacheUrl: string; redisQueueUrl: string;
   schemaMinVersion: number; instanceId: string; logLevel: string;
   connectDeadlineMs: number; migrationLockTimeoutMs: number;
   appTokenSecret?: string; adminSessionSecret?: string;
   jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string; previousPublicKeyPem?:string; previousKeyId?:string };
-  agentToServerServiceKey?: string; serverToAgentServiceKey?: string;
-  smsProvider: 'mock' | 'disabled' | 'live'; showTestOtp: boolean;
+  gatewayStudio: { enabled: boolean; origin: string; publicPath: string };
   smsAliyun?: AliyunOtpConfig;
   appEnv: string; agreementVersion: string; privacyVersion: string; adminOrigin: string;
   billingMode: 'disabled' | 'development' | 'live'; billingPolicyVersion: string;
@@ -53,9 +54,6 @@ export interface MilvusConfig {
   rrfK: number;
 }
 export interface RagConfig {
-  tokenizerPath: string;
-  tokenizerConfigPath: string;
-  tokenizerMaxInputTokens: number;
   enabled: boolean;
   sourceAllowedHosts: string[];
   maxSourceBytes: number;
@@ -98,7 +96,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (!['disabled', 'mock', 'live'].includes(mode)) fail('PROVIDER_MODE');
   if (mode === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('PROVIDER_MODE');
   if (env.DEV_AUTH_BYPASS === 'true' && (appEnv !== 'development' || env.ALLOW_DEV_AUTH !== 'true')) fail('DEV_AUTH_BYPASS');
-  for (const key of ['PAYMENT_PROVIDER','ASR_PROVIDER','WORKFLOW_PROVIDER','SMS_PROVIDER','PUSH_PROVIDER']) {
+  for (const key of ['PAYMENT_PROVIDER','ASR_PROVIDER','WORKFLOW_PROVIDER','PUSH_PROVIDER']) {
     if (appEnv === 'production' && env[key] === 'mock') fail(key);
   }
   const databaseUrl = url('DATABASE_URL', ['postgres:', 'postgresql:']);
@@ -131,16 +129,19 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (jwtPreviousKeyId && (!/^[A-Za-z0-9._:-]{1,128}$/.test(jwtPreviousKeyId) || jwtPreviousKeyId === jwtKeyId)) fail('APP_JWT_PREVIOUS_KEY_ID');
   if (role === 'api-server' && appEnv === 'production' && (!jwtPrivateKey || !jwtPublicKey)) fail('APP_JWT_KEYS');
   if ((jwtPrivateKey && !jwtPublicKey) || (!jwtPrivateKey && jwtPublicKey)) fail('APP_JWT_KEYS');
-  const agentToServerServiceKey = env.HUAHUO_AGENT_TO_SERVER_API_KEY?.trim() || undefined;
-  const serverToAgentServiceKey = env.HUAHUO_SERVER_TO_AGENT_API_KEY?.trim() || undefined;
-  if (role === 'api-server' && appEnv === 'production' && (!agentToServerServiceKey || !serverToAgentServiceKey)) fail('HUAHUO_SERVICE_API_KEY');
-  if ((agentToServerServiceKey && agentToServerServiceKey.length < 43) || (serverToAgentServiceKey && serverToAgentServiceKey.length < 43)) fail('HUAHUO_SERVICE_API_KEY');
-  if (appEnv === 'production' && agentToServerServiceKey && serverToAgentServiceKey && agentToServerServiceKey === serverToAgentServiceKey) fail('HUAHUO_SERVICE_API_KEY_DIRECTIONAL_COLLISION');
-  const smsProvider = (env.SMS_PROVIDER ?? 'disabled') as AppConfig['smsProvider'];
-  if (!['mock', 'disabled', 'live'].includes(smsProvider)) fail('SMS_PROVIDER');
-  if (smsProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('SMS_PROVIDER');
-  if (env.SHOW_TEST_OTP === 'true' && (appEnv === 'production' || smsProvider !== 'mock')) fail('SHOW_TEST_OTP');
-  const smsAliyun = role === 'api-server' && smsProvider === 'live' ? loadAliyunOtpConfig(env) : undefined;
+  const studioEnabled = env.HUAHUO_STUDIO_AUTH_ENABLED ?? 'false';
+  if (!['true', 'false'].includes(studioEnabled) || (appEnv === 'production' && studioEnabled === 'true')) fail('HUAHUO_STUDIO_AUTH_ENABLED');
+  const studioPath = env.HUAHUO_AGENT_PUBLIC_PATH?.trim() || '/agent';
+  if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(studioPath)) fail('HUAHUO_AGENT_PUBLIC_PATH');
+  let studioOrigin = '';
+  try {
+    const raw = env.HUAHUO_STUDIO_ORIGIN?.trim();
+    const parsed = new URL(raw || env.APP_PUBLIC_BASE_URL || 'http://localhost:3000');
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || (raw && (parsed.pathname !== '/' || parsed.search || parsed.hash))) fail('HUAHUO_STUDIO_ORIGIN');
+    studioOrigin = parsed.origin;
+  } catch { fail('HUAHUO_STUDIO_ORIGIN'); }
+  const gatewayStudio = { enabled: studioEnabled === 'true', origin: studioOrigin, publicPath: studioPath };
+  const smsAliyun = role === 'api-server' ? loadAliyunOtpConfig(env) : undefined;
   const billingMode = (env.BILLING_MODE ?? (appEnv === 'development' ? 'development' : 'disabled')) as AppConfig['billingMode'];
   if (!['disabled', 'development', 'live'].includes(billingMode)) fail('BILLING_MODE');
   if (appEnv === 'production' && billingMode === 'development') fail('BILLING_MODE');
@@ -157,9 +158,6 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if(!['live','mock','disabled'].includes(ragProvider))fail('RAG_PROVIDER_MODE');
   if(ragProvider==='mock' && (appEnv==='production'||env.ALLOW_MOCK_PROVIDERS!=='true'))fail('RAG_PROVIDER_MODE');
   const rag: RagConfig = {
-    tokenizerPath: env.RAG_TOKENIZER_PATH?.trim() || 'resources/tokenizers/bge-m3/tokenizer.json',
-    tokenizerConfigPath: env.RAG_TOKENIZER_CONFIG_PATH?.trim() || 'resources/tokenizers/bge-m3/tokenizer_config.json',
-    tokenizerMaxInputTokens: integer('RAG_TOKENIZER_MAX_INPUT_TOKENS', 8192, 8192, 8192),
     enabled: true,
     sourceAllowedHosts: csv('RAG_SOURCE_ALLOWED_HOSTS'),
     maxSourceBytes: 200*1024*1024,
@@ -167,10 +165,10 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     downloadTimeoutMs: 120_000,
     ...(env.RAG_EMBEDDING_BASE_URL?.trim() ? { embeddingBaseUrl: env.RAG_EMBEDDING_BASE_URL.trim() } : {}),
     ...(env.RAG_EMBEDDING_API_KEY?.trim() ? { embeddingApiKey: env.RAG_EMBEDDING_API_KEY.trim() } : {}),
-    embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || 'BAAI/bge-m3',
+    embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || NOTE_EMBEDDING_MODEL,
     embeddingDimensions: integer('RAG_EMBEDDING_DIMENSIONS', 1024, 1024, 1024),
-    embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || 'bge-m3-1024',
-    embeddingBatchSize: 32,
+    embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || NOTE_EMBEDDING_PROFILE,
+    embeddingBatchSize: NOTE_EMBEDDING_MAX_BATCH_SIZE,
     indexingConcurrency: 2,
     embeddingTimeoutMs: 30_000,
     embeddingMaxRetries: 2,
@@ -178,7 +176,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     rerankProvider: ((env.RAG_RERANK_PROVIDER?.trim() || 'disabled') as RagConfig['rerankProvider']),
     ...(env.RAG_RERANK_BASE_URL?.trim() ? { rerankBaseUrl: env.RAG_RERANK_BASE_URL.trim() } : {}),
     ...(env.RAG_RERANK_API_KEY?.trim() ? { rerankApiKey: env.RAG_RERANK_API_KEY.trim() } : {}),
-    rerankModel: env.RAG_RERANK_MODEL?.trim() || 'qwen3-rerank',
+    rerankModel: env.RAG_RERANK_MODEL?.trim() || NOTE_RERANK_MODEL,
     rerankTimeoutMs: 30_000,
     noteRerankBudgetMs: 200,
   };
@@ -188,7 +186,8 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (!['disabled', 'mock', 'http'].includes(rag.rerankProvider)) fail('RAG_RERANK_PROVIDER');
   if (rag.rerankProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('RAG_RERANK_PROVIDER');
   if (rag.rerankProvider === 'http' && (!rag.rerankBaseUrl || !rag.rerankApiKey)) fail('RAG_RERANK_CONFIG');
-  if(rag.embeddingModel!=='BAAI/bge-m3'||rag.embeddingProfile!=='bge-m3-1024')fail('RAG_EMBEDDING_PROFILE');
+  if(rag.embeddingModel!==NOTE_EMBEDDING_MODEL||rag.embeddingProfile!==NOTE_EMBEDDING_PROFILE)fail('RAG_EMBEDDING_PROFILE');
+  if(rag.rerankProvider==='http'&&rag.rerankModel!==NOTE_RERANK_MODEL)fail('RAG_RERANK_MODEL');
   const kb = {
     noteEnabled: false,
     noteCollection: env.KB_NOTE_HYBRID_COLLECTION?.trim() || 'huahuo_kb_note_hybrid_chunks',
@@ -223,6 +222,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     port: integer('PORT', ['worker','scheduler'].includes(role) ? 3100 : 3000, 1, 65535),
     databaseUrl, poolMax: integer('DATABASE_POOL_MAX', role === 'migrate' ? 1 : 5, 1, 30),
     httpRequestTimeoutMs, httpConnectionTimeoutMs,
+    httpTrustProxyHops: integer('HTTP_TRUST_PROXY_HOPS', 0, 0, 2),
     ssl: sslMode === 'verify-full' ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false,
     statementTimeout: integer('DATABASE_STATEMENT_TIMEOUT_MS', role === 'migrate' ? 30000 : 5000, 100, 60000),
     redisCacheUrl: role === 'migrate' ? '' : url('REDIS_CACHE_URL', ['redis:', 'rediss:']),
@@ -244,8 +244,8 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
       ...(jwtPreviousPublicKey ? { previousPublicKeyPem: jwtPreviousPublicKey } : {}),
       ...(jwtPreviousKeyId ? { previousKeyId: jwtPreviousKeyId } : {}),
     },
-    agentToServerServiceKey, serverToAgentServiceKey,
-    smsProvider, smsAliyun, showTestOtp: env.SHOW_TEST_OTP === 'true' && appEnv !== 'production', appEnv,
+    gatewayStudio,
+    smsAliyun, appEnv,
     agreementVersion: env.USER_AGREEMENT_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     privacyVersion: env.PRIVACY_POLICY_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     adminOrigin: env.ADMIN_PUBLIC_BASE_URL ? new URL(env.ADMIN_PUBLIC_BASE_URL).origin : '',

@@ -23,7 +23,11 @@
 
 保留DATABASE/Redis连接、密钥/证书、OSS连接与RAM凭据、应用监听/公开URL、模型服务地址/凭据/提供器及固定模型规格、Milvus库和集合绑定、tokenizer部署路径、源文件域名白名单、付费提供器总开关BILLING_MODE、云端控制与私网API调用开关、HTTP硬上限及协调租约/去重保留/排队容量。主模板为`.env.example`；完全重复的`.env.document-parser.example`已删除。模型规格固定匹配现有1024维集合，不能把换模型/维度当普通性能调参。
 
-`PROCESSING_NODES_ENABLED`仅允许本部署执行私网文档/音频API调用，默认false；它不再阻止手动云端开机。新增独立的`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`：省略或为空时，在已配置完整RAM凭据或已启用节点调用时默认允许云端控制，可显式false禁止本部署开机及空闲停机。实际云操作仍由超级管理员/业务调度授权、RAM权限及既有机器锁共同约束，不因存在凭据绕过会话或CSRF。
+环境由 `APP_ENV` 区分：`development` 为本地开发，`test` 为线上测试，`production` 为线上生产；分支名称和 Docker 的 `NODE_ENV=production` 不决定业务环境。
+
+`PROCESSING_NODES_ENABLED`仅允许本部署执行私网文档/音频API调用，默认false；它不再阻止手动云端开机。独立的`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`省略或为空时，线上测试和线上生产默认允许云端控制；本地开发沿用已配置完整RAM凭据或已启用节点调用时默认允许的规则。任何环境均可显式false禁止本部署开机及空闲停机。默认允许不提供凭据，实际云操作仍要求完整RAM凭据及其权限，并受超级管理员/业务调度授权和既有机器锁约束，不绕过会话或CSRF。
+
+测试部署使用 `APP_ENV=test`，建议显式 `PROCESSING_NODES_CLOUD_CONTROL_ENABLED=true`，四常驻角色注入已有授权的 `ALIYUN_RAM_ACCESS_KEY_ID` 和 `ALIYUN_RAM_ACCESS_KEY_SECRET`。本期发布在写库前逐角色校验；migrate只校验环境，不需要云凭据。旧ENV明确false时必须先改为true，保留私网调用开关原值，使用同一配置快照重新创建四角色，单纯restart不会更新ENV。隔离CI虽然也使用test，但显式关闭云控制且不继承真实凭据。生产执行器尚未接入，生产默认值通过本地配置解析验收，不代表已部署。见[环境与云控制验收](../acceptance/cloud-control-environments.md)。
 
 这里的网络环境是发起请求的Admin/Worker服务器，不是浏览器所在网络。浏览器从外网访问同VPC的后台时，后台仍可走内网解析；本地外网部署可以通过阿里云公网控制接口开机，但保持私网API调用关闭。控制专用部署可用[外网配置片段](../../resources/processing-nodes/external-control.env.example)，Worker仅消费maintenance；同VPC部署用[内网片段](../../resources/processing-nodes/test-control.env.example)。配置片段合入原环境，不替换已有凭据和连接。
 
@@ -37,7 +41,7 @@ RAG运行参数也只读数据库：`rag.denseCandidates`、`rag.bm25Candidates`
 
 ## 节点登记与调度
 
-初始清单只包含一台未参与自动调度的CPU文档ECS：`i-2zejbbo2svjieb44tqy8`，北京、`172.18.102.103:8000`、`/health`、初始并发1、空闲60秒；现有开发库已保存的并发16保留。该ECS已部署Xberg：文档任务按需唤醒，等内网`/health`就绪后POST`/extract-async`，默认省略config沿用服务端参数，无需镜像名或CPU提取JSON。手动开机只等实例Running，不等待此健康检查。当前本地私网API调用关闭，真实解析仍待内网验收。
+初始清单包含一台默认可接收任务的CPU文档ECS：`i-2zejbbo2svjieb44tqy8`，北京、`172.18.102.103:8000`、`/health`、初始并发1、空闲60秒；现有开发库已保存的并发16保留。该ECS已部署Xberg：文档任务按需唤醒，等内网`/health`就绪后POST`/extract-async`，默认省略config沿用服务端参数，无需镜像名或CPU提取JSON。手动开机只等实例Running，不等待此健康检查。当前本地私网API调用关闭，真实解析仍待内网验收。
 
 每个节点只占 `processing_nodes` 一行：`id`、`config jsonb`、`revision`、`created_at`、`updated_at`。名称、能力、CPU/GPU、运行方式、云实例/地址、并发、超时、自动调度开关及可选 ECI 回退全部保存在 `config`；编辑覆盖同一行，版本号只递增，不保存配置版本表或版本分支。真实电源状态不存成配置布尔值。页面/API继续使用完整类型化节点字段，由服务校验后写入 JSON；凭据仍只引用部署变量。保留必要的操作审计和任务归属快照，不把任务快照当作节点版本记录。
 
@@ -45,11 +49,11 @@ RAG运行参数也只读数据库：`rag.denseCandidates`、`rag.bm25Candidates`
 
 页面主要展示名称、ECS 实例 ID、服务地址、整机并发、空闲停机等待及只读运行状态，并提供“开机”和“刷新状态”。服务器名称旁的胶囊标签自动显示“按需启停”（由系统控制已有ECS）或“常驻运行”（直接调用已有HTTP服务），来自已保存的唤醒方式，不新增字段或配置来源。它表示运行方式，不据此推断按量付费/包年包月。
 
-云实例主状态只取Describe：Running为在线，Starting/Pending或本次开机任务仍进行时为开机中，Stopped为不在线，Stopping为停机中，查询失败为状态未知。解析API独立返回ready/unreachable/not_checked/not_running；未启用私网调用时不探测内网，serviceReady为null，不能把未检测写成失败。实例Running但API不可达仍显示在线，并标明API连通性。常驻HTTP节点没有云端电源状态，只按其可检测的服务连通性显示。历史启动成功及config.enabled都不充当当前运行证明。
+云实例主状态只取Describe：Running为在线，Starting/Pending或本次开机任务仍进行时为开机中，Stopped为不在线，Stopping为停机中，查询失败为状态未知。解析API独立返回ready/unreachable/not_checked/not_running；未启用私网调用时不探测内网，serviceReady为null，不能把未检测写成失败。实例Running但API不可达仍显示在线，并标明API连通性。常驻HTTP节点没有云端电源状态，只按其可检测的服务连通性显示。历史启动成功不充当当前运行证明。
 
 开机中、已在线、停机中及状态未知时不提供重复开机操作，没有手动关机控件。状态通过Redis机器事件、PG启动任务事件与SSE更新，心跳只保活；外部控制台修改可通过刷新状态/重新聚焦页面核对。
 
-原“在线/不在线”配置开关改为高级设置中的“参与自动调度 → 接收新任务”，仍使用config.enabled，只控制新任务选址；不会开关机器。地域、处理类型、健康检查、鉴权引用、超时和可选完整提取覆盖同样收在高级设置，当前CPU不显示GPU ECI镜像配置。ECS私网IP从服务地址提取并校验，常驻服务无需云实例信息；ECI缺货回退需要独立的容器镜像/网络配置。
+2026-11-16：移除“参与自动调度／接收新任务”配置，节点登记后默认可选，不再以config.enabled筛选；默认可选不表示机器常驻在线。0003将旧JSON字段固定true以兼容交接中的旧容器，新接口不再接收/返回它。地域、处理类型、健康检查、鉴权引用、超时和可选完整提取覆盖同样收在高级设置，当前CPU不显示GPU ECI镜像配置。ECS私网IP从服务地址提取并校验，常驻服务无需云实例信息；ECI缺货回退需要独立的容器镜像/网络配置。
 
 `documentApi` 默认 `mode=async`、`parameters=null`、`timeoutSeconds=3120`、`pollMs=2000`、`maxResponseBytes=67108864`，节点仅接受 async。null 表示完全不发送 multipart `config`，不是发送 `null` 或空对象；显式覆盖仍须完整 JSON。省略该节点字段也使用同样默认值，正常保存时写入本节点同一个 config JSON。全局 `document.mode/parameters/pollMs/maxResponseBytes` 已移除，无全局提取参数或 ENV 回退。既有安装升级前需核对各节点覆盖和异步协议；不得将历史 GPU 配置复制给 CPU。当前开发库已完成调整，新环境从空 values 使用节点默认值。正式任务收到 202 后让出 Worker，由认证回调唤醒；约60秒一次补偿检查，`pollMs` 不是正式任务的持续轮询频率。
 
@@ -61,7 +65,7 @@ RAG运行参数也只读数据库：`rag.denseCandidates`、`rag.bm25Candidates`
 
 同一 JSON 中的 `(regionId, instanceId)` 由表达式唯一索引保证只登记一次；常驻节点的 `baseUrl` 同样唯一。JSON GIN 索引用于自动调度开关与处理类型筛选。文档和音频可共用节点，统一计数；音频已支持登记和通用 `withNode('audio', ...)` 占用接口，具体音频 HTTP 协议尚未接入，不能据此声称 ASR 已可用。常驻 HTTP 节点不执行云开停机。
 
-新任务按“未结算分配数 / 节点并发”从低到高选择已参与自动调度的节点，事务锁防止并发登记/分配冲突。`processing_node_assignments`保存稳定请求身份、不可变节点快照和结算状态；异步GET、取消、结果领取始终使用原节点。关闭“接收新任务”只停止新分配，原任务仍可恢复。更新地址、能力、并发等运行参数要求DB无未结算分配、Redis无排队/执行/未知/ECI归属；已有ECS协调状态还须已确认StopCharging。变更在持有控制锁时更新协调签名，失败不绕过签名检查。
+新任务按“未结算分配数 / 节点并发”从低到高选择具备对应能力的已登记节点，事务锁防止并发登记/分配冲突。`processing_node_assignments`保存稳定请求身份、不可变节点快照和结算状态；异步GET、取消、结果领取始终使用原节点。节点没有单独的停领开关，已有任务继续按原快照恢复。更新地址、能力、并发等运行参数要求DB无未结算分配、Redis无排队/执行/未知/ECI归属；已有ECS协调状态还须已确认StopCharging。变更在持有控制锁时更新协调签名，失败不绕过签名检查。
 
 未知远端结果继续占用，不能按租约过期自动释放或重发。提交前先保存 bound，再保存 intent；只有持久状态仍为 bound 的恢复才可重新领取未提交名额。已记录 job 的恢复只 GET；无 job 的模糊 intent 阻断。Redis 丢失时，DB 已开始的未结算占用会阻止新提交；停机也检查整台机器 DB 分配。需要核实的故障保留占用，不用清 Redis、改配置或删除 DB 分配掩盖。
 
@@ -101,3 +105,5 @@ A10 回退作为 GPU 文档 ECS 节点的 `eciFallback` 完整 JSON 可选填写
 此功能仅superadmin可用，保留认证、配置读取和上传校验。图片上传仍按镜像原配置执行，不在本窗口登记为业务素材。当前本地私网API调用未启用，原生文本可直接试用，不能声称PDF已上云验证；此限制不阻止节点页面通过云控制接口开机。详见[试用验收](../acceptance/admin-document-trial.md)和[正式异步链路验收](../acceptance/document-async-events.md)。
 
 当前电脑只是本地开发环境，不在解析机的可达内网中；云机开机不会使本地自动具备内网路由。用户会将代码部署至真正的内网测试机，届时先核对健康/协议与完整CPU参数，再启用解析配置和节点；本轮不开云机，不将节点改成公网地址。
+
+Admin文档试用对已配置的健康路径先执行一次有界GET；不就绪时明确返回ADMIN_TRIAL_SERVICE_UNREACHABLE，尚不提交文件。提交后的网络未知仍不自动重发。试用不启动机器、不延长业务空闲时限；正式用户任务继续按需唤醒。

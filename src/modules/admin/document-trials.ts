@@ -32,7 +32,7 @@ export class AdminDocumentTrials {
   this.expiration=setInterval(()=>this.prune(),60000);this.expiration.unref();
  }
  async authorize(scope:AdminScope){await transaction(this.pool,tx=>assertSuperadmin(tx,scope));}
- async capabilities(){const state=await this.settings.load(),onlineNodes=(await this.nodes.list()).filter(n=>n.enabled&&n.capabilities.includes('document')).map(n=>({id:n.id,name:n.name}));
+ async capabilities(){const state=await this.settings.load(),onlineNodes=(await this.nodes.list()).filter(n=>n.capabilities.includes('document')).map(n=>({id:n.id,name:n.name}));
   return {maxBytes:Math.min(MAX_BYTES,Number(state.values['storage.maxUploadBytes']),Number(state.values['storage.maxSourceBytes'])),structuredEnabled:this.config.processingNodes.enabled&&onlineNodes.length>0,
    retentionSeconds:TTL/1000,unavailableReason:!this.config.processingNodes.enabled?'deployment_disabled':!onlineNodes.length?'no_online_node':null,onlineNodes,configRevision:state.revision};
  }
@@ -63,12 +63,16 @@ export class AdminDocumentTrials {
    else{
     if(!config.processingNodes.enabled)throw new DomainError(503,'ADMIN_TRIAL_PARSER_NOT_CONFIGURED');
     await verifyStructuredSource(source);
-    const node=(await this.nodes.list()).find(n=>n.enabled&&n.capabilities.includes('document'));
+    const node=(await this.nodes.list()).find(n=>n.capabilities.includes('document'));
     if(!node)throw new DomainError(503,'ADMIN_TRIAL_PARSER_NOT_CONFIGURED');
     const target=nodeConfig(node,config.processingNodes),extraction=nodeDocumentConfig(node);
     job.nodeId=node.id;job.configHash=extraction.configHash;
     // Probe the configured API directly. User task admission, machine power,
     // durable callbacks and restart recovery belong to the business workflow.
+    if(target.healthPath)try{
+     const ready=await fetchTrial(new URL(target.baseUrl.replace(/\/$/,'')+target.healthPath),{method:'GET',headers:target.apiToken?{Authorization:`Bearer ${target.apiToken}`}:{},signal:AbortSignal.any([job.controller.signal,AbortSignal.timeout(5000)]),redirect:'error'});
+     const healthy=ready.ok;await ready.body?.cancel();if(!healthy)throw Error('NOT_READY');
+    }catch{throw new DomainError(503,'ADMIN_TRIAL_SERVICE_UNREACHABLE');}
     job.result=await new DocumentExtractionClient(extraction,fetchTrial,Math.min(MAX_BYTES,config.maxUploadBytes,config.rag.maxSourceBytes)).extract([{
      bytes:source.bytes,fileName:source.fileName,mimeType:source.contentType??'application/pdf',source_resource_id:job.id,parse_run_id:randomUUID(),
     }],{baseUrl:target.baseUrl,headers:target.apiToken?{Authorization:`Bearer ${target.apiToken}`}:{},signal:job.controller.signal},{

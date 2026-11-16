@@ -1,7 +1,7 @@
 import { beforeAll,afterAll,describe,it,expect,vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { migrate } from '../../src/db/migrate.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
@@ -9,29 +9,110 @@ import { buildAdminServer } from '../../src/apps/admin.js';
 import { AdminService } from '../../src/modules/admin/service.js';
 import { hashPassword, mac } from '../../src/modules/identity/crypto.js';
 import { IdentityService } from '../../src/modules/identity/service.js';
+import { insertFixtureSession, insertFixtureUser } from './jwt-fixture.js';
 import { SendSmsResponse, SendSmsResponseBody } from '@alicloud/dysmsapi20170525';
 import { AliyunSmsService, type AliyunSmsSdk } from '../../src/integrations/aliyun-sms.js';
 import { AliyunSmsProvider } from '../../src/integrations/sms.js';
+import { recordingSms } from '../sms-fixture.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!migrationUrl||!/^huahuo_test_[a-z0-9_]+$/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('ISOLATED_TEST_DATABASE_REQUIRED');
 const secret='test-app-secret-'.repeat(4),adminSecret='test-admin-secret-'.repeat(4);
-const common={...process.env,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:secret,ADMIN_SESSION_SECRET:adminSecret,APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',SMS_PROVIDER:'mock',ALLOW_MOCK_PROVIDERS:'true',SHOW_TEST_OTP:'true'};
-const apiConfig=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL});
-const adminConfig=loadConfig('admin',{...common,SMS_PROVIDER:'disabled',SHOW_TEST_OTP:'false',DATABASE_URL:process.env.TEST_DATABASE_ADMIN_URL});
+const common={...process.env,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:secret,ADMIN_SESSION_SECRET:adminSecret,APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001'};
+const apiConfig=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,HUAHUO_STUDIO_AUTH_ENABLED:'true'});
+const adminConfig=loadConfig('admin',{...common,DATABASE_URL:process.env.TEST_DATABASE_ADMIN_URL});
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:migrationUrl}));
 const adminPool=poolFor(adminConfig);
 let api:FastifyInstance,admin:FastifyInstance;
+const transport=recordingSms();
 let next=100;
 interface Session {accessToken:string;refreshToken:string;user:{userId:string};workspace:{workspaceId:string};}
 const remote=()=>`127.1.${Math.floor(next/250)}.${next++%250+1}`;
-const send=(app:FastifyInstance,url:string,payload?:object,headers:Record<string,string>={},method='POST',ip=remote())=>app.inject({method:method as 'POST',url,payload,headers,remoteAddress:ip});
+// Simulate gateway admission for client-facing identity scenarios. The backend
+// receives only the authenticated scope, while JWT revocation/rotation is tested
+// through the actual auth subrequest endpoint on every protected external request.
+const send=async(app:FastifyInstance,url:string,payload?:object,headers:Record<string,string>={},method='POST',ip=remote())=>{
+ if(app===api && headers.authorization && url.startsWith('/api/v1/') && !['/api/v1/auth/login','/api/v1/auth/refresh','/api/v1/auth/sms-code'].includes(url)){
+  const admission=await app.inject({url:'/internal/v1/gateway/auth',headers:{authorization:headers.authorization},remoteAddress:ip});
+  if(admission.statusCode!==204)return admission;
+  headers={...headers};delete headers.authorization;
+  for(const name of ['x-huahuo-user-id','x-huahuo-session-id','x-huahuo-auth-method'])headers[name]=String(admission.headers[name]);
+ }
+ return app.inject({method:method as 'POST',url,payload,headers,remoteAddress:ip});
+};
 const auth=(s:Session)=>({authorization:'Bearer '+s.accessToken});
-async function ticket(){const phone='1380000'+String(next++).padStart(4,'0');const r=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);return {phone,...r.json().data};}
-function loginBody(t:{phone:string;smsRequestId:string;testCode:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.testCode,clientType:'app' as const,clientId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
+async function ticket(){const phone='1380000'+String(next++).padStart(4,'0');const r=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);const data=r.json().data;expect(data).toMatchObject({providerMode:'live'});expect(data).not.toHaveProperty('testCode');return {phone,...data,code:transport.codeFor(data.smsRequestId)};}
+function loginBody(t:{phone:string;smsRequestId:string;code:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.code,clientType:'app' as const,clientId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
 async function login():Promise<Session>{const t=await ticket(),r=await send(api,'/api/v1/auth/login',loginBody(t));expect(r.statusCode).toBe(200);return r.json().data;}
-beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));api=await buildApiServer({config:apiConfig});admin=await buildAdminServer({config:adminConfig});},20000);
+beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));api=await buildApiServer({config:apiConfig,sms:transport.sms});admin=await buildAdminServer({config:adminConfig});},20000);
 afterAll(async()=>{await api?.close();await admin?.close();await root.end();await adminPool.end();});
 describe('P02 real PG identity and scope',()=>{
+ it.each(['access-expired','session-expired','revoked','missing','wrong-user','suspended'] as const)('rejects direct logout with a %s session without revoking other sessions',async state=>{
+  const userId=await insertFixtureUser(root),sessionId=randomUUID(),otherSessionId=randomUUID();
+  await insertFixtureSession(root,userId,otherSessionId,'other-active-client');
+  if(state!=='missing')await insertFixtureSession(root,state==='wrong-user'?await insertFixtureUser(root):userId,sessionId,'invalid-client');
+  if(state==='access-expired')await root.query("UPDATE user_sessions SET access_expires_at=now()-interval '1 second' WHERE id=$1",[sessionId]);
+  if(state==='session-expired')await root.query("UPDATE user_sessions SET access_expires_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE id=$1",[sessionId]);
+  if(state==='revoked')await root.query('UPDATE user_sessions SET revoked_at=now() WHERE id=$1',[sessionId]);
+  if(state==='suspended')await root.query("UPDATE users SET status='suspended' WHERE id=$1",[userId]);
+  const headers={'x-huahuo-user-id':userId,'x-huahuo-session-id':sessionId,'x-huahuo-auth-method':'bearer'};
+  for(const action of ['logout','logout-all']){
+   const response=await api.inject({method:'POST',url:`/api/v1/auth/${action}`,headers});
+   expect(response.statusCode).toBe(401);
+   expect(response.json().error.code).toBe('AUTH_SESSION_EXPIRED');
+  }
+  expect((await root.query('SELECT revoked_at FROM user_sessions WHERE id=$1',[otherSessionId])).rows[0].revoked_at).toBeNull();
+  expect((await root.query("SELECT count(*)::int n FROM user_audit_events WHERE user_id=$1 AND action IN ('auth.logout','auth.logout_all')",[userId])).rows[0].n).toBe(0);
+ });
+ it('serializes concurrent direct logout-all calls and preserves other users',async()=>{
+  const userId=await insertFixtureUser(root),otherUser=await insertFixtureUser(root),sessions=[randomUUID(),randomUUID()];
+  for(const sessionId of sessions)await insertFixtureSession(root,userId,sessionId,sessionId);
+  const otherSessionId=randomUUID();await insertFixtureSession(root,otherUser,otherSessionId);
+  const responses=await Promise.all(sessions.map(sessionId=>api.inject({method:'POST',url:'/api/v1/auth/logout-all',headers:{'x-huahuo-user-id':userId,'x-huahuo-session-id':sessionId,'x-huahuo-auth-method':'bearer'}})));
+  expect(responses.map(response=>response.statusCode).sort()).toEqual([200,401]);
+  expect((await root.query('SELECT count(*)::int n FROM user_sessions WHERE user_id=$1 AND revoked_at IS NOT NULL',[userId])).rows[0].n).toBe(2);
+  expect((await root.query('SELECT revoked_at FROM user_sessions WHERE id=$1',[otherSessionId])).rows[0].revoked_at).toBeNull();
+  expect((await root.query("SELECT count(*)::int n FROM user_audit_events WHERE user_id=$1 AND action='auth.logout_all'",[userId])).rows[0].n).toBe(1);
+ });
+ it('refreshes Studio cookies once under concurrency and honors logout/account suspension on the next admission',async()=>{
+  const s=await login();
+  await root.query("UPDATE user_sessions SET access_expires_at=now()-interval '1 second' WHERE user_id=$1",[s.user.userId]);
+  const headers={'x-forwarded-method':'GET','x-forwarded-uri':'/agent/api/agents/huox',cookie:`huahuo-studio-access=${s.accessToken}; huahuo-studio-refresh=${s.refreshToken}`};
+  const admissions=await Promise.all(Array.from({length:4},()=>send(api,'/internal/v1/gateway/auth',undefined,headers,'GET')));
+  expect(admissions.map(r=>r.statusCode)).toEqual([204,204,204,204]);
+  expect((await root.query('SELECT count(*)::int n FROM refresh_tokens t JOIN user_sessions s ON s.id=t.session_id WHERE s.user_id=$1',[s.user.userId])).rows[0].n).toBe(2);
+  const admission=admissions[0]!;
+  expect(admission.headers['x-huahuo-auth-method']).toBe('cookie');
+  expect(admission.headers['set-cookie']).toBeUndefined();
+  const refreshed=['x-huahuo-studio-access-cookie','x-huahuo-studio-refresh-cookie'].map(name=>String(admission.headers[name]).split(';')[0]).join('; ');
+  const businessHeaders=Object.fromEntries(['x-huahuo-user-id','x-huahuo-session-id','x-huahuo-auth-method'].map(name=>[name,String(admission.headers[name])]));
+  expect((await api.inject({url:'/api/v1/me/status',headers:businessHeaders})).statusCode).toBe(200);
+  expect((await send(api,'/internal/v1/gateway/logout',undefined,{origin:apiConfig.gatewayStudio.origin,cookie:refreshed})).statusCode).toBe(200);
+  const repeatedLogout=await send(api,'/internal/v1/gateway/logout',undefined,{origin:apiConfig.gatewayStudio.origin,cookie:refreshed});
+  expect(repeatedLogout.statusCode).toBe(200);
+  expect(repeatedLogout.headers['set-cookie']).toHaveLength(4);
+  expect((repeatedLogout.headers['set-cookie'] as string[]).every(cookie=>cookie.includes('Max-Age=0'))).toBe(true);
+  expect((await send(api,'/internal/v1/gateway/auth',undefined,headers,'GET')).statusCode).toBe(401);
+  expect((await api.inject({url:'/api/v1/me/status',headers:businessHeaders})).statusCode).toBe(401);
+  const suspended=await login();
+  await root.query("UPDATE users SET status='suspended' WHERE id=$1",[suspended.user.userId]);
+  const blocked=await send(api,'/internal/v1/gateway/auth',undefined,{...headers,cookie:`huahuo-studio-access=${suspended.accessToken}; huahuo-studio-refresh=${suspended.refreshToken}`},'GET');
+  expect(blocked.statusCode).toBe(401);
+ });
+ it('authenticates gateway admission with the same JWT and active user/session checks',async()=>{
+  const path='/internal/v1/gateway/auth';
+  expect((await send(api,path,undefined,{},'GET')).statusCode).toBe(401);
+  expect((await send(api,path,undefined,{authorization:'Bearer fake.jwt.signature'},'GET')).statusCode).toBe(401);
+  const s=await login();
+  const allowed=await send(api,path,undefined,auth(s),'GET');
+  expect(allowed.statusCode).toBe(204);expect(allowed.body).toBe('');
+  expect(allowed.headers['x-huahuo-user-id']).toBe(s.user.userId);expect(allowed.headers['x-huahuo-auth-method']).toBe('bearer');
+  expect(allowed.headers['x-huahuo-session-id']).toMatch(/^[a-f0-9-]{36}$/);
+  await send(api,'/api/v1/auth/logout',undefined,auth(s));
+  expect((await send(api,path,undefined,auth(s),'GET')).statusCode).toBe(401);
+  const suspended=await login();
+  await root.query("UPDATE users SET status='suspended' WHERE id=$1",[suspended.user.userId]);
+  expect((await send(api,path,undefined,auth(suspended),'GET')).statusCode).toBe(401);
+ });
  it('publishes the Server JWT verification key through JWKS',async()=>{
   const r=await send(api,'/.well-known/jwks.json',undefined,{},'GET');
   expect(r.statusCode).toBe(200);
@@ -49,7 +130,7 @@ describe('P02 real PG identity and scope',()=>{
  });
  it('OTP expiry, wrong phone, wrong purpose, attempt limit and repeat consume are rejected',async()=>{
   const t=await ticket();expect((await send(api,'/api/v1/auth/sms-code',{phone:t.phone,purpose:'reset-password'})).statusCode).toBe(400);
-  const wrong={...loginBody(t),smsCode:t.testCode==='000000'?'111111':'000000'};
+  const wrong={...loginBody(t),smsCode:t.code==='000000'?'111111':'000000'};
   for(let n=0;n<5;n++)expect((await send(api,'/api/v1/auth/login',wrong)).statusCode).toBe(401);
   expect((await send(api,'/api/v1/auth/login',loginBody(t))).statusCode).toBe(429);
   const expired=await ticket();await root.query("UPDATE otp_requests SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE id=$1",[expired.smsRequestId]);
@@ -72,7 +153,8 @@ describe('P02 real PG identity and scope',()=>{
   const t=await ticket(),first=await send(api,'/api/v1/auth/login',loginBody(t,'device-a'));
   await root.query("UPDATE otp_requests SET created_at=now()-interval '61 seconds' WHERE id=$1",[t.smsRequestId]);
   const r=await send(api,'/api/v1/auth/sms-code',{phone:t.phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);
-  const second=await send(api,'/api/v1/auth/login',{...loginBody({phone:t.phone,...r.json().data},'browser-b'),clientType:'web'});
+  const secondTicket=r.json().data;
+  const second=await send(api,'/api/v1/auth/login',{...loginBody({phone:t.phone,...secondTicket,code:transport.codeFor(secondTicket.smsRequestId)},'browser-b'),clientType:'web'});
   expect(second.statusCode).toBe(200);const a=first.json().data,b=second.json().data;
   expect(a.user.userId).toBe(b.user.userId);
   expect((await root.query('SELECT client_type FROM user_sessions WHERE user_id=$1 ORDER BY client_type',[a.user.userId])).rows.map(row=>row.client_type)).toEqual(['app','web']);
@@ -165,16 +247,27 @@ describe('P02 real PG identity and scope',()=>{
   const again=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'},h);expect(again.statusCode).toBe(200);
   expect((await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'})).statusCode).toBe(429);
  });
- it('provider failures do not create usable OTP and disabled SMS never claims success',async()=>{
-  const bad=new IdentityService(poolFor(apiConfig),apiConfig,{sms:{mode:'live',send:async()=>{throw new Error('private-provider-key');}}});
+ it('provider failures do not create usable OTP and missing configuration never claims success',async()=>{
+  const bad=new IdentityService(poolFor(apiConfig),apiConfig,{sms:{send:async()=>{throw new Error('private-provider-key');}}});
   try{await expect(bad.sendCode({phone:'13999990001',purpose:'sign_in'},remote())).rejects.toMatchObject({code:'SMS_PROVIDER_FAILED'});
    const row=await root.query('SELECT delivery_status FROM otp_requests WHERE subject_hash=$1',[mac(secret,'+8613999990001')]);expect(row.rows[0].delivery_status).toBe('failed');
   }finally{await bad.pool.end();}
-  const disabled=new IdentityService(poolFor(apiConfig),{...apiConfig,smsProvider:'disabled'});
-  try{await expect(disabled.sendCode({phone:'13999990002',purpose:'sign_in'},remote())).rejects.toMatchObject({code:'SMS_NOT_CONFIGURED'});}finally{await disabled.pool.end();}
+  expect(()=>new IdentityService(root,{...apiConfig,smsAliyun:undefined})).toThrow('INVALID_CONFIG:SMS_ALIYUN');
+ });
+ it('rejects pre-upgrade simulated receipts and codes without resending',async()=>{
+  const phone='13999990005',key=randomUUID(),headers={'x-idempotency-key':key};
+  const sent=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'},headers);
+  expect(sent.statusCode).toBe(200);
+  const ticket=sent.json().data,code=transport.codeFor(ticket.smsRequestId),count=transport.messages.size;
+  await root.query("UPDATE otp_requests SET provider_mode='mock' WHERE id=$1",[ticket.smsRequestId]);
+  const replay=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'},headers);
+  expect(replay.statusCode).toBe(409);expect(replay.json().error.code).toBe('SMS_DELIVERY_NOT_CONFIRMED');
+  const login=await send(api,'/api/v1/auth/login',loginBody({phone,smsRequestId:ticket.smsRequestId,code}));
+  expect(login.statusCode).toBe(401);expect(login.json().error.code).toBe('SMS_CODE_EXPIRED');
+  expect(transport.messages.size).toBe(count);
  });
  it('live OTP acceptance is durable and same-key replay never resends (mock SDK, real PG)',async()=>{
-  const config=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,SMS_PROVIDER:'live',SHOW_TEST_OTP:'false',
+  const config=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,
    ALIYUN_RAM_ACCESS_KEY_ID:'fixture-id',ALIYUN_RAM_ACCESS_KEY_SECRET:'fixture-secret',SMS_ALIYUN_SIGN_NAME:'花火测试',SMS_ALIYUN_TEMPLATE_CODE:'SMS_123456'});
   const sdkSend=vi.fn<AliyunSmsSdk['sendSmsWithOptions']>().mockResolvedValue(new SendSmsResponse({
    statusCode:200,body:new SendSmsResponseBody({code:'OK',bizId:'123^456',requestId:randomUUID()})}));
@@ -194,12 +287,12 @@ describe('P02 real PG identity and scope',()=>{
    expect(row.rows[0].delivery_status).toBe('sent');
    expect(row.rows[0].code_hash).toBe(mac(secret,ticket.smsRequestId+':'+code));
    expect(row.rows[0].response_cipher).not.toContain(code);
-   const session=await service.login(loginBody({phone,smsRequestId:ticket.smsRequestId,testCode:code}),ip,randomUUID());
+   const session=await service.login(loginBody({phone,smsRequestId:ticket.smsRequestId,code}),ip,randomUUID());
    expect(session.user.userId).toMatch(/^[a-f0-9-]{36}$/);
   }finally{await service.pool.end();}
  });
  it('an ambiguous SDK timeout stays pending and cannot be replayed or used to log in (real PG)',async()=>{
-  const config=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,SMS_PROVIDER:'live',SHOW_TEST_OTP:'false',
+  const config=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,
    ALIYUN_RAM_ACCESS_KEY_ID:'fixture-id',ALIYUN_RAM_ACCESS_KEY_SECRET:'fixture-secret',SMS_ALIYUN_SIGN_NAME:'花火测试',SMS_ALIYUN_TEMPLATE_CODE:'SMS_123456'});
   const sdkSend=vi.fn<AliyunSmsSdk['sendSmsWithOptions']>().mockRejectedValue(Object.assign(new Error('private signed request'),{code:'ETIMEDOUT'}));
   const sms=new AliyunSmsProvider(config.smsAliyun!,new AliyunSmsService(config.smsAliyun!,{
@@ -213,7 +306,7 @@ describe('P02 real PG identity and scope',()=>{
    await expect(service.sendCode({phone,purpose:'sign_in'},ip,key)).rejects.toMatchObject({code:'SMS_DELIVERY_NOT_CONFIRMED'});
    await expect(service.sendCode({phone,purpose:'sign_in'},ip)).rejects.toMatchObject({code:'SMS_RATE_LIMITED'});
    const code=(JSON.parse(sdkSend.mock.calls[0]![0].templateParam!) as {code:string}).code;
-   await expect(service.login(loginBody({phone,smsRequestId:row.rows[0].id,testCode:code}),ip,randomUUID())).rejects.toMatchObject({code:'SMS_CODE_EXPIRED'});
+   await expect(service.login(loginBody({phone,smsRequestId:row.rows[0].id,code}),ip,randomUUID())).rejects.toMatchObject({code:'SMS_CODE_EXPIRED'});
    expect(sdkSend).toHaveBeenCalledTimes(1);
   }finally{await service.pool.end();}
  });

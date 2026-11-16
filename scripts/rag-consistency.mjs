@@ -2,7 +2,7 @@ import {loadConfig} from '../dist/config/config.js';
 import {poolFor} from '../dist/plugins/dependencies.js';
 import {sourceState} from '../dist/modules/kb/repository.js';
 import {tablesFor} from '../dist/modules/kb/types.js';
-import {createMilvusClient} from '../dist/modules/rag/adapters/milvus.js';
+import {createMilvusClient} from '../dist/integrations/search-index/milvus.js';
 const c=loadConfig('api-server'),pool=poolFor(c),client=createMilvusClient(c.milvus);
 try{
  await client.connectPromise;

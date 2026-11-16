@@ -1,3 +1,15 @@
+## 入口调整候选（2026-11-16）
+
+应用Compose已移除代理及备用槽位，API恢复受限宿主端口，Admin保持独立。本轮未重启或删除原有业务容器，也没有切换本机入口；现有运行实例仍需在配套切换时退役，不能把候选Compose当作当前容器状态。所有本轮隔离Nginx/Agent/PG/Redis测试容器和网络均已清理，既有数据卷保留。见[验收](acceptance/ingress-auth.md)。
+
+## 搜索底层封装（2026-11-16）
+
+本轮只运行自有临时PG/Redis/Milvus容器和独立测试集合，48项定向集成通过后已清理；没有重启/替换业务容器、修改真实ENV、删除现有卷或操作共享集合。纯向量集合与跨集合组合检索仅在本轮临时Milvus验证，部署仍沿用既有业务目标和原生混合。ES服务未加入Compose。本轮构建不等于已部署，见[接口与验证](runbooks/milvus.md#底层接口与后端替换)。
+
+## Qwen与FP16专项（2026-11-16）
+
+本轮没有构建/替换业务容器镜像或重启现有应用。当前工作区Build、Compose和四角色+migrate的本机公网ENV解析已通过，实际运行服务仍需按在途候选发布交接。真实集成仅启动本轮所属临时PG/Redis/Milvus并已清理，未删数据卷；共享云Milvus旧空稠密集合已经授权重建为FP16，纯BM25集合保留。云端私网ENV片段已准备、尚未应用。见[专项验收](acceptance/qwen37-vector-switch.md)。
+
 # 当前容器与数据库状态
 
 ## 异常日志构建与启动参数（2026-11-15）
@@ -138,7 +150,7 @@ eci-2ze04nfu5bbryyie7cqy最终为北京I/ecs.gn6i-c8g1.2xlarge/8核31GiB/单T4�
 
 开发 RDS 在一个事务内移除了五个无值且无依赖的废弃解析列，并登记当前 `migrations/0001_initial_schema.sql` 的校验值。现有业务数据保留，标准迁移重放返回 `applied=[]` 和 `current=1`。本机四个 Server 角色均由主 `compose.yaml` 启动，使用 `huahuo-server:local-dev` 且健康。隔离 PostgreSQL/Redis 集成测试 120 项通过。
 
-`127.0.0.1:3000` 就绪检查返回 HTTP 200，短信使用 `SMS_PROVIDER=live` 和 `SHOW_TEST_OTP=false`。[短信手册](runbooks/sms.md#flutter-真实短信联调)
+`127.0.0.1:3000` 就绪检查返回 HTTP 200，短信使用真实阿里云平台。[短信手册](runbooks/sms.md#flutter-真实短信联调)
 
 ## A10测试实例已释放、镜像缓存保留（2026-11-13）
 

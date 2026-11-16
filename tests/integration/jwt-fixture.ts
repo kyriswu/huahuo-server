@@ -34,3 +34,11 @@ export async function insertFixtureSession(pool: pg.Pool, userId: string, sessio
   return bearer;
 }
 
+
+/** Test fixture tokens deliberately use the fixture session id as jti. This
+ * helper represents a trusted internal caller; it is not a JWT authenticator. */
+export function fixtureScopeHeaders(bearer: string): Record<string, string> {
+  const claims = decodeJwt(bearer);
+  if (!claims.sub || !claims.jti) throw new Error('FIXTURE_IDENTITY_REQUIRED');
+  return { 'x-huahuo-user-id': claims.sub, 'x-huahuo-session-id': claims.jti, 'x-huahuo-auth-method': 'bearer' };
+}

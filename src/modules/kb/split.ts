@@ -62,8 +62,8 @@ export async function splitKnowledgeContent(content: string, mode: 'note-hybrid'
       let input=mode==='note-hybrid'?embeddingText(raw,range.headingPath):raw;
       let tokens=mode==='note-hybrid'?await options.tokenizer!.count(input):0;
       // Shrink generated context first; if necessary split the source without dropping a codepoint.
-      if(mode==='note-hybrid'&&tokens>8192){input=embeddingText(raw,[]);tokens=await options.tokenizer!.count(input);}
-      while(mode==='note-hybrid'&&tokens>Math.min(8192,options.tokenizer!.maxInputTokens)){
+      if(mode==='note-hybrid'&&tokens>options.tokenizer!.maxInputTokens){input=embeddingText(raw,[]);tokens=await options.tokenizer!.count(input);}
+      while(mode==='note-hybrid'&&tokens>options.tokenizer!.maxInputTokens){
         const core=boundaries(content,cursor,end);
         if(core.length<=2)throw new Error('KB_MODEL_INPUT_TOO_LONG');
         end=core[Math.max(1,Math.floor((core.length-1)/2))]!;
