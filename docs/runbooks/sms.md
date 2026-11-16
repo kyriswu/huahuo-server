@@ -1,6 +1,6 @@
 # 阿里云短信服务与命令行工具
 
-服务使用官方 `@alicloud/dysmsapi20170525@4.6.0` SDK，通过 HTTPS 调用中国站 `dysmsapi.aliyuncs.com`。通用发送和回执查询位于 `src/integrations/aliyun-sms.ts`；登录验证码适配器位于 `src/integrations/sms.ts`，原 `POST /api/v1/auth/sms-code` 已按 `SMS_PROVIDER` 选择真实适配器。业务层不执行阿里云 CLI，也不依赖宿主用户级 Skill 或 `~/.aliyun/config.json`。
+服务使用官方 `@alicloud/dysmsapi20170525@4.6.0` SDK，通过 HTTPS 调用中国站 `dysmsapi.aliyuncs.com`。通用发送和回执查询位于 `src/integrations/aliyun-sms.ts`；登录验证码适配器位于 `src/integrations/sms.ts`，`POST /api/v1/auth/sms-code` 在开发、测试和正式环境一律使用真实阿里云适配器。业务层不执行阿里云 CLI，也不依赖宿主用户级 Skill 或 `~/.aliyun/config.json`。
 
 官方依据：[API 接入说明](https://help.aliyun.com/zh/sms/getting-started/use-sms-api)、[SendSms](https://help.aliyun.com/zh/sms/developer-reference/api-dysmsapi-2017-05-25-sendsms)、[QuerySendDetails](https://help.aliyun.com/zh/sms/developer-reference/api-dysmsapi-2017-05-25-querysenddetails)。
 
@@ -17,7 +17,7 @@ SMS_ALIYUN_CONNECT_TIMEOUT_MS=3000
 SMS_ALIYUN_READ_TIMEOUT_MS=3000
 ```
 
-本机 API 使用 `SMS_PROVIDER=live` 和 `SHOW_TEST_OTP=false`。环境示例预设 `SMS_PROVIDER=disabled`，填入 RAM 凭据、已审核的签名和模板后设为 `live`。API 启动时校验这些配置。
+API 启动必须提供 RAM 凭据、已审核签名和验证码模板，缺项立即失败。不存在短信模拟、禁用模式或验证码回显开关；验证码只发送到手机，不通过接口返回。
 
 Compose 只向 API 注入短信参数；Admin/Scheduler/Migrate 不新增短信凭据要求。登录验证码由服务端随机生成，使用配置的单一变量名写入模板；模板若包含其他变量，应使用通用工具显式提供，不能直接用于当前登录适配器。
 
@@ -71,8 +71,8 @@ Flutter 登录页在手机号无效或填入六位码但缺少当前请求票据
 # 校验并显示脱敏预览；不发起网络请求。
 pnpm sms preview < /path/to/sms-request.json
 
-# 显式提交一次；命令级 live 设置不改变 .env 或运行中的 API。
-SMS_PROVIDER=live pnpm sms send < /path/to/sms-request.json
+# 向阿里云显式提交一次；配置来自私密环境。
+pnpm sms send < /path/to/sms-request.json
 ```
 
 工具输出为 JSON，包含 `status:accepted`、`bizId`、`requestId`、`outId`、脱敏手机号和中国时区的 `sendDate`。它不输出短信变量、短信正文或密钥。无需 tsx 的构建产物入口为 `node --env-file-if-exists=.env dist/entrypoints/sms.js`，先执行 `pnpm build`。

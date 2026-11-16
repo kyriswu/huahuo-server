@@ -4,11 +4,11 @@
 
 当前业务启动以根目录 `.env` 和 [本地开发手册](local-development.md) 为准，数据库以 `migrations/0001_initial_schema.sql` 为唯一初始化基线，不依赖历史迁移链。`node scripts/verify.mjs` 包括类型/lint/build、unit/contract、真实临时 PG/Redis 集成测试。`node scripts/e2e-p02.mjs` 启动两个临时 HTTP 容器和随机测试数据库，运行两用户与 Admin 会话流程，finally 仅删除这些测试资源。`node scripts/container-isolation.mjs` 验证四角色独立性和依赖恢复。上述 E2E 入口仅供独立本地测试栈；当前 API 连接云 PG 时会拒绝执行。
 
-## 本地短信模拟
+## 真实短信验证码
 
-API 显式注入 SMS_PROVIDER=mock、ALLOW_MOCK_PROVIDERS=true、SHOW_TEST_OTP=true；不会发送真实短信。`POST /api/v1/auth/sms-code` body `{phone:"13800000001",purpose:"sign_in"}` 返回 smsRequestId/cooldownSeconds/providerMode=mock/testCode。手机号仅支持 CN 11 位移动号或 +86 E.164，其他区域明确拒绝。
+开发、测试和正式环境统一调用真实阿里云短信平台，启动前须提供已审核签名、模板和 RAM 凭据。`POST /api/v1/auth/sms-code` body `{phone:"13800000001",purpose:"sign_in"}` 返回 smsRequestId/cooldownSeconds/providerMode=live，不返回验证码。手机号仅支持 CN 11 位移动号或 +86 E.164，其他区域明确拒绝。
 
-登录请求必须包含 phone、smsRequestId、smsCode、clientType（`app` 或 `web`）、clientId、agreementAccepted=true、agreementVersion、privacyVersion、clientVersion，可选 timeZone。clientId 是客户端生成并保留的安装或浏览器实例标识；它不决定用户身份，用户身份由验证后的 JWT `sub` 决定。短信请求和登录请求只接受上述字段契约，不保留旧参数别名。当前开发协议与隐私版本均为 2026-08-20。不要将 testCode 或 token 写入共享日志。生产不允许 mock、测试 OTP 回显或开发绕过。
+登录请求必须包含 phone、smsRequestId、smsCode、clientType（`app` 或 `web`）、clientId、agreementAccepted=true、agreementVersion、privacyVersion、clientVersion，可选 timeZone。clientId 是客户端生成并保留的安装或浏览器实例标识；它不决定用户身份，用户身份由验证后的 JWT `sub` 决定。短信请求和登录请求只接受上述字段契约，不保留旧参数别名。当前开发协议与隐私版本均为 2026-08-20。不要将验证码或 token 写入共享日志。升级前的模拟票据不能重放或登录。隔离自动测试通过测试目录中的传输替身捕获验证码；HTTP E2E 只在自身随机临时数据库中准备 OTP，不增加应用的模拟模式或回显接口。
 
 ```json
 {

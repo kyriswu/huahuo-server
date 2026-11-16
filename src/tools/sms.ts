@@ -4,7 +4,7 @@ import { maskedPhone } from '../modules/identity/crypto.js';
 import { DomainError } from '../modules/identity/store.js';
 
 export const smsToolUsage = 'Usage: pnpm sms <preview|send|query> < request.json\n'
-  + 'preview: validate one template SMS locally; send: submit it once (SMS_PROVIDER=live required); query: look up its BizId.\n'
+  + 'preview: validate one template SMS locally; send: submit it once through Aliyun; query: look up its BizId.\n'
   + 'Input and template variables are read from stdin; credentials come from ALIYUN_RAM_ACCESS_KEY_ID/SECRET.\n';
 
 export async function readSmsToolInput(stream: AsyncIterable<string | Uint8Array>): Promise<unknown> {
@@ -33,7 +33,6 @@ export async function executeSmsCommand(
   }
   if (command === 'send') {
     const message = prepareTemplateSms(input);
-    if (env.SMS_PROVIDER !== 'live') throw new DomainError(503, 'SMS_NOT_CONFIGURED');
     return createService(loadAliyunSmsConnection(env)).sendTemplate(message);
   }
   if (command === 'query') {

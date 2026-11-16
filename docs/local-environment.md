@@ -18,7 +18,7 @@
 
 App 只读根目录已改为 `../huahuo-ai`，源码在 `lib/`；`pnpm app:reference`、`pnpm app:reference:diff` 及本机路径预检通过，当前 Git 为没有 commit/origin 的新仓库。实际源码和工作树哈希纳入本轮基线，未向 App 写入。
 
-`.env` 和 `.env.compose.local` 仅追加六个已验证的阿里云短信非秘密参数，既有内容/凭据/模式保留。签名“触达科技”、模板 `SMS_508520316`、code 变量和 3000ms 连接/读取超时可用于新适配器；API 真发时设置 `SMS_PROVIDER=live`、`SHOW_TEST_OTP=false` 并采用新构建。Skill 仍装在用户目录，业务服务独立读取项目环境中的共享 RAM AK。
+`.env` 和 `.env.compose.local` 仅追加六个已验证的阿里云短信非秘密参数，既有内容/凭据/模式保留。签名“触达科技”、模板 `SMS_508520316`、code 变量和 3000ms 连接/读取超时可用于新适配器；API 在所有环境直接采用真实短信适配器，新构建启动前必须备齐签名、模板和 RAM 凭据。Skill 仍装在用户目录，业务服务独立读取项目环境中的共享 RAM AK。
 
 宿主使用 Node 26.11.0 / pnpm 10.15.1。337 项 unit/contract、120 项隔离真实依赖测试与一次真实短信送达分别留证，见[短信手册](runbooks/sms.md)。业务容器和数据库未变更。
 

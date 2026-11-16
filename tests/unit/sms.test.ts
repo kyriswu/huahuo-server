@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { Script } from 'node:vm';
 import { QuerySendDetailsResponse, QuerySendDetailsResponseBody, QuerySendDetailsResponseBodySmsSendDetailDTOs, QuerySendDetailsResponseBodySmsSendDetailDTOsSmsSendDetailDTO, SendSmsResponse, SendSmsResponseBody } from '@alicloud/dysmsapi20170525';
 import { loadConfig } from '../../src/config/config.js';
 import { loadAliyunOtpConfig, loadAliyunSmsConnection } from '../../src/config/sms.js';
@@ -8,7 +10,7 @@ import { executeSmsCommand, readSmsToolInput, smsToolError } from '../../src/too
 import { env } from '../helpers.js';
 
 const credentials = { ALIYUN_RAM_ACCESS_KEY_ID: 'fixture-access-id', ALIYUN_RAM_ACCESS_KEY_SECRET: 'fixture-access-secret' };
-const configured = { ...env, ...credentials, SMS_PROVIDER: 'live', SMS_ALIYUN_SIGN_NAME: '花火测试', SMS_ALIYUN_TEMPLATE_CODE: 'SMS_123456', SMS_ALIYUN_CODE_PARAM: 'verification' };
+const configured = { ...env, ...credentials, SMS_ALIYUN_SIGN_NAME: '花火测试', SMS_ALIYUN_TEMPLATE_CODE: 'SMS_123456', SMS_ALIYUN_CODE_PARAM: 'verification' };
 const otpConfig = loadAliyunOtpConfig(configured);
 const requestId = '386a8301-31ba-46e9-951f-5b9ae36081aa';
 const input = { phone: '13800000001', signName: '花火测试', templateCode: 'SMS_123456', templateParams: { verification: '001234' }, outId: requestId };
@@ -34,15 +36,27 @@ function fixture(status = 3) {
 afterEach(() => vi.useRealTimers());
 
 describe('Aliyun SMS configuration', () => {
+  it('checks the actual five-role release configuration without network access', () => {
+    const assertion=new Script(readFileSync('scripts/release/changes/20261117-sms-live-only/verify-config.mjs','utf8'));
+    const api={...credentials,SERVICE_ROLE:'api-server',SMS_ALIYUN_SIGN_NAME:'触达科技',SMS_ALIYUN_TEMPLATE_CODE:'SMS_508520316',SMS_ALIYUN_CODE_PARAM:'code',SMS_ALIYUN_REGION_ID:'cn-hangzhou',SMS_ALIYUN_CONNECT_TIMEOUT_MS:'3000',SMS_ALIYUN_READ_TIMEOUT_MS:'3000'};
+    const verify=(env:Record<string,string|undefined>)=>assertion.runInNewContext({process:{env}});
+    expect(()=>verify(api)).not.toThrow();
+    for(const role of ['admin','worker','scheduler','migrate'])expect(()=>verify({SERVICE_ROLE:role})).not.toThrow();
+    for(const patch of [{SMS_PROVIDER:'live'},{SHOW_TEST_OTP:'false'},{SMS_ALIYUN_TEMPLATE_CODE:'SMS_123456'},{SMS_ALIYUN_CODE_PARAM:'wrong'},{ALIYUN_RAM_ACCESS_KEY_ID:''},{SERVICE_ROLE:'unknown'}])expect(()=>verify({...api,...patch})).toThrow('SMS_RELEASE_CONFIGURATION_INVALID');
+  });
   it('requires a complete live configuration only for the API role and uses the shared RAM keys', () => {
     expect(loadConfig('api-server', configured).smsAliyun).toEqual(otpConfig);
     for (const key of ['ALIYUN_RAM_ACCESS_KEY_ID', 'ALIYUN_RAM_ACCESS_KEY_SECRET', 'SMS_ALIYUN_SIGN_NAME', 'SMS_ALIYUN_TEMPLATE_CODE']) {
       expect(() => loadConfig('api-server', { ...configured, [key]: '' })).toThrow('INVALID_CONFIG:' + key);
     }
     for (const role of ['admin', 'worker', 'scheduler', 'migrate'] as const) {
-      expect(loadConfig(role, { ...env, SMS_PROVIDER: 'live' }).smsAliyun).toBeUndefined();
+      expect(loadConfig(role, { ...env, ALIYUN_RAM_ACCESS_KEY_ID: '', ALIYUN_RAM_ACCESS_KEY_SECRET: '' }).smsAliyun).toBeUndefined();
     }
-    expect(loadConfig('api-server', env).smsAliyun).toBeUndefined();
+    for (const appEnv of ['development', 'test', 'production']) {
+      const runtime = { ...configured, APP_ENV: appEnv, DATABASE_SSL_MODE: 'verify-full', APP_PUBLIC_BASE_URL: 'https://api.example.test', APP_JWT_PRIVATE_KEY: 'cA==', APP_JWT_PUBLIC_KEY: 'cA==' };
+      expect(createSmsProvider(loadConfig('api-server', runtime))).toBeInstanceOf(AliyunSmsProvider);
+      expect(() => loadConfig('api-server', { ...runtime, SMS_ALIYUN_TEMPLATE_CODE: '' })).toThrow('INVALID_CONFIG:SMS_ALIYUN_TEMPLATE_CODE');
+    }
     expect(createSmsProvider(loadConfig('api-server', configured))).toBeInstanceOf(AliyunSmsProvider);
     expect(loadAliyunSmsConnection(credentials)).toMatchObject({ accessKeyId: credentials.ALIYUN_RAM_ACCESS_KEY_ID, readTimeoutMs: 3000 });
   });
@@ -146,9 +160,9 @@ describe('SMS tool input and execution', () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
-  it('requires live mode for a manual send and reuses the same service for send/query', async () => {
+  it('requires credentials for a manual send and reuses the same service for send/query', async () => {
     const f = fixture(), factory = vi.fn(() => f.service);
-    await expect(executeSmsCommand('send', input, { ...credentials, SMS_PROVIDER: 'disabled' }, factory)).rejects.toMatchObject({ code: 'SMS_NOT_CONFIGURED' });
+    await expect(executeSmsCommand('send', input, {}, factory)).rejects.toThrow('INVALID_CONFIG:ALIYUN_RAM_ACCESS_KEY_ID');
     expect(factory).not.toHaveBeenCalled();
     expect(await executeSmsCommand('send', input, configured, factory)).toMatchObject({ status: 'accepted' });
     expect(await executeSmsCommand('query', { phone: input.phone, bizId: '123^456', sendDate: '20261112' }, credentials, factory)).toMatchObject({ totalCount: 1 });

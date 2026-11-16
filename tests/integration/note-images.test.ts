@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { migrate } from '../../src/db/migrate.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { AssetService } from '../../src/modules/assets/service.js';

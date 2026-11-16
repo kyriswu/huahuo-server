@@ -26,7 +26,6 @@ export interface AppConfig {
   appTokenSecret?: string; adminSessionSecret?: string;
   jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string; previousPublicKeyPem?:string; previousKeyId?:string };
   gatewayStudio: { enabled: boolean; origin: string; publicPath: string };
-  smsProvider: 'mock' | 'disabled' | 'live'; showTestOtp: boolean;
   smsAliyun?: AliyunOtpConfig;
   appEnv: string; agreementVersion: string; privacyVersion: string; adminOrigin: string;
   billingMode: 'disabled' | 'development' | 'live'; billingPolicyVersion: string;
@@ -97,7 +96,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (!['disabled', 'mock', 'live'].includes(mode)) fail('PROVIDER_MODE');
   if (mode === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('PROVIDER_MODE');
   if (env.DEV_AUTH_BYPASS === 'true' && (appEnv !== 'development' || env.ALLOW_DEV_AUTH !== 'true')) fail('DEV_AUTH_BYPASS');
-  for (const key of ['PAYMENT_PROVIDER','ASR_PROVIDER','WORKFLOW_PROVIDER','SMS_PROVIDER','PUSH_PROVIDER']) {
+  for (const key of ['PAYMENT_PROVIDER','ASR_PROVIDER','WORKFLOW_PROVIDER','PUSH_PROVIDER']) {
     if (appEnv === 'production' && env[key] === 'mock') fail(key);
   }
   const databaseUrl = url('DATABASE_URL', ['postgres:', 'postgresql:']);
@@ -142,11 +141,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     studioOrigin = parsed.origin;
   } catch { fail('HUAHUO_STUDIO_ORIGIN'); }
   const gatewayStudio = { enabled: studioEnabled === 'true', origin: studioOrigin, publicPath: studioPath };
-  const smsProvider = (env.SMS_PROVIDER ?? 'disabled') as AppConfig['smsProvider'];
-  if (!['mock', 'disabled', 'live'].includes(smsProvider)) fail('SMS_PROVIDER');
-  if (smsProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('SMS_PROVIDER');
-  if (env.SHOW_TEST_OTP === 'true' && (appEnv === 'production' || smsProvider !== 'mock')) fail('SHOW_TEST_OTP');
-  const smsAliyun = role === 'api-server' && smsProvider === 'live' ? loadAliyunOtpConfig(env) : undefined;
+  const smsAliyun = role === 'api-server' ? loadAliyunOtpConfig(env) : undefined;
   const billingMode = (env.BILLING_MODE ?? (appEnv === 'development' ? 'development' : 'disabled')) as AppConfig['billingMode'];
   if (!['disabled', 'development', 'live'].includes(billingMode)) fail('BILLING_MODE');
   if (appEnv === 'production' && billingMode === 'development') fail('BILLING_MODE');
@@ -250,7 +245,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
       ...(jwtPreviousKeyId ? { previousKeyId: jwtPreviousKeyId } : {}),
     },
     gatewayStudio,
-    smsProvider, smsAliyun, showTestOtp: env.SHOW_TEST_OTP === 'true' && appEnv !== 'production', appEnv,
+    smsAliyun, appEnv,
     agreementVersion: env.USER_AGREEMENT_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     privacyVersion: env.PRIVACY_POLICY_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     adminOrigin: env.ADMIN_PUBLIC_BASE_URL ? new URL(env.ADMIN_PUBLIC_BASE_URL).origin : '',

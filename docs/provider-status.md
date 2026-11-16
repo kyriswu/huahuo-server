@@ -120,7 +120,7 @@ PP-OCRv5 server/ONNX CUDA/batch6/150DPI/原生优先，无force_ocr_pages，真�
 
 官方 `@alicloud/dysmsapi20170525@4.6.0` 已接入现有 `SmsProvider`，支持单条模板发送、BizId 回执查询及本机工具。通过共享 RAM AK 查询确认现有签名“触达科技”和花火身份验证码模板 `SMS_508520316` 审核通过；用户授权的一条真实短信已获 delivered 回执并由用户确认收到。该真实证据独立于模拟 SDK 和真实 PG 的 OTP 测试。
 
-337 项 unit/contract 与 120 项隔离真实 PG/Redis/Milvus integration 通过。另用 `127.0.0.1:13000` 的独立开发实例和 Android API 36 完成 Flutter 真实发送、重发与验证登录。该实例启用 `SMS_PROVIDER=live`、`SHOW_TEST_OTP=false`，原 `3000` 仍使用其现有迁移基线。详见[短信手册](runbooks/sms.md#flutter-真实短信联调)。
+337 项 unit/contract 与 120 项隔离真实 PG/Redis/Milvus integration 通过。另用 `127.0.0.1:13000` 的独立开发实例和 Android API 36 完成 Flutter 真实发送、重发与验证登录。该实例使用真实阿里云短信，原 `3000` 仍使用其现有迁移基线。详见[短信手册](runbooks/sms.md#flutter-真实短信联调)。
 
 ## Xberg CUDA 新图片策略验收未通过（2026-11-12）
 

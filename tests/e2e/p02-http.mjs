@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createApiRequest } from './api-request.mjs';
+import { isolatedOtp } from './otp-fixture.mjs';
 const api=process.env.TEST_API_URL,admin=process.env.TEST_ADMIN_URL;
 const apiRequest=createApiRequest(api,{admissionMode:process.env.TEST_API_ADMISSION_MODE});
 const req=async(base,path,method='GET',body,headers={})=>{
@@ -13,8 +14,8 @@ for(const base of [api,admin]){
  assert(ready,'HTTP role readiness');
 }
 async function login(phone){
- const otp=await req(api,'/api/v1/auth/sms-code','POST',{phone,purpose:'sign_in'});assert.equal(otp.status,200);assert.equal(otp.data.providerMode,'mock');
- const result=await req(api,'/api/v1/auth/login','POST',{phone,smsRequestId:otp.data.smsRequestId,smsCode:otp.data.testCode,clientType:'app',clientId:'p02-http-app',agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-http'});
+ const otp=await isolatedOtp(phone);
+ const result=await req(api,'/api/v1/auth/login','POST',{phone,smsRequestId:otp.smsRequestId,smsCode:otp.code,clientType:'app',clientId:'p02-http-app',agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-http'});
  assert.equal(result.status,200);return result.data;
 }
 const a=await login('13800008001'),b=await login('13800008002');
@@ -33,4 +34,4 @@ assert.equal((await req(admin,'/admin/api/v1/me','GET',undefined,{Cookie:cookie}
 assert.equal((await req(admin,'/admin/api/v1/logout','POST',undefined,{Cookie:cookie,Origin:'http://admin.test'})).status,403);
 assert.equal((await req(admin,'/admin/api/v1/logout','POST',undefined,{Cookie:cookie,Origin:'http://admin.test','X-CSRF-Token':logged.data.csrfToken})).status,200);
 assert.equal((await req(admin,'/admin/api/v1/me','GET',undefined,{Cookie:cookie})).status,401);
-console.log('P02 HTTP: two isolated users, profile persistence, refresh reuse revocation, independent admin login/CSRF/logout passed (mock SMS).');
+console.log('P02 HTTP: two isolated users, profile persistence, refresh reuse revocation, independent admin login/CSRF/logout passed (test-client OTP fixtures; no SMS delivery exercised).');

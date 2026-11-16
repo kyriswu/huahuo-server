@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
@@ -15,7 +15,7 @@ if (!migrationUrl || !/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(
 const config = loadConfig('api-server', {
   ...process.env, ...testJwtEnv, DATABASE_URL: process.env.TEST_DATABASE_API_URL,
   APP_ENV: 'test', LOG_LEVEL: 'silent', APP_TOKEN_SECRET: 'smoke-fixture-'.repeat(4),
-  APP_PUBLIC_BASE_URL: 'http://localhost:3000', BILLING_MODE: 'disabled', SMS_PROVIDER: 'disabled',
+  APP_PUBLIC_BASE_URL: 'http://localhost:3000', BILLING_MODE: 'disabled',
   PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled',
   PROCESSING_NODES_ENABLED: 'false', ENABLE_DEMO_TASKS: 'false',
 });

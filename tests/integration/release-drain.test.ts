@@ -1,6 +1,6 @@
 import { beforeAll, afterAll, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
 import { TaskService } from '../../src/modules/tasks/service.js';
@@ -14,7 +14,7 @@ import { TaskScheduler } from '../../src/modules/tasks/scheduler.js';
 const migrationUrl = process.env.TEST_DATABASE_MIGRATION_URL!;
 if (!migrationUrl || !/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1))) throw new Error('TEST_DB_REQUIRED');
 const env = { ...process.env, ...testJwtEnv, APP_ENV: 'test', LOG_LEVEL: 'silent', APP_TOKEN_SECRET: 'test-'.repeat(12),
-  APP_PUBLIC_BASE_URL: 'http://localhost:3000', SMS_PROVIDER: 'disabled', ENABLE_DEMO_TASKS: 'true',
+  APP_PUBLIC_BASE_URL: 'http://localhost:3000', ENABLE_DEMO_TASKS: 'true',
   REDIS_KEY_PREFIX: 'release-' + randomUUID(), WORKER_QUEUES: 'content', TASK_LEASE_MS: '5000' };
 const apiConfig = loadConfig('api-server', { ...env, DATABASE_URL: process.env.TEST_DATABASE_API_URL });
 const workerConfig = loadConfig('worker', { ...env, DATABASE_URL: process.env.TEST_DATABASE_WORKER_URL });
