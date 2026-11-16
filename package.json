@@ -54,7 +54,8 @@
     "rag:consistency": "node --env-file=.env scripts/rag-consistency.mjs",
     "rag:verify-milvus": "pnpm build && node --env-file=.env scripts/verify-milvus.mjs",
     "admin:bootstrap": "node dist/entrypoints/admin-bootstrap.js",
-    "admin:revoke-sessions": "node dist/entrypoints/admin-revoke-sessions.js"
+    "admin:revoke-sessions": "node dist/entrypoints/admin-revoke-sessions.js",
+    "release:review": "node dist/entrypoints/release-plan.js --review"
   },
   "dependencies": {
     "@alicloud/dysmsapi20170525": "4.6.0",

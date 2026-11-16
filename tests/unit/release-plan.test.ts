@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readReleasePlan, ReleasePlanError, validateReleasePlan, type ReleasePlan } from '../../src/release/plan.js';
+import { readReleasePlan, ReleasePlanError, reviewReleasePlan, validateReleasePlan, type ReleasePlan } from '../../src/release/plan.js';
 
 let root: string, base: string, plan: ReleasePlan;
 function git(...args: string[]): string {
@@ -38,7 +38,7 @@ describe('reviewed release plan', () => {
   it('accepts a code-only release and reports only bounded metadata', async () => {
     await put('src/app.ts', 'export const version = 2;\n'); const revision = commit(); await save();
     expect(await validateReleasePlan(await readReleasePlan(root), root)).toEqual({ id: plan.id, baseRevision: base, revision,
-      migrationCount: 0, changedFileCount: 1, serviceCount: 4, smoke: 'authenticated' });
+      migrationCount: 0, changedFileCount: 1, serviceCount: 4, smoke: 'authenticated', automaticReleaseReady: true });
   });
   it('permits a test health plan without interpreting it as production approval', async () => {
     plan.smoke = 'health'; expect((await validateReleasePlan(plan, root)).smoke).toBe('health');
@@ -145,6 +145,15 @@ describe('reviewed release plan', () => {
   });
   it.each(['database', 'api', 'tasks', 'configuration'] as const)('blocks automatic release with incompatible %s', async key => {
     plan.compatibility[key] = false; await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_INCOMPATIBLE');
+    await expect(reviewReleasePlan(plan, root)).resolves.toMatchObject({ automaticReleaseReady: false });
+  });
+  it('still checks historical SQL and cumulative config changes in review mode', async () => {
+    plan.compatibility.api = false;
+    await put('migrations/0001_initial_schema.sql', 'SELECT 1;'); commit();
+    await expect(reviewReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_MIGRATION_HISTORY_CHANGED');
+    await put('migrations/0001_initial_schema.sql', 'CREATE TABLE fixture(id integer);\n');
+    await put('src/config/config.ts', 'export const changed = true;'); commit();
+    await expect(reviewReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_CONFIG_REVIEW_REQUIRED');
   });
   it('rejects unknown and divergent deployed baselines', async () => {
     plan.baseRevision = 'f'.repeat(40); await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_BASE_INVALID');
@@ -207,6 +216,15 @@ describe('reviewed release plan', () => {
     catch (error) { result = error as typeof result; }
     expect(result.status).toBe(1); expect(result.stdout).toBe('');
     expect(JSON.parse(String(result.stderr))).toEqual({ status: 'failed', code: 'RELEASE_PLAN_INVALID' });
+  });
+  it('CLI review permits a clean incompatible candidate but never an uncommitted one or deployment', async () => {
+    plan.compatibility.api = false; await save();
+    const common = ['--disable-warning=DEP0205', '--import', 'tsx', resolve('src/entrypoints/release-plan.ts')];
+    const run = (review: boolean) => execFileSync(process.execPath, [...common, ...(review ? ['--review'] : []), '--root', root], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    expect(() => run(true)).toThrow();
+    commit();
+    expect(JSON.parse(run(true))).toMatchObject({ status: 'passed', mode: 'review', automaticReleaseReady: false });
+    expect(() => run(false)).toThrow();
   });
   it('CLI refuses an uncommitted candidate, then accepts the same clean committed tree', async () => {
     await save();
