@@ -1,6 +1,6 @@
 import { beforeAll,afterAll,it,expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
 import { TaskService } from '../../src/modules/tasks/service.js';
@@ -16,7 +16,7 @@ import { fixtureAccessToken, insertFixtureUser, insertFixtureSession, testJwtEnv
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL!;
 if(!migrationUrl||!/^huahuo_test_/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('TEST_DB_REQUIRED');
-const env={...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),ADMIN_SESSION_SECRET:'admin-'.repeat(12),APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',SMS_PROVIDER:'disabled',REDIS_KEY_PREFIX:'p03-'+randomUUID(),ENABLE_DEMO_TASKS:'true'};
+const env={...process.env,...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_TOKEN_SECRET:'test-'.repeat(12),ADMIN_SESSION_SECRET:'admin-'.repeat(12),APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',REDIS_KEY_PREFIX:'p03-'+randomUUID(),ENABLE_DEMO_TASKS:'true'};
 const cfg=(role:'api-server'|'worker'|'scheduler'|'admin')=>loadConfig(role,{...env,DATABASE_URL:process.env[`TEST_DATABASE_${role==='api-server'?'API':role.toUpperCase()}_URL`]});
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:migrationUrl})),apiPool=poolFor(cfg('api-server')),workerPool=poolFor(cfg('worker')),schedulerPool=poolFor(cfg('scheduler'));
 const service=new TaskService(apiPool,cfg('api-server').appTokenSecret!),engine=new TaskEngine(workerPool,2000);

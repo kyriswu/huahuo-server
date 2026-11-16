@@ -4,10 +4,11 @@ import { describe,expect,it } from 'vitest';
 import { IdentityService,type LoginInput } from '../../src/modules/identity/service.js';
 import { mac,normalizePhone } from '../../src/modules/identity/crypto.js';
 import { config } from '../helpers.js';
+import { recordingSms } from '../sms-fixture.js';
 
 interface SessionFixture {id:string;user_id:string;accessJti:string;accessHash:string;revoked:boolean;}
 function fixture(existing=false){
- const cfg=config();cfg.smsProvider='mock';cfg.showTestOtp=true;
+ const cfg=config(),transport=recordingSms();
  const state:{userId:string;identityId:string;existing:boolean;status:string;deleted:boolean;sessionExpiresAt:Date}={userId:randomUUID(),identityId:randomUUID(),existing,status:'active',deleted:false,sessionExpiresAt:new Date(Date.now()+30*86400*1000)};
  const calls:Array<{sql:string;values:unknown[]}>=[];
  const refreshes=new Map<string,{session_id:string;consumed_at:Date|null;valid:boolean}>();
@@ -20,7 +21,7 @@ function fixture(existing=false){
    if(sql.startsWith('INSERT INTO auth_rate_limits'))return result([{hits:1}]);
    if(sql.startsWith('SELECT id FROM otp_requests'))return result();
    if(sql.startsWith('INSERT INTO otp_requests')){otpHash=String(values[2]);return result();}
-   if(sql.startsWith('SELECT code_hash'))return result([{code_hash:otpHash,attempts:0,valid:true,consumed_at:null,delivery_status:'sent'}]);
+   if(sql.startsWith('SELECT code_hash'))return result([{code_hash:otpHash,attempts:0,valid:true,consumed_at:null,delivery_status:'sent',provider_mode:'live'}]);
    if(sql.startsWith('UPDATE otp_requests'))return result();
    if(sql.startsWith('SELECT id,user_id FROM user_identities'))return result(state.existing?[{id:state.identityId,user_id:state.userId}]:[]);
    if(sql.startsWith('INSERT INTO users')){state.userId=String(values[0]);return result();}
@@ -45,11 +46,11 @@ function fixture(existing=false){
   },release(){},
  };
  const pool={query:client.query,async connect(){return client;}} as unknown as pg.Pool;
- const service=new IdentityService(pool,cfg);
+ const service=new IdentityService(pool,cfg,{sms:transport.sms});
  async function signIn(clientType:LoginInput['clientType']='app'){
   const phone='13800000001',ticket=await service.sendCode({phone,purpose:'sign_in'},'127.0.0.1');
-  if(!ticket.testCode)throw new Error('EXPLICIT_MOCK_OTP_REQUIRED');
-  return service.login({phone,smsRequestId:ticket.smsRequestId,smsCode:ticket.testCode,clientType,clientId:'unit-client',agreementAccepted:true,agreementVersion:cfg.agreementVersion,privacyVersion:cfg.privacyVersion,clientVersion:'unit'},'127.0.0.1','trace');
+  expect(ticket).not.toHaveProperty('testCode');
+  return service.login({phone,smsRequestId:ticket.smsRequestId,smsCode:transport.codeFor(ticket.smsRequestId),clientType,clientId:'unit-client',agreementAccepted:true,agreementVersion:cfg.agreementVersion,privacyVersion:cfg.privacyVersion,clientVersion:'unit'},'127.0.0.1','trace');
  }
  return {cfg,state,calls,service,signIn};
 }

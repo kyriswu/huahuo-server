@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Readable} from 'node:stream';
 import {Redis} from 'ioredis';
-import {loadConfig} from '../../src/config/config.js';
+import {loadTestConfig as loadConfig} from '../sms-fixture.js';
 import {extractionConfig} from '../support/extraction-config.js';
 import {migrate} from '../../src/db/migrate.js';
 import {poolFor} from '../../src/plugins/dependencies.js';

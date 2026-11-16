@@ -11,7 +11,7 @@ const response={tokenType:'Bearer',accessToken:'unit-token',refreshToken:'unit-r
 function fixture(){
  const app=Fastify({ajv:{customOptions:{removeAdditional:false}}});
  app.setErrorHandler<FastifyError>((error,req,reply)=>reply.code(error.validation?400:500).send(failure(error.validation?'VALIDATION_ERROR':'INTERNAL_ERROR','Request failed',req.id)));
- const sendCode=vi.fn().mockResolvedValue({smsRequestId:uuid,cooldownSeconds:60,providerMode:'mock'}),login=vi.fn().mockResolvedValue(response);
+ const sendCode=vi.fn().mockResolvedValue({smsRequestId:uuid,cooldownSeconds:60,providerMode:'live',testCode:'123456'}),login=vi.fn().mockResolvedValue(response);
  registerIdentityRoutes(app,{sendCode,login} as unknown as IdentityService,{} as WorkspaceService);
  return {app,sendCode,login};
 }
@@ -20,7 +20,9 @@ describe('canonical identity request schemas',()=>{
  it('requires purpose=sign_in and rejects scene or unsupported purposes',async()=>{
   const {app,sendCode}=fixture();
   try{
-   expect((await app.inject({method:'POST',url:'/api/v1/auth/sms-code',payload:{phone:body.phone,purpose:'sign_in'}})).statusCode).toBe(200);
+   const result=await app.inject({method:'POST',url:'/api/v1/auth/sms-code',payload:{phone:body.phone,purpose:'sign_in'}});
+   expect(result.statusCode).toBe(200);
+   expect(result.json().data).toEqual({smsRequestId:uuid,cooldownSeconds:60,providerMode:'live'});
    for(const payload of [{phone:body.phone,scene:'login'},{phone:body.phone,purpose:'sign_up'},{phone:body.phone,purpose:'sign_in',scene:'login'}]){
     expect((await app.inject({method:'POST',url:'/api/v1/auth/sms-code',payload})).statusCode).toBe(400);
    }

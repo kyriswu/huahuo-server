@@ -2,7 +2,7 @@ import { beforeAll,afterAll,it,expect,describe } from 'vitest';
 import { randomUUID,createHash,createHmac } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { rm,access } from 'node:fs/promises';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
 import { AssetService } from '../../src/modules/assets/service.js';

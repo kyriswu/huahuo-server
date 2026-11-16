@@ -1,7 +1,7 @@
 import {afterAll,beforeAll,describe,it,expect,vi} from 'vitest';
 import {randomUUID,createHash} from 'node:crypto';
 import {Redis} from 'ioredis';
-import {loadConfig} from '../../src/config/config.js';
+import {loadTestConfig as loadConfig} from '../sms-fixture.js';
 import {poolFor} from '../../src/plugins/dependencies.js';
 import {migrate} from '../../src/db/migrate.js';
 import {buildAdminServer} from '../../src/apps/admin.js';

@@ -4,7 +4,7 @@ import {buildApiServer} from '../../src/apps/api-server.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 import type {TagExtractor} from '../../src/modules/assets/tag-extractor.js';
-import {loadConfig} from '../../src/config/config.js';
+import {loadTestConfig as loadConfig} from '../sms-fixture.js';
 import {poolFor} from '../../src/plugins/dependencies.js';
 import {migrate} from '../../src/db/migrate.js';
 import {AssetService} from '../../src/modules/assets/service.js';

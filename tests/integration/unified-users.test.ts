@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHash, randomUUID } from 'node:crypto';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { migrate } from '../../src/db/migrate.js';
 import { IdentityService } from '../../src/modules/identity/service.js';
 import { poolFor } from '../../src/plugins/dependencies.js';

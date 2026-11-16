@@ -5,6 +5,8 @@ export const env: Env = {
  REDIS_CACHE_URL:'redis://localhost:6379/0',REDIS_QUEUE_URL:'redis://localhost:6379/1',
  APP_ENV:'test',APP_TOKEN_SECRET:'a'.repeat(32),ADMIN_SESSION_SECRET:'b'.repeat(32),
  APP_PUBLIC_BASE_URL:'http://localhost:3000',ADMIN_PUBLIC_BASE_URL:'http://localhost:3001',LOG_LEVEL:'silent',
+ ALIYUN_RAM_ACCESS_KEY_ID:'fixture-access-id',ALIYUN_RAM_ACCESS_KEY_SECRET:'fixture-access-secret',
+ SMS_ALIYUN_SIGN_NAME:'花火测试',SMS_ALIYUN_TEMPLATE_CODE:'SMS_123456',
 };
 export const config = (role: Role = 'api-server') => loadConfig(role,env);
 export function dependencies(ready=true): Dependencies {

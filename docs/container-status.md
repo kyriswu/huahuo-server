@@ -150,7 +150,7 @@ eci-2ze04nfu5bbryyie7cqy最终为北京I/ecs.gn6i-c8g1.2xlarge/8核31GiB/单T4�
 
 开发 RDS 在一个事务内移除了五个无值且无依赖的废弃解析列，并登记当前 `migrations/0001_initial_schema.sql` 的校验值。现有业务数据保留，标准迁移重放返回 `applied=[]` 和 `current=1`。本机四个 Server 角色均由主 `compose.yaml` 启动，使用 `huahuo-server:local-dev` 且健康。隔离 PostgreSQL/Redis 集成测试 120 项通过。
 
-`127.0.0.1:3000` 就绪检查返回 HTTP 200，短信使用 `SMS_PROVIDER=live` 和 `SHOW_TEST_OTP=false`。[短信手册](runbooks/sms.md#flutter-真实短信联调)
+`127.0.0.1:3000` 就绪检查返回 HTTP 200，短信使用真实阿里云平台。[短信手册](runbooks/sms.md#flutter-真实短信联调)
 
 ## A10测试实例已释放、镜像缓存保留（2026-11-13）
 

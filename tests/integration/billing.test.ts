@@ -1,6 +1,6 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { loadConfig } from '../../src/config/config.js';
+import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
 import { insertFixtureUser, insertFixtureSession } from './jwt-fixture.js';

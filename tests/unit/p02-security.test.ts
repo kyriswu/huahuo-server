@@ -9,10 +9,11 @@ describe('P02 security configuration and adapter boundary',()=>{
   expect(normalizePhone('13800000001')).toBe('+8613800000001');expect(normalizePhone('+8613800000001')).toBe('+8613800000001');
   for(const bad of ['+15551234567','12345','13800000001;drop'])expect(()=>normalizePhone(bad)).toThrow();
  });
- it('requires explicit mock flags and forbids production OTP echo',()=>{
-  expect(()=>loadConfig('api-server',{...env,SMS_PROVIDER:'mock'})).toThrow();
-  expect(()=>loadConfig('api-server',{...env,SHOW_TEST_OTP:'true',SMS_PROVIDER:'live'})).toThrow();
-  expect(()=>loadConfig('api-server',{...env,APP_ENV:'production',DATABASE_SSL_MODE:'verify-full',APP_PUBLIC_BASE_URL:'https://api.example.test',SMS_PROVIDER:'mock',ALLOW_MOCK_PROVIDERS:'true'})).toThrow();
+ it('ignores retired SMS switches instead of enabling simulation or OTP echo',()=>{
+  const config=loadConfig('api-server',{...env,SMS_PROVIDER:'mock',SHOW_TEST_OTP:'true'});
+  expect(config.smsAliyun).toBeDefined();
+  expect(config).not.toHaveProperty('smsProvider');
+  expect(config).not.toHaveProperty('showTestOtp');
  });
  it('replay encryption is authenticated and request hashing ignores object key order',()=>{
   const secret='encryption-key'.repeat(4),result=seal({secret:'not-plaintext'},secret);expect(result).not.toContain('not-plaintext');
@@ -23,6 +24,6 @@ describe('P02 security configuration and adapter boundary',()=>{
   const hash=await hashPassword('long-test-password');expect(await verifyPassword('long-test-password',hash)).toBe(true);expect(await verifyPassword('wrong',hash)).toBe(false);
  });
  it('live adapter cannot silently fall back to disabled or mock without vendor configuration',()=>{
-  expect(()=>createSmsProvider({smsProvider:'live'})).toThrow('INVALID_CONFIG:SMS_ALIYUN');
+  expect(()=>createSmsProvider({})).toThrow('INVALID_CONFIG:SMS_ALIYUN');
  });
 });
