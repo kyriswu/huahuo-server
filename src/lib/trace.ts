@@ -1,5 +1,7 @@
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {randomUUID} from 'node:crypto';
+import {captureTraceContext} from '../observability/telemetry.js';
+export {currentTelemetryFields,captureTraceContext,withTraceContext,tracedOperation,normalizeTraceContext} from '../observability/telemetry.js';
 
 const context=new AsyncLocalStorage<string>();
 export const validTraceId=(value:unknown):value is string=>typeof value==='string'&&/^[A-Za-z0-9._:-]{6,96}$/.test(value);
@@ -12,5 +14,6 @@ export function withTraceId<T>(traceId:string,execute:()=>T):T{
 export function traceHeaders(headers?:HeadersInit):Headers{
  const result=new Headers(headers),id=currentTraceId();
  if(id)result.set('X-Trace-Id',id);
+ for(const [key,value]of Object.entries(captureTraceContext()))if(value)result.set(key,value);
  return result;
 }

@@ -1,23 +1,60 @@
 {
   "version": 1,
-  "id": "20261117-oss-native-content-type",
-  "baseRevision": "5af896d88eefb24c1173371276e9a9b55760f3f1",
+  "id": "20261117-observability-contract",
+  "baseRevision": "8b27e01c9ab78188e45573ff1fde98a04d699274",
   "services": [
     "api-server",
-    "worker"
+    "admin",
+    "worker",
+    "scheduler"
   ],
   "database": {
-    "migrations": [],
-    "verifySql": "scripts/release/changes/20261117-oss-native-content-type/verify-db.sql",
+    "migrations": [
+      "0012_task_trace_context.sql"
+    ],
+    "verifySql": "scripts/release/changes/20261117-observability-contract/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": "No schema, query, persisted payload or existing object metadata changes. Signed GET uses original OSS Content-Type; new Server writes record MIME in OSS metadata."
+      "reason": "Append one nullable tasks.trace_context JSONB metadata field with bounded W3C carrier validation. Existing tasks remain NULL, no history rewrite, no business-data backfill and no physical foreign keys. Producer context is captured with the original enqueue transaction; retries preserve it. All four roles are updated together after the migration. Old migration runners must never be used after this upgrade."
     }
   },
   "configuration": {
     "mode": "reuse",
-    "changes": [],
-    "reviewedFiles": []
+    "changes": [
+      {
+        "key": "OTEL_SERVICE_VERSION",
+        "operation": "add",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": false,
+        "hasDefault": true
+      },
+      {
+        "key": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "operation": "add",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": false,
+        "hasDefault": true
+      }
+    ],
+    "reviewedFiles": [
+      "compose.yaml",
+      ".env.example",
+      ".env.compose.cloud.example",
+      ".env.compose.local.example",
+      ".env.host.example",
+      "src/config/config.ts",
+      "src/config/telemetry.ts"
+    ]
   },
   "dependencies": [],
   "backfill": {

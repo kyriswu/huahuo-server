@@ -16,6 +16,17 @@ function samples(body: string, name: string) {
   return body.split('\n').filter(line => line.startsWith(name + '{'));
 }
 describe('Prometheus HTTP instrumentation over real loopback HTTP', () => {
+  it('exposes backlog observation freshness separately from a reachable metrics listener', async () => {
+    const metrics = new ApplicationMetrics(config('scheduler'));
+    expect(samples(await metrics.registry.metrics(), 'task_backlog_observed_timestamp_seconds')).toHaveLength(0);
+    const before = Date.now() / 1000;
+    metrics.observeTaskBacklog('content', { pendingCount: 3, oldestWaitingSeconds: 15 });
+    const values = samples(await metrics.registry.metrics(), 'task_backlog_observed_timestamp_seconds');
+    expect(values).toHaveLength(1);
+    const observed = Number(values[0]!.split(' ').at(-1));
+    expect(observed).toBeGreaterThanOrEqual(before);
+    expect(observed).toBeLessThanOrEqual(Date.now() / 1000);
+  });
   it('counts recovery failures without creating a metric series for each task ID', async () => {
     const metrics = new ApplicationMetrics(config('scheduler'));
     metrics.recordTaskRecoveryFailures(2);

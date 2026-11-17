@@ -2,11 +2,11 @@
 
 沿用 Docker 标准输出的 JSON 日志和已有 Dozzle，不新增组件、端口或服务。中心已有 [Grafana](https://grafana.chuda.cc/d/huahuo-server) 与 [Dozzle](https://dozzle.chuda.cc/) 入口；本轮未修改中心配置。
 
-traceId：入口只接受X-Trace-Id，缺失或不合法时为新请求生成；一次请求后续调用沿用该值。任务在创建时写入非空tasks.trace_id，Worker重试/恢复只读取原值，不修补缺失字段。日志中的Task step started/completed/failed携带相同traceId；Agent HTTP日志、Mastra子日志及出站调用也使用它。解析回调通过callback_url的traceId参数关联，仅在回调路径生效。无需新增追踪服务或ENV，代码及隔离验证见[验收](../acceptance/trace-id.md)，尚未部署。
+traceId：入口接受 X-Trace-Id，缺失或不合法时生成；一次请求后续调用沿用该值。任务在创建时写入非空 tasks.trace_id，Worker 重试/恢复读取原值。解析回调通过 callback_url 的 traceId 参数关联，仅在回调路径生效。这是不透明关联号，与 W3C trace_id 不混用。原有实现证据见 [验收](../acceptance/trace-id.md)；本次候选的标准父子链路与新增配置见 [观测契约](../observability/contract.md)。
 
 1. 从 Grafana 5xx 表确认角色、路由和时间。
 2. 在 Dozzle 对应角色容器中定位 `Request failed`，复制 `traceId` 搜索请求上下文。它与响应头 `X-Trace-Id`、错误正文 traceId 一致。
-3. 读取 `err.type`、`err.message`、`err.code`、`err.stack` 和嵌套 `err.cause`，定位 `src/...ts:行:列`。记录另有 service（角色）、instanceId、method、路由模板 route、statusCode 和 errorCode。
+3. Server 异常读取 `err.type`、`err.message`、`err.code`、`err.stack` 和嵌套 `err.cause`，定位 `src/...ts:行:列`。记录统一包含 env、service（huahuo-server）、role（角色）、version、service_instance_id，以及 method、路由模板 route、statusCode 和 errorCode；在 span 中另有 trace_id/span_id。Agent 框架事件只保留受控元数据与安全异常位置，不展开任意框架消息。
 
 公共 500 与 DomainError 的 5xx 记录一次，正常 4xx 不新增错误级日志。日志不记录请求路径参数、查询串、请求正文或认证头；客户端仍只收到既有通用提示及 traceId，不返回内部异常。关联字段不增加到 Prometheus 标签。
 

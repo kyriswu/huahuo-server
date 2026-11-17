@@ -2,14 +2,19 @@ import type pg from 'pg';
 import {resolveTraceId} from '../../lib/trace.js';
 import { randomUUID } from 'node:crypto';
 import { DomainError, transaction } from '../identity/store.js';
-import { type TaskRow, type QueueName, enqueueIntent,event,retryDelay,newTaskMaxAttempts } from './model.js';
+import { queues, type TaskRow, type QueueName, enqueueIntent,event,retryDelay,newTaskMaxAttempts } from './model.js';
 import { finalizeUnsuccessfulTaskTx } from './reservations.js';
+import { withApplicationMetrics, type TaskMetrics } from '../../plugins/metrics.js';
 export interface Delivery {id:string;task_id:string;queue:QueueName;attempts:number;}
 export interface TaskPublisher {publish(delivery:Delivery):Promise<void>;}
 export interface RecoveryFailure {taskId:string;code:string;}
+interface QueueBacklog {queue:QueueName;pendingCount:number;oldestWaitingSeconds:number;}
+interface Backlog {count:number;age:number;queues:QueueBacklog[];}
 export class TaskScheduler {
  private recoveryAfter?:{id:string;updated_at:string};
- constructor(readonly pool:pg.Pool,readonly publisher:TaskPublisher,readonly owner:string=randomUUID(),readonly redeliveryMs=30000){}
+ private backlogSnapshot?:{at:number;value:Backlog};
+ constructor(readonly pool:pg.Pool,readonly publisher:TaskPublisher,readonly owner:string=randomUUID(),readonly redeliveryMs=30000,private readonly metrics?:TaskMetrics){}
+ private transaction<T>(operation:(tx:pg.PoolClient)=>Promise<T>){return withApplicationMetrics(this.metrics,()=>transaction(this.pool,operation));}
  async recover(){
   // Walk stable keyset pages so even a full page of broken reservations cannot
   // starve later tasks. This cursor is only a scan optimization; PG owns state.
@@ -34,7 +39,7 @@ export class TaskScheduler {
   await this.repairDeliveries();
   return {recovered,failures};
  }
- private async recoverOne(id:string){return transaction(this.pool,async tx=>{
+ private async recoverOne(id:string){return this.transaction(async tx=>{
   const row=(await tx.query<TaskRow>(`SELECT * FROM tasks WHERE id=$1 AND state IN ('running','cancel_requested')
    AND (lease_until<clock_timestamp() OR lease_until IS NULL) FOR UPDATE SKIP LOCKED`,[id])).rows[0];
   if(!row)return false;
@@ -49,7 +54,7 @@ export class TaskScheduler {
   }
   return true;
  });}
- private async repairDeliveries(){return transaction(this.pool,async tx=>{
+ private async repairDeliveries(){return this.transaction(async tx=>{
   // Redis is a delivery mechanism; periodic PG repair also covers acknowledged-but-lost jobs.
   const pending=await tx.query<{id:string}>(`SELECT t.id FROM tasks t WHERE t.available_at<=now() AND (
    (t.state IN ('queued','retry_scheduled') AND t.external_state='none') OR
@@ -60,7 +65,7 @@ export class TaskScheduler {
    ORDER BY t.created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,[this.redeliveryMs]);
   for(const t of pending.rows)await enqueueIntent(tx,t.id);
  });}
- async schedules(){return transaction(this.pool,async tx=>{
+ async schedules(){return this.transaction(async tx=>{
   const r=await tx.query<{id:string;window:string}>(`SELECT id,floor(extract(epoch from now())/interval_seconds)::bigint::text AS window FROM task_schedules
    WHERE enabled AND (last_window IS NULL OR last_window<floor(extract(epoch from now())/interval_seconds)) FOR UPDATE SKIP LOCKED`);
   for(const s of r.rows){
@@ -69,7 +74,7 @@ export class TaskScheduler {
    await enqueueIntent(tx,id);await event(tx,id);await tx.query('UPDATE task_schedules SET last_window=$2 WHERE id=$1',[s.id,s.window]);
   }return r.rowCount;
  });}
- async claim():Promise<Delivery|null>{return transaction(this.pool,async tx=>{
+ async claim():Promise<Delivery|null>{return this.transaction(async tx=>{
   const r=await tx.query<Delivery>(`SELECT o.id,o.task_id,t.queue,o.attempts FROM task_outbox o JOIN tasks t ON t.id=o.task_id
    WHERE ((o.status='pending' AND o.available_at<=now()) OR (o.status='delivering' AND o.lease_until<now()))
    ORDER BY o.created_at LIMIT 1 FOR UPDATE OF o SKIP LOCKED`);const d=r.rows[0];if(!d)return null;
@@ -81,6 +86,22 @@ export class TaskScheduler {
   try{await this.publisher.publish(d);await this.acknowledge(d);}
   catch{await this.pool.query("UPDATE task_outbox SET status='pending',available_at=now()+$3*interval '1 millisecond',lease_until=NULL,lease_owner=NULL,last_error='QUEUE_UNAVAILABLE' WHERE id=$1 AND lease_owner=$2",[d.id,this.owner,retryDelay(d.attempts)]);break;}
  }}
- async backlog(){const r=await this.pool.query("SELECT count(*)::int count,coalesce(extract(epoch from now()-min(created_at)),0)::int age FROM task_outbox WHERE status IN ('pending','delivering')");return r.rows[0] as {count:number;age:number};}
- async tick(){const recovery=await this.recover();await this.schedules();await this.dispatch();return {...await this.backlog(),recoveryFailures:recovery.failures};}
+ async backlog():Promise<Backlog>{
+  const cached=this.backlogSnapshot;if(cached&&Date.now()-cached.at<10000)return cached.value;
+  // Reuse the existing scheduler observation query. Only due queued/retry work
+  // is execution backlog; active work and external waits are not queue latency.
+  const r=await this.pool.query<Backlog>(`WITH deliveries AS (
+   SELECT count(*)::int count,coalesce(extract(epoch from now()-min(created_at)),0)::int age
+   FROM task_outbox WHERE status IN ('pending','delivering')
+  ), waiting AS (
+   SELECT queue,count(*)::int AS "pendingCount",
+    greatest(0,extract(epoch FROM now()-min(available_at)))::double precision AS "oldestWaitingSeconds"
+   FROM tasks WHERE state IN ('queued','retry_scheduled') AND available_at<=now() GROUP BY queue
+  ) SELECT deliveries.*,coalesce((SELECT json_agg(waiting) FROM waiting),'[]'::json) AS queues FROM deliveries`);
+  const row=r.rows[0]!,value={...row,queues:queues.map(queue=>row.queues.find(item=>item.queue===queue)??{queue,pendingCount:0,oldestWaitingSeconds:0})};
+  this.backlogSnapshot={at:Date.now(),value};
+  try{for(const item of value.queues)this.metrics?.observeTaskBacklog?.(item.queue,item);}catch{/* A diagnostic observer cannot invalidate this completed scheduler scan. */}
+  return value;
+ }
+ async tick(){return withApplicationMetrics(this.metrics,async()=>{const recovery=await this.recover();await this.schedules();await this.dispatch();return {...await this.backlog(),recoveryFailures:recovery.failures};});}
 }

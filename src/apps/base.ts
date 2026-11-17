@@ -7,25 +7,31 @@ import { createDependencies, isReady, type Dependencies } from '../plugins/depen
 import { success, failure, requestTrace, ErrorSchema, HealthSchema } from '../contracts/envelope.js';
 import { DomainError } from '../modules/identity/store.js';
 import {closeStateStreams} from '../lib/state-stream.js';
-import { registerMetrics, type ApplicationMetrics } from '../plugins/metrics.js';
+import { registerMetrics, withApplicationMetrics, httpOutcome, httpTraffic, type ApplicationMetrics } from '../plugins/metrics.js';
 import { registerLifecycle } from '../plugins/lifecycle.js';
 import { RuntimeSettings } from '../modules/runtime-settings/service.js';
 import { DEFAULT_DRAIN_TIMEOUT_MS } from '../modules/runtime-settings/registry.js';
 import { createErrorSerializer } from '../lib/error-log.js';
 import {withTraceId} from '../lib/trace.js';
+import { SpanKind } from '@opentelemetry/api';
+import { createApplicationTelemetry, currentTelemetryFields, withTelemetryRuntime, withTraceContext, type ApplicationTelemetry } from '../observability/telemetry.js';
+import { telemetryIdentity } from '../observability/identity.js';
 declare module 'fastify' { interface FastifyInstance {
   drainTimeoutSnapshotMs(): number;
   readDrainTimeoutMs(): Promise<number>;
 } }
-export interface BuildOptions { config: AppConfig; dependencies?: Dependencies; backgroundHealthy?:()=>boolean; backgroundActive?:()=>number; metrics?:ApplicationMetrics; loggerStream?:FastifyLoggerOptions['stream']; }
-export async function buildBase({ config, dependencies, backgroundHealthy, backgroundActive, metrics, loggerStream }: BuildOptions) {
+export interface BuildOptions { config: AppConfig; dependencies?: Dependencies; backgroundHealthy?:()=>boolean; backgroundActive?:()=>number; metrics?:ApplicationMetrics; telemetry?:ApplicationTelemetry; loggerStream?:FastifyLoggerOptions['stream']; }
+export async function buildBase({ config, dependencies, backgroundHealthy, backgroundActive, metrics, telemetry: suppliedTelemetry, loggerStream }: BuildOptions) {
   const deps = dependencies ?? createDependencies(config);
+  const telemetry = suppliedTelemetry ?? createApplicationTelemetry(config);
+  const identity = telemetryIdentity(config);
   const app = Fastify({ logger: {
-    level: config.logLevel, base: { service: config.role, instanceId: config.instanceId },
+    level: config.logLevel, base: identity,
+    mixin: currentTelemetryFields,
     ...(loggerStream ? { stream: loggerStream } : {}),
     redact: { paths: ['req.headers.authorization','req.headers.cookie','res.headers.set-cookie','password','token','secret'], censor: '[REDACTED]' },
     serializers: { req: req => ({ method: req.method, route: req.routeOptions?.url }), err: createErrorSerializer(config) },
-  }, genReqId: req => requestTrace(req.headers,req.url), logController: new LogController({ requestIdLogLabel: 'traceId' }),
+  }, genReqId: req => requestTrace(req.headers,req.url), logController: new LogController({ requestIdLogLabel: 'traceId', disableRequestLogging: true }),
   // Request timeout bounds receiving the request, not the handler's total work.
   requestTimeout: config.httpRequestTimeoutMs,
   connectionTimeout: config.httpConnectionTimeoutMs,
@@ -39,6 +45,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   bodyLimit: 1048576,
   ajv: { customOptions: { removeAdditional: false } }, forceCloseConnections: 'idle' }).withTypeProvider<TypeBoxTypeProvider>();
   registerMetrics(app, config, metrics);
+  telemetry.setLogger(app.log);
   const lifecycle = registerLifecycle(app, backgroundActive);
   const runtimeSettings = deps.pool ? new RuntimeSettings(deps.pool, config) : undefined;
   app.decorate('drainTimeoutSnapshotMs', () => runtimeSettings?.drainTimeoutSnapshotMs() ?? DEFAULT_DRAIN_TIMEOUT_MS);
@@ -52,7 +59,30 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
     else jsonParser(req, typeof body === 'string' ? body : body.toString(), done);
   });
   await app.register(swagger, { openapi: { info: { title: `Huahuo ${config.role}`, version: '0.1.0' } } });
-  app.addHook('onRequest', (req, reply,done) => { reply.header('X-Trace-Id', req.id).header('Cache-Control', 'no-store');withTraceId(req.id,done); });
+  app.addHook('onRequest', (req, reply, done) => {
+    reply.header('X-Trace-Id', req.id).header('Cache-Control', 'no-store');
+    withTelemetryRuntime(telemetry, () => withTraceContext(req.headers, () => {
+      const route = req.routeOptions.url ?? 'unmatched';
+      const operation = telemetry.start('http.server', { 'http.request.method': req.method, 'http.route': route, traffic: httpTraffic(route) }, SpanKind.SERVER);
+      const started = process.hrtime.bigint();
+      let finished = false;
+      const end = () => {
+        if (finished) return; finished = true;
+        const outcome = reply.raw.writableFinished ? httpOutcome(reply.raw.statusCode) : 'aborted';
+        operation.run(() => {
+          req.log.info({ event: 'http.server.completed', method: req.method, route, statusCode: reply.raw.writableFinished ? reply.raw.statusCode : undefined,
+            outcome, traffic: httpTraffic(route), durationMs: Number(process.hrtime.bigint() - started) / 1e6 }, 'Request completed');
+          operation.end({ outcome, 'http.response.status_code': reply.raw.writableFinished ? reply.raw.statusCode : undefined }, outcome === 'server_error' || outcome === 'aborted');
+        });
+      };
+      reply.raw.once('finish', end); reply.raw.once('close', end);
+      operation.run(() => withApplicationMetrics(app.metrics, () => withTraceId(req.id, () => {
+        req.log = req.log.child(currentTelemetryFields());
+        req.log.info({ event: 'http.server.started', method: req.method, route, traffic: httpTraffic(route) }, 'Request started');
+        done();
+      })));
+    }));
+  });
   app.addHook('preClose', async () => {
     // Retiring API streams keep their subscriptions and dependencies until their
     // response finishes, bounded by the process's existing DB drain deadline.
@@ -61,6 +91,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
     await lifecycle.close();
   });
   app.addHook('onClose', async () => { await deps.close(); });
+  app.addHook('onClose', async () => { await telemetry.shutdown(); });
   app.setErrorHandler<FastifyError>((error, req, reply) => {
     if (error instanceof DomainError) {
       if (error.statusCode >= 500) req.log.error({ err: error, errorCode: error.code, method: req.method, route: req.routeOptions.url ?? 'unmatched', statusCode: error.statusCode }, 'Request failed');

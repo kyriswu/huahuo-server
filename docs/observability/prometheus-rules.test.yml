@@ -1,0 +1,109 @@
+rule_files:
+  - prometheus-rules.yml
+evaluation_interval: 30s
+tests:
+  - name: aggregate replicas before computing the server error ratio
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{env="test",service="huahuo-server",role="api-server",traffic="public",instance="a",outcome="success"}'
+        values: '0+60x10'
+      - series: 'http_requests_total{env="test",service="huahuo-server",role="api-server",traffic="public",instance="b",outcome="success"}'
+        values: '0+120x10'
+      - series: 'http_requests_total{env="test",service="huahuo-server",role="api-server",traffic="public",instance="a",outcome="server_error"}'
+        values: '0+6x10'
+    promql_expr_test:
+      - expr: huahuo:http_completed:rate5m
+        eval_time: 5m
+        exp_samples:
+          - labels: 'huahuo:http_completed:rate5m{env="test",service="huahuo-server",role="api-server",traffic="public"}'
+            value: 3.1
+      - expr: huahuo:http_server_error:ratio5m
+        eval_time: 5m
+        exp_samples:
+          - labels: 'huahuo:http_server_error:ratio5m{env="test",service="huahuo-server",role="api-server",traffic="public"}'
+            value: 0.03225806451612903
+  - name: no failed series means zero errors only when observed traffic exists
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{env="test",service="huahuo-server",role="api-server",traffic="public",outcome="success"}'
+        values: '0+60x10'
+    promql_expr_test:
+      - expr: huahuo:http_server_error:ratio5m
+        eval_time: 5m
+        exp_samples:
+          - labels: 'huahuo:http_server_error:ratio5m{env="test",service="huahuo-server",role="api-server",traffic="public"}'
+            value: 0
+  - name: idle service has no valid error ratio and no targets are not fabricated
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{env="test",service="huahuo-server",role="api-server",traffic="public",outcome="success"}'
+        values: '0+0x10'
+    promql_expr_test:
+      - expr: huahuo:http_server_error:ratio5m >= 0
+        eval_time: 5m
+        exp_samples: []
+      - expr: huahuo:http_completed:rate5m{service="huahuo-agent"}
+        eval_time: 5m
+        exp_samples: []
+  - name: explicit client cancellation is separate from dependency failure
+    interval: 1m
+    input_series:
+      - series: 'http_client_requests_total{env="test",service="huahuo-agent",role="agent",dependency="huahuo-server",operation="rag.query",outcome="success"}'
+        values: '0+60x10'
+      - series: 'http_client_requests_total{env="test",service="huahuo-agent",role="agent",dependency="huahuo-server",operation="rag.query",outcome="cancelled"}'
+        values: '0+60x10'
+    promql_expr_test:
+      - expr: huahuo:client_failure:ratio5m
+        eval_time: 5m
+        exp_samples:
+          - labels: 'huahuo:client_failure:ratio5m{env="test",service="huahuo-agent",role="agent",dependency="huahuo-server",operation="rag.query"}'
+            value: 0
+  - name: process counter reset is handled by rate rather than subtracting totals
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{env="test",service="huahuo-server",role="api-server",traffic="public",outcome="success"}'
+        values: '100 160 220 0 60 120 180'
+    promql_expr_test:
+      - expr: resets(http_requests_total[5m])
+        eval_time: 5m
+        exp_samples:
+          - labels: '{env="test",service="huahuo-server",role="api-server",traffic="public",outcome="success"}'
+            value: 1
+      - expr: huahuo:http_completed:rate5m > bool 0
+        eval_time: 5m
+        exp_samples:
+          - labels: '{env="test",service="huahuo-server",role="api-server",traffic="public"}'
+            value: 1
+  - name: queue dashboard ignores stale replicas without merging independent environments
+    interval: 1m
+    input_series:
+      - series: 'task_pending{env="test",service="huahuo-server",role="scheduler",instance="stalled",queue="content"}'
+        values: '100 100 100'
+      - series: 'task_backlog_observed_timestamp_seconds{env="test",service="huahuo-server",role="scheduler",instance="stalled",queue="content"}'
+        values: '0 0 0'
+      - series: 'task_pending{env="test",service="huahuo-server",role="scheduler",instance="healthy",queue="content"}'
+        values: '0 0 0'
+      - series: 'task_backlog_observed_timestamp_seconds{env="test",service="huahuo-server",role="scheduler",instance="healthy",queue="content"}'
+        values: '0 60 120'
+      - series: 'task_pending{env="prod",service="huahuo-server",role="scheduler",instance="prod-node",queue="content"}'
+        values: '7 7 7'
+      - series: 'task_backlog_observed_timestamp_seconds{env="prod",service="huahuo-server",role="scheduler",instance="prod-node",queue="content"}'
+        values: '0 60 120'
+    promql_expr_test:
+      - expr: max by (env, service, queue) (task_pending and on (env, service, role, instance, queue) (time() - task_backlog_observed_timestamp_seconds < 60))
+        eval_time: 2m
+        exp_samples:
+          - labels: '{env="test",service="huahuo-server",queue="content"}'
+            value: 0
+          - labels: '{env="prod",service="huahuo-server",queue="content"}'
+            value: 7
+      - expr: max by (env, service, queue) (time() - task_backlog_observed_timestamp_seconds)
+        eval_time: 2m
+        exp_samples:
+          - labels: '{env="test",service="huahuo-server",queue="content"}'
+            value: 120
+          - labels: '{env="prod",service="huahuo-server",queue="content"}'
+            value: 0
+      - expr: max by (env, service, queue) (task_pending{instance="stalled"} and on (env, service, role, instance, queue) (time() - task_backlog_observed_timestamp_seconds < 60))
+        eval_time: 2m
+        exp_samples: []

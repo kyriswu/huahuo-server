@@ -64,7 +64,7 @@ describe('bounded redacted error diagnostics',()=>{
  });
 });
 
-interface LogRow{level:number;service:string;instanceId:string;traceId:string;msg:string;errorCode?:string;method?:string;route?:string;statusCode?:number;err?:DiagnosticError;}
+interface LogRow{level:number;service:string;service_instance_id:string;traceId:string;msg:string;errorCode?:string;method?:string;route?:string;statusCode?:number;err?:DiagnosticError;}
 describe('error diagnostics through the real Fastify HTTP logger',()=>{
  it.each(['api-server','admin','worker','scheduler'] as const)('%s correlates one redacted 500 with its response and route template',async role=>{
   const cfg={...config(role),logLevel:'info'},lines:string[]=[];
@@ -83,7 +83,8 @@ describe('error diagnostics through the real Fastify HTTP logger',()=>{
    expect(body).not.toMatch(/TypeError|upstream data|ECONNREFUSED|stack|driver-password/);
    const errorRows=lines.join('').trim().split('\n').map(line=>JSON.parse(line) as LogRow).filter(row=>row.level===50);
    expect(errorRows).toHaveLength(1);const log=errorRows[0]!;
-   expect(log).toMatchObject({service:role,instanceId:cfg.instanceId,traceId,errorCode:'INTERNAL_ERROR',method:'GET',route:'/broken/:id',statusCode:500,err:{type:'TypeError',message:'failed to read upstream data',cause:{code:'ECONNREFUSED'}}});
+   expect(log).toMatchObject({service:cfg.metrics.service,role,env:'test',version:cfg.telemetry.version,service_instance_id:cfg.instanceId,traceId,errorCode:'INTERNAL_ERROR',method:'GET',route:'/broken/:id',statusCode:500,err:{type:'TypeError',message:'failed to read upstream data',cause:{code:'ECONNREFUSED'}}});
+   expect(log).not.toHaveProperty('instanceId');
    expect(log.err!.stack).toMatch(/error-log\.test\.ts:\d+:\d+/);
    expect(log.err!.cause!.stack).toContain('database failed');
    await (await fetch(base+'/dependency',{headers:{'x-trace-id':'dependency-trace-'+role}})).text();

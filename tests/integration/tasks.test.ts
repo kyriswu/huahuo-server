@@ -134,11 +134,21 @@ it('enqueue before ack crash and lost Redis job recover from PG; only ID enters 
  await root.query("UPDATE task_outbox SET lease_until=now()-interval '1 second' WHERE id=$1",[d.id]);
  const again=(await scheduler.claim())!;expect(again.id).toBe(d.id);await publisher.publish(again);await scheduler.acknowledge(again);
  await job!.remove();await root.query("UPDATE task_outbox SET sent_at=now()-interval '1 minute' WHERE id=$1",[d.id]);await scheduler.recover();await scheduler.dispatch();
- const bindings:unknown[]=[],logs:string[]=[],original=TaskEngine.prototype.execute;
- const logger={child:(binding:unknown)=>{bindings.push(binding);return {info:(message:string)=>logs.push(message),error:()=>undefined};}} as unknown as FastifyBaseLogger;
+ const logs:Array<{fields:Record<string,unknown>;message:string}>=[],original=TaskEngine.prototype.execute;
+ const logger={info:(fields:Record<string,unknown>,message:string)=>logs.push({fields,message}),error:()=>undefined} as unknown as FastifyBaseLogger;
  const workers=new TaskWorkers(workerPool,cfg('worker'),undefined,logger);
  const execute=vi.spyOn(TaskEngine.prototype,'execute').mockImplementation(function(this:TaskEngine,attempt){if(attempt.task.id===id)expect(currentTraceId()).toBe(traceId);return original.call(this,attempt);});
- try{await until(async()=>(await service.detail(a,id)).task.state==='succeeded');expect((await root.query('SELECT count(*)::int n FROM task_results WHERE task_id=$1',[id])).rows[0].n).toBe(1);expect(bindings).toContainEqual({traceId});expect(logs).toContain('Task step completed');}finally{await workers.close();execute.mockRestore();}
+ try{
+  await until(async()=>(await service.detail(a,id)).task.state==='succeeded');
+  await until(async()=>logs.some(log=>log.fields.taskId===id&&log.fields.event==='task.step.finished'));
+  expect((await root.query('SELECT count(*)::int n FROM task_results WHERE task_id=$1',[id])).rows[0].n).toBe(1);
+  const started=logs.find(log=>log.fields.taskId===id&&log.fields.event==='task.step.started');
+  expect(started?.fields).toMatchObject({taskId:id,kind:'demo.digest',queue:'content',attempt:1,traceId:traceId,trace_id:expect.stringMatching(/^[a-f0-9]{32}$/),span_id:expect.stringMatching(/^[a-f0-9]{16}$/)});
+  const returned=logs.find(log=>log.fields.taskId===id&&log.fields.event==='task.step.finished');
+  expect(returned?.fields).toMatchObject({taskId:id,traceId:traceId,trace_id:started?.fields.trace_id,span_id:started?.fields.span_id,'step.outcome':'recorded'});
+  expect(returned?.message).toBe('Task step returned');
+  expect(logs.map(log=>log.message)).not.toContain('Task step completed');
+ }finally{await workers.close();execute.mockRestore();}
 },15000);
 it('real API contract: task wrapper, auth, schema, result readiness and Admin CSRF/RBAC',async()=>{
  const api=await buildApiServer({config:cfg('api-server')}),admin=await buildAdminServer({config:cfg('admin')});
