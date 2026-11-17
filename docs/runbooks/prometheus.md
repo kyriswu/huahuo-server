@@ -1,6 +1,6 @@
 # Prometheus 应用指标
 
-5xx 排查继续使用已有 Dozzle；应用已补充脱敏异常原因、stack/cause 与 traceId，须发布新版本后生效。字段及 TypeScript 行号要求见[应用日志](application-logs.md)，不新增日志组件或 Prometheus 高基数标签。
+5xx 排查继续使用已有 Dozzle。统一指标口径、W3C 链路、日志字段和可导入看板见 [观测契约](../observability/contract.md)、[指标字典](../observability/metrics.md) 与 [接入说明](../observability/README.md)。具体版本是否已发布以对应验收记录为准；本轮不修改中心平台。
 
 四个常驻角色各一个 Node 进程；Worker 进程内的 BullMQ 队列消费者共享同一个 Registry。没有 cluster、PM2 或 worker_threads。依赖固定 `@prometheus-io/client@0.16.1`，其 Node engines 为 `^22 || ^24 || >=26`；本地 Volta 26.11.0、Docker 26.12.1 均满足。[客户端官方文档](https://github.com/prometheus/client_js)、[Fastify hooks](https://fastify.dev/docs/latest/Reference/Hooks/)。
 
@@ -34,28 +34,29 @@ METRICS_SCHEDULER_HOST_PORT=9467
 
 ## 指标口径
 
-- `http_requests_total{method,route,status}`：全局 onRequest 开始计时、onResponse 在响应真正结束后记录一次，status 为最终三位状态码，包括 schema 400、鉴权 401、未匹配 404 和异常 500。
-- `http_request_duration_seconds{method,route}`：秒制 Histogram，覆盖完整响应时长；有限桶范围 5ms–3600s，并保留 +Inf。route 是 Fastify 匹配模板（如 `/api/v1/tasks/:taskId`）；未匹配为 `unmatched`。method 为有限 HTTP 方法集合，其他为 OTHER。
+- `http_requests_total{method,route,status,outcome,traffic}`：响应真正完整结束后记录一次，status 为最终三位状态码，包括 schema 400、鉴权 401、未匹配 404 和异常 500。traffic 区分 public/internal/admin/other。
+- `http_request_duration_seconds`：标签同上，秒制 Histogram，覆盖完整响应时长；有限桶范围 5ms–3600s，并保留 +Inf。route 是 Fastify 匹配模板（如 `/api/v1/tasks/:taskId`）；未匹配为 `unmatched`。method 为有限 HTTP 方法集合，其他为 OTHER。
+- `http_aborted_requests_total`：连接未完整结束单独计数，不混入完成数；它不等于后台业务取消。
 - `/metrics`、`/health/live`、`/health/ready` 排除统计；连接未完成的响应不当作完成。URL 参数、查询字符串、UUID、用户、任务和 trace ID 均不进入标签。
 - `task_processing_attempts_total{kind,result}`：TaskEngine.finish/fail 的 PG 事务成功提交后才增加，result 仅 success/failure。显式失败且进入重试队列的本次尝试计 failure；后续尝试独立计数。重复完成、事务回滚、过期租约、延后继续和外部结果未知不计。kind 为固定已知任务类型，未知类型统一 other。
-- `application_info`：值 1，可在尚无业务请求时确认每个角色的标签和存活抓取。每个进程的 Counter 在重启后重置，Grafana 使用 rate/increase。
+- `application_info{version,service_instance_id}`：值 1，可在尚无业务请求时确认每个角色的标签和存活抓取。版本与实例不附加到所有业务指标。每个进程的 Counter 在重启后重置，Grafana 使用 rate/increase。
 
 客户端 Registry 生成正文与 Content-Type，不手写指标格式。指标监听失败会令角色启动失败；关闭角色时同时关闭指标监听。
 
 ## Grafana 查询
 
-成功率沿用 2xx+3xx 占所有已完成响应的口径，不把全部 4xx 算成功。无流量时显示无数据，不伪造成功率：
+以下仅是 HTTP 2xx+3xx 在已完成响应中的比例，不代表 Agent/任务业务成功率。按 traffic 分开查看，无流量时显示无数据，不伪造成功率：
 
 ```promql
-100 * sum(rate(http_requests_total{service="huahuo-server",env="test",status=~"2..|3.."}[$__rate_interval]))
-  / sum(rate(http_requests_total{service="huahuo-server",env="test"}[$__rate_interval]))
+100 * sum by (traffic) (rate(http_requests_total{service="huahuo-server",env="test",status=~"2..|3.."}[$__rate_interval]))
+  / sum by (traffic) (rate(http_requests_total{service="huahuo-server",env="test"}[$__rate_interval]))
 ```
 
 P95 的面板单位设 seconds，不能平均各实例的 P95：
 
 ```promql
 histogram_quantile(0.95,
-  sum by (le, method, route) (
+  sum by (le, method, route, traffic) (
     rate(http_request_duration_seconds_bucket{service="huahuo-server",env="test"}[$__rate_interval])
   )
 )
@@ -68,13 +69,29 @@ histogram_quantile(0.95,
 ```yaml
 - targets:
     - "<测试节点私网IP>:9464"
-    - "<测试节点私网IP>:9465"
-    - "<测试节点私网IP>:9466"
-    - "<测试节点私网IP>:9467"
   labels:
     env: "test"
     host: "<测试节点主机名>"
     service: "huahuo-server"
+    role: "api-server"
+- targets: ["<测试节点私网IP>:9465"]
+  labels:
+    env: "test"
+    host: "<测试节点主机名>"
+    service: "huahuo-server"
+    role: "admin"
+- targets: ["<测试节点私网IP>:9466"]
+  labels:
+    env: "test"
+    host: "<测试节点主机名>"
+    service: "huahuo-server"
+    role: "worker"
+- targets: ["<测试节点私网IP>:9467"]
+  labels:
+    env: "test"
+    host: "<测试节点主机名>"
+    service: "huahuo-server"
+    role: "scheduler"
 ```
 
-验证抓取四个 `application_info` 的 role 都存在；测试机 APP_ENV 改为 production 时，中心条目的 env 同步设 prod。验收结果见 [Prometheus 验收](../acceptance/prometheus.md)。
+targets 的 env/service/role 应与应用输出一致，才能让 Prometheus 自身 up 指标也按角色筛选。验证抓取四个 application_info 的 role 都存在；测试机 APP_ENV 改为 production 时，中心条目的 env 同步设 prod。验收结果见 [Prometheus 验收](../acceptance/prometheus.md)。

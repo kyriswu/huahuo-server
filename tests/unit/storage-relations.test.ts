@@ -10,7 +10,7 @@ function attempt(): Attempt {
   const now = new Date();
   return { owner: 'worker', version: 1, attempt: 1, task: {
     id: 'task', user_id: 'user', workspace_id: 'workspace', kind: 'storage.delete', queue: 'maintenance', input_id: null,
-    state: 'running', version: 1, attempt_no: 1, resume_count: 0, max_attempts: 3, lease_owner: 'worker', reservation_id: null, trace_id:'fixture-trace',
+    state: 'running', version: 1, attempt_no: 1, resume_count: 0, max_attempts: 3, lease_owner: 'worker', reservation_id: null, trace_id:'fixture-trace',trace_context:null,
     lease_until: new Date(now.getTime() + 15_000), external_state: 'none', result_id: null, error_code: null,
     retryable: false, event_sequence: 0, created_at: now, updated_at: now,
   } };

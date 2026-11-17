@@ -1,0 +1,26 @@
+groups:
+  - name: huahuo.application
+    interval: 30s
+    rules:
+      - record: huahuo:http_completed:rate5m
+        expr: sum by (env, service, role, traffic) (rate(http_requests_total[5m]))
+      - record: huahuo:http_server_error:ratio5m
+        expr: |
+          (sum by (env, service, role, traffic) (rate(http_requests_total{outcome="server_error"}[5m]))
+            or on (env, service, role, traffic) (0 * huahuo:http_completed:rate5m))
+          / huahuo:http_completed:rate5m
+      - record: huahuo:http_aborted:rate5m
+        expr: sum by (env, service, role, traffic, reason) (rate(http_aborted_requests_total[5m]))
+      - record: huahuo:client_completed:rate5m
+        expr: sum by (env, service, role, dependency, operation) (rate(http_client_requests_total[5m]))
+      - record: huahuo:client_failure:ratio5m
+        expr: |
+          (sum by (env, service, role, dependency, operation)
+            (rate(http_client_requests_total{outcome=~"http_error|business_error|network_error|timeout|response_error"}[5m]))
+            or on (env, service, role, dependency, operation)
+            (0 * sum by (env, service, role, dependency, operation)
+              (rate(http_client_requests_total{outcome!="cancelled"}[5m]))))
+          / sum by (env, service, role, dependency, operation)
+            (rate(http_client_requests_total{outcome!="cancelled"}[5m]))
+      - record: huahuo:http_duration:p95_5m
+        expr: histogram_quantile(0.95, sum by (le, env, service, role, traffic) (rate(http_request_duration_seconds_bucket[5m])))

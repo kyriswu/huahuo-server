@@ -21,7 +21,7 @@ function vectors(data:unknown,count:number,dimensions:number):number[][]{
 /** Native DashScope API, shared by Beijing public and provisioned PrivateLink hosts. */
 export class BailianEmbeddingClient implements EmbeddingClient {
   readonly model:string; readonly dimensions:number; private readonly http:ServiceHttpClient;
-  constructor(private readonly options:EmbeddingOptions){this.model=options.model;this.dimensions=options.dimensions;this.http=new ServiceHttpClient({fetchImpl:options.fetchImpl});if(!options.baseUrl||!options.apiKey||!options.model)throw new EmbeddingError('EMBEDDING_CONFIG_INVALID','Embedding provider configuration is incomplete',false);}
+  constructor(private readonly options:EmbeddingOptions){this.model=options.model;this.dimensions=options.dimensions;this.http=new ServiceHttpClient({fetchImpl:options.fetchImpl,dependency:'embedding',operation:'embed'});if(!options.baseUrl||!options.apiKey||!options.model)throw new EmbeddingError('EMBEDDING_CONFIG_INVALID','Embedding provider configuration is incomplete',false);}
   async embed(texts:string[], requestOptions?:EmbeddingRequestOptions):Promise<number[][]>{
     if(!texts.length)return [];
     if(texts.some(t=>!t.trim()))throw new EmbeddingError('EMBEDDING_INPUT_INVALID','Embedding input contains empty text',false);

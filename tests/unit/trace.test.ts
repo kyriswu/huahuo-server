@@ -11,7 +11,7 @@ describe('one request trace',()=>{
   app.get('/trace',async req=>{await pause(req.id==='trace-first'?15:1);return {traceId:currentTraceId(),headers:Object.fromEntries(traceHeaders({authorization:'Bearer fixture'}))};});
   try{
    const results=await Promise.all(['trace-first','trace-second'].map(traceId=>app.inject({url:'/trace',headers:{'x-trace-id':traceId}})));
-   results.forEach((response,index)=>{const traceId=['trace-first','trace-second'][index];expect(response.headers['x-trace-id']).toBe(traceId);expect(response.json()).toEqual({traceId,headers:{authorization:'Bearer fixture','x-trace-id':traceId}});});
+   results.forEach((response,index)=>{const traceId=['trace-first','trace-second'][index];expect(response.headers['x-trace-id']).toBe(traceId);expect(response.json()).toMatchObject({traceId,headers:{authorization:'Bearer fixture','x-trace-id':traceId}});expect(response.json().headers.traceparent).toMatch(/^00-[a-f0-9]{32}-[a-f0-9]{16}-01$/);});
    expect(currentTraceId()).toBeUndefined();
   }finally{await app.close();}
  });

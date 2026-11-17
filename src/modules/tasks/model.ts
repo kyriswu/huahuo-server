@@ -1,13 +1,14 @@
 import type pg from 'pg';
 import { randomUUID, createHash } from 'node:crypto';
 import {currentRuntimeConfig} from '../runtime-settings/service.js';
+import { captureTraceContext, normalizeTraceContext, type TraceCarrier } from '../../observability/telemetry.js';
 export const queues = ['content','ai','commercial','maintenance'] as const;
 export type QueueName = typeof queues[number];
 export type TaskState = 'queued'|'running'|'retry_scheduled'|'waiting_external'|'reconciling'|'cancel_requested'|'succeeded'|'failed'|'cancelled';
 export interface TaskRow {
  id:string; user_id:string|null; workspace_id:string|null; kind:string; queue:QueueName; input_id:string|null;
  state:TaskState; version:number; attempt_no:number; resume_count:number;max_attempts:number; lease_owner:string|null;
- reservation_id:string|null;trace_id:string;
+ reservation_id:string|null;trace_id:string;trace_context:TraceCarrier|null;
  lease_until:Date|null; external_state:'none'|'submitted'|'unknown'; result_id:string|null;
  error_code:string|null; retryable:boolean; event_sequence:number; created_at:Date; updated_at:Date;
 }
@@ -28,8 +29,13 @@ export async function event(tx:pg.PoolClient,id:string) {
  if(r.rows[0]?.kind==='processing.node-start'&&r.rows[0].external_reference?.startsWith('node-start:'))await tx.query("SELECT pg_notify('processing_node_events',$1)",[r.rows[0].external_reference.slice('node-start:'.length)]);
 }
 export async function enqueueIntent(tx:pg.PoolClient,id:string,delayMs=0) {
- await tx.query(`INSERT INTO task_outbox(id,task_id,available_at) VALUES($1,$2,now()+$3*interval '1 millisecond')
-  ON CONFLICT(task_id) WHERE status IN ('pending','delivering') DO UPDATE SET available_at=least(task_outbox.available_at,excluded.available_at)`,[randomUUID(),id,delayMs]);
+ const carrier=normalizeTraceContext(captureTraceContext());
+ await tx.query(`WITH producer_context AS (
+   UPDATE tasks SET trace_context=$4::jsonb
+   WHERE id=$2 AND attempt_no=0 AND trace_context IS NULL AND $4::jsonb IS NOT NULL
+   RETURNING id
+  ) INSERT INTO task_outbox(id,task_id,available_at) VALUES($1,$2,now()+$3*interval '1 millisecond')
+  ON CONFLICT(task_id) WHERE status IN ('pending','delivering') DO UPDATE SET available_at=least(task_outbox.available_at,excluded.available_at)`,[randomUUID(),id,delayMs,carrier.traceparent?JSON.stringify(carrier):null]);
 }
 // WorkAiTaskInfo only treats succeeded/failed as terminal. Preserve raw state separately.
 export function taskDto(t:TaskRow) {

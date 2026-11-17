@@ -24,11 +24,14 @@ const instances: Array<{ app: FastifyInstance; raw: Response }> = [];
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 function setup(blocked = true, highWaterMark = 128) {
   const raw = new Response(blocked, highWaterMark);
-  const app = {} as FastifyInstance;
+  const recordStream = vi.fn();
+  const app = { metrics: { recordStream } } as unknown as FastifyInstance;
   const hijack = vi.fn();
-  const reply = { raw, server: app, hijack } as unknown as FastifyReply;
+  const info = vi.fn();
+  const reply = { raw, server: app, hijack, getHeaders: () => ({'x-trace-id':'stream-correlation'}),
+    log: { info, warn: vi.fn() } } as unknown as FastifyReply;
   instances.push({ app, raw });
-  return { raw, app, reply, hijack };
+  return { raw, app, reply, hijack, recordStream, info };
 }
 function expectClean(raw: Response) {
   expect(raw.listenerCount('drain')).toBe(0);
@@ -44,6 +47,57 @@ afterEach(async () => {
 });
 
 describe('state snapshot SSE backpressure (real Writable, virtual time)', () => {
+  it('preserves correlation headers and records a failed terminal state independently from HTTP 200', async () => {
+    const { raw, reply, app, recordStream, info } = setup(false);
+    await streamState(reply, () => ({ state: 'failed' }), () => () => undefined, () => true,
+      { kind: 'document_trial', terminalOutcome: () => 'error' });
+    await settle();
+    expect(raw.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({ 'x-trace-id': 'stream-correlation' }));
+    expect(raw.writableFinished).toBe(true);
+    expect(recordStream).toHaveBeenCalledExactlyOnceWith('document_trial', 'error', expect.any(Number), expect.any(Number), 1);
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: 'stream.closed', outcome: 'error', streamKind: 'document_trial',
+      durationMs: expect.any(Number), firstEventMs: expect.any(Number), eventCount: 1 }), expect.any(String));
+    closeStateStreams(app); await settle();
+    expect(recordStream).toHaveBeenCalledTimes(1); expectClean(raw);
+  });
+
+  it('distinguishes explicit business cancellation from transport disconnection', async () => {
+    const cancelled = setup(false);
+    await streamState(cancelled.reply, () => ({}), () => () => undefined, () => true,
+      { kind: 'document_trial', terminalOutcome: () => 'cancelled' });
+    await settle();
+    expect(cancelled.recordStream).toHaveBeenCalledWith('document_trial', 'cancelled', expect.any(Number), expect.any(Number), 1);
+    const disconnected = setup(false);
+    await streamState(disconnected.reply, () => ({}), () => () => undefined, () => false);
+    await settle(); disconnected.raw.destroy(); await settle();
+    expect(disconnected.recordStream).toHaveBeenCalledTimes(1);
+    expect(disconnected.recordStream.mock.calls[0]?.[1]).toBe('client_abort');
+  });
+
+  it('reports late write errors as errors even after the terminal response started ending', async () => {
+    const { raw, reply, recordStream } = setup(true, 1024);
+    await streamState(reply, () => ({}), () => () => undefined, () => true);
+    await settle();
+    expect(raw.writableEnded).toBe(true);
+    expect(recordStream).not.toHaveBeenCalled();
+    raw.release(new Error('LATE_WRITE_FAILURE')); await settle();
+    expect(recordStream).toHaveBeenCalledTimes(1);
+    expect(recordStream.mock.calls[0]?.[1]).toBe('error');
+    expectClean(raw);
+  });
+
+  it('reports backpressure expiry once and releases the subscription even when observation throws', async () => {
+    const { raw, reply, recordStream, info } = setup();
+    const unsubscribe = vi.fn();
+    recordStream.mockImplementation(() => { throw new Error('METRICS_FAILURE'); });
+    info.mockImplementation(() => { throw new Error('LOGGER_FAILURE'); });
+    const started = streamState(reply, () => ({ text: 'x'.repeat(1024) }), () => unsubscribe, () => false);
+    await settle(); await vi.advanceTimersByTimeAsync(30_000); await started; await settle();
+    expect(recordStream).toHaveBeenCalledTimes(1);
+    expect(recordStream.mock.calls[0]?.[1]).toBe('timeout');
+    expect(raw.destroyed).toBe(true); expect(unsubscribe).toHaveBeenCalledTimes(1); expectClean(raw);
+  });
+
   it('stops reads and serialization while blocked, then reads only the latest of 100 changes', async () => {
     const { raw, reply, app } = setup();
     let revision = 0;

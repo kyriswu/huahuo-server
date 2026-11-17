@@ -84,14 +84,15 @@ export function validateExtractionResponse(value: unknown, contexts: readonly (F
 export class DocumentExtractionClient {
   private readonly http:ServiceHttpClient;
   constructor(readonly config: EnabledDocumentExtractionConfig, fetchImpl: typeof fetch = fetch) {
-    this.http=new ServiceHttpClient({fetchImpl});
+    this.http=new ServiceHttpClient({fetchImpl,dependency:'document_parser'});
     if(config.parameters!==null)assertCompleteExtractionConfig(config.parameters);
   }
   private url(baseUrl: string, path: string): URL { return new URL(baseUrl.replace(/\/$/, '') + path); }
   private async request(url: URL, init: RequestInit, signal: AbortSignal, submitting: boolean, allowPending = false): Promise<{status:number;body:unknown}> {
     let headersReceived=false;
     try {
-      return await this.http.request(url,{...init,signal},{timeoutMs:this.config.timeoutMs},async response=>{
+      const operation=init.method==='DELETE'?'cancel':url.pathname.endsWith('/ack')?'ack':url.pathname.endsWith('/extract-async')?'submit':url.pathname.endsWith('/extract')?'extract':url.pathname.endsWith('/result')?'job_result':'job_status';
+      return await this.http.request(url,{...init,signal},{timeoutMs:this.config.timeoutMs,operation},async response=>{
         headersReceived=true;
         if (response.status !== 200 && !((submitting && this.config.mode==='async' || allowPending) && response.status === 202)) {
           const settled = submitting && response.status >= 400 && response.status < 500 && response.status !== 408;

@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
 import type {AppConfig} from '../../config/config.js';
 import {DocumentExtractionClient,type ExtractionResponse} from '../../integrations/document-extraction.js';
+import {ServiceHttpClient} from '../../integrations/http-client.js';
 import {DocumentPreparationError,sourceFromUrl} from '../rag/document-preparation.js';
 import {ProcessingNodes} from '../processing-nodes/service.js';
 import {nodeConfig,nodeDocumentConfig,type ProcessingNode} from '../processing-nodes/model.js';
@@ -58,8 +59,8 @@ export class AdminDocumentTrials {
    // Probe the configured API directly. User task admission, machine power,
    // durable callbacks and restart recovery belong to the business workflow.
    if(target.healthPath)try{
-    const ready=await fetchTrial(new URL(target.baseUrl.replace(/\/$/,'')+target.healthPath),{method:'GET',headers:target.apiToken?{Authorization:`Bearer ${target.apiToken}`}:{},signal:AbortSignal.any([job.controller.signal,AbortSignal.timeout(5000)]),redirect:'error'});
-    const healthy=ready.ok;await ready.body?.cancel();if(!healthy)throw Error('NOT_READY');
+    const healthy=await new ServiceHttpClient({fetchImpl:fetchTrial,dependency:'processing_node',operation:'health'}).request(new URL(target.baseUrl.replace(/\/$/,'')+target.healthPath),{method:'GET',headers:target.apiToken?{Authorization:`Bearer ${target.apiToken}`}:{},signal:job.controller.signal},{timeoutMs:5000},async response=>response.ok);
+    if(!healthy)throw Error('NOT_READY');
    }catch{throw new DomainError(503,'ADMIN_TRIAL_SERVICE_UNREACHABLE');}
    job.result=await new DocumentExtractionClient(extraction,fetchTrial).extract([{
     ...source,source_resource_id:job.id,parse_run_id:randomUUID(),

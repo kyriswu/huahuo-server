@@ -20,7 +20,7 @@ export const ragImageKey=(image:RagImageRequest)=>JSON.stringify([image.sourceTy
 export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveImages?:(scope:Scope,images:RagImageRequest[])=>Promise<ReadonlyMap<string,RagImageLink>>;}
 interface ChunkRow{build_id:string;point_id:string;ordinal:number;source_start:number;source_end:number;content_hash:string;chunk_count:number;}
 export class RagQueryService {
- private indexes=new Map<string,{target:string;index:HybridIndex|KeywordIndex;active:number;revision:number;retired:boolean}>();private fallbackTotal=0;
+ private indexes=new Map<string,{target:string;index:HybridIndex|KeywordIndex;active:number;revision:number;retired:boolean}>();
  constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly dependencies:RagQueryDependencies={}){}
  private reranker():RerankAdapter|undefined{
   const config=this.config;
@@ -109,7 +109,7 @@ export class RagQueryService {
    });
    let ranked=candidates;
    const rerank=note&&mode!=='keyword'?this.reranker():undefined;
-   if(rerank&&candidates.length){const result=await timing.measure('rerank',()=>rerankWithinBudget(rerank,query,candidates,this.config.rag.noteRerankBudgetMs));ranked=result.candidates;if(result.fallback){timing.fallback=result.fallback;this.fallbackTotal++;}timing.fallbackTotal=this.fallbackTotal;}
+   if(rerank&&candidates.length){const result=await timing.measure('rerank',()=>rerankWithinBudget(rerank,query,candidates,this.config.rag.noteRerankBudgetMs));ranked=result.candidates;if(result.fallback)timing.fallback=result.fallback;}
    const current=new Map((await timing.measure('pg_recheck',()=>this.eligible(scope,input,sourceType))).map(b=>[b.id,b]));
    // Only final, rechecked topK chunks can request images. UUIDs stay in the
    // evidence; expiring URLs are a separate view, never rerank input or offsets.

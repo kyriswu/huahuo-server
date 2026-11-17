@@ -100,7 +100,7 @@ export function registerAdminRoutes(
    const wake=()=>{configuration.nodes.invalidateStatus(nodeId);changed();};
    const stopTask=await configuration.nodeJobs.watchNode(nodeId,wake);
    try{const stopMachine=await configuration.nodes.watchStatus(nodeId,wake);return ()=>{stopMachine();stopTask();};}catch(error){stopTask();throw error;}
-  },()=>false);
+  },()=>false,{kind:'node_status'});
  });
  const trials=configuration.trials;
  const trialAuth=async(req:FastifyRequest)=>{await auth(req);await trials.authorize(scope(req));};
@@ -112,7 +112,9 @@ export function registerAdminRoutes(
  app.get('/admin/api/v1/document-trials/:trialId',{preHandler:trialAuth,schema:{params:trialParams,response:trialResponse}},async req=>success(trials.status(scope(req),(req.params as {trialId:string}).trialId),req.id));
  app.get('/admin/api/v1/document-trials/:trialId/events',{preHandler:trialAuth,schema:{params:trialParams}},async(req,reply)=>{
   const id=(req.params as {trialId:string}).trialId;
-  await streamState(reply,()=>trials.status(scope(req),id),changed=>trials.watch(scope(req),id,changed),s=>s.state!=='running');
+  await streamState(reply,()=>trials.status(scope(req),id),changed=>trials.watch(scope(req),id,changed),s=>s.state!=='running',{
+   kind:'document_trial',terminalOutcome:s=>s.state==='failed'?'error':s.state==='cancelled'?'cancelled':'completed',
+  });
  });
  app.get('/admin/api/v1/document-trials/:trialId/result',{preHandler:trialAuth,schema:{params:trialParams,response:trialResponse}},async req=>success(trials.result(scope(req),(req.params as {trialId:string}).trialId),req.id));
  app.delete('/admin/api/v1/document-trials/:trialId',{preHandler:[trialAuth,csrf],schema:{params:trialParams,response:trialResponse}},async req=>success(trials.cancel(scope(req),(req.params as {trialId:string}).trialId),req.id));

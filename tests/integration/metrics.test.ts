@@ -21,6 +21,7 @@ const userId = randomUUID(), workspaceId = randomUUID();
 const total = (body: string, kind: string, result: string) => body.split('\n')
   .filter(line => line.startsWith('task_processing_attempts_total{') && line.includes(`kind="${kind}"`) && line.includes(`result="${result}"`))
   .reduce((sum, line) => sum + Number(line.split(' ').at(-1)), 0);
+const terminalTotal=(body:string,state:string)=>body.split('\n').filter(line=>line.startsWith('task_terminal_total{')&&line.includes(`state="${state}"`)).reduce((sum,line)=>sum+Number(line.split(' ').at(-1)),0);
 async function queued(kind = 'maintenance.check', queue: QueueName = 'maintenance') {
   const id = randomUUID();
   await root.query("INSERT INTO tasks(trace_id,id,kind,queue,state,user_id,workspace_id) VALUES(gen_random_uuid()::text,$1,$2,$3,'queued',$4,$5)", [id, kind, queue, userId, workspaceId]); return id;
@@ -42,6 +43,7 @@ it('counts committed attempt results once, excluding rollback, expired leases, d
     await expect(engine.finish(first, hash('rollback'), 0, async () => { throw new Error('ROLLBACK_PROBE'); })).rejects.toThrow('ROLLBACK_PROBE');
     expect((await root.query('SELECT state FROM tasks WHERE id=$1', [first.task.id])).rows[0].state).toBe('running');
     expect(total(await (await fetch(url)).text(), 'maintenance.check', 'success')).toBe(0);
+    expect(terminalTotal(await (await fetch(url)).text(),'succeeded')).toBe(0);
     expect(await engine.finish(first, hash('committed'), 0)).toBe(true);
     expect(await engine.finish(first, hash('duplicate'), 0)).toBe(false);
     expect((await root.query('SELECT state FROM tasks WHERE id=$1', [first.task.id])).rows[0].state).toBe('succeeded');
@@ -60,6 +62,8 @@ it('counts committed attempt results once, excluding rollback, expired leases, d
     const after = await (await fetch(url)).text();
     expect(total(after, 'maintenance.check', 'success')).toBe(1);
     expect(total(after, 'maintenance.check', 'failure')).toBe(1);
+    expect(terminalTotal(after,'succeeded')).toBe(1);expect(terminalTotal(after,'failed')).toBe(1);expect(terminalTotal(after,'cancelled')).toBe(0);
+    expect(after.split('\n').filter(line=>line.startsWith('task_terminal_duration_seconds_count{')).reduce((sum,line)=>sum+Number(line.split(' ').at(-1)),0)).toBe(2);
     expect(after).not.toContain(first.task.id);
   } finally { await closeMetrics(listener); }
 });

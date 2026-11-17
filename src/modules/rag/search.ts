@@ -77,7 +77,7 @@ interface RerankProviderRow { index?: unknown; relevance_score?: unknown }
 /** Native DashScope rerank API. Only scores and input indexes are trusted. */
 export class HttpRerankAdapter implements RerankAdapter {
   private readonly http:ServiceHttpClient;
-  constructor(private readonly options: HttpRerankOptions) { this.http=new ServiceHttpClient({fetchImpl:options.fetchImpl}); }
+  constructor(private readonly options: HttpRerankOptions) { this.http=new ServiceHttpClient({fetchImpl:options.fetchImpl,dependency:'rerank',operation:'rerank'}); }
 
   async rerank(query: string, candidates: RagSearchCandidate[], options?: { signal?: AbortSignal }): Promise<Array<RagSearchCandidate & { rerankScore: number }>> {
     if (!candidates.length) return [];

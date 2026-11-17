@@ -1,8 +1,15 @@
 import type { FastifyReply, FastifyInstance } from 'fastify';
+import { performance } from 'node:perf_hooks';
+import { currentTelemetryFields } from '../observability/telemetry.js';
 
 const streams = new WeakMap<FastifyInstance, Set<() => void>>();
 const maxBufferedBytes = 1024 * 1024;
 const drainTimeoutMs = 30_000;
+type StreamOutcome = 'completed'|'client_abort'|'error'|'timeout'|'shutdown'|'backpressure'|'cancelled';
+export interface StateStreamObservation<T> {
+  kind?: 'node_status'|'document_trial'|'state';
+  terminalOutcome?: (value: T) => 'completed'|'error'|'cancelled';
+}
 
 export function closeStateStreams(app: FastifyInstance) {
   for (const close of streams.get(app) ?? []) close();
@@ -14,13 +21,21 @@ export async function streamState<T>(
   read: () => Promise<T> | T,
   subscribe: (changed: () => void) => Promise<() => void> | (() => void),
   terminal: (state: T) => boolean,
+  observation: StateStreamObservation<T> = {},
 ) {
   // Preserve ordinary HTTP errors (including authorization) before hijacking.
   const initial = await read();
   const raw = reply.raw;
   if (raw.destroyed || raw.writableEnded) return;
+  const started = performance.now(), trace = currentTelemetryFields();
+  let firstEventSeconds: number|undefined, eventCount = 0, reported = false;
+  let endReason: StreamOutcome|undefined;
+  const kind = observation.kind ?? 'state';
+  const headers = Object.fromEntries(Object.entries(reply.getHeaders()).map(([name, value]) =>
+    [name, Array.isArray(value) ? value.map(String) : value === undefined ? undefined : String(value)]));
   reply.hijack();
   raw.writeHead(200, {
+    ...headers,
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-store',
     Connection: 'keep-alive',
@@ -32,6 +47,18 @@ export async function streamState<T>(
   let releaseDrain: ((drained: boolean) => void) | undefined;
   const group = streams.get(reply.server) ?? new Set<() => void>();
   streams.set(reply.server, group);
+  const shutdown = () => finish('shutdown');
+
+  function report(outcome: StreamOutcome) {
+    if (reported) return;
+    reported = true;
+    const seconds = Math.max(0, (performance.now() - started) / 1000);
+    try { reply.server.metrics.recordStream(kind, outcome, seconds, firstEventSeconds, eventCount); }
+    catch { /* Observation must never change the stream or its cleanup. */ }
+    try { reply.log.info({ event: 'stream.closed', ...trace, streamKind: kind, outcome,
+      durationMs: seconds * 1000, firstEventMs: firstEventSeconds === undefined ? undefined : firstEventSeconds * 1000, eventCount }, 'State stream closed'); }
+    catch { /* A logging failure cannot leave a subscription running. */ }
+  }
 
   function stopSubscription() {
     const stop = unsubscribe;
@@ -43,19 +70,22 @@ export async function streamState<T>(
     closed = true;
     clearInterval(heartbeat);
     releaseDrain?.(false);
-    group.delete(finish);
+    group.delete(shutdown);
     stopSubscription();
   }
   function close() {
+    report(endReason ?? (raw.writableFinished ? 'completed' : 'client_abort'));
     stop();
     raw.off('close', close);
     raw.off('finish', close);
-    raw.off('error', abort);
+    raw.off('error', onError);
   }
-  function abort() { stop(); raw.destroy(); }
-  function finish() {
+  function abort(reason: StreamOutcome = 'error') { endReason = reason; stop(); raw.destroy(); }
+  function onError() { abort('error'); }
+  function finish(reason: StreamOutcome) {
     // Shutdown must not wait forever for a client that stopped reading.
     const blocked = Boolean(releaseDrain);
+    endReason = reason;
     stop();
     if (blocked) raw.destroy(); else if (!raw.destroyed) raw.end();
   }
@@ -64,12 +94,17 @@ export async function streamState<T>(
     if (closed) return false;
     // highWaterMark is a signal, not a cap. Bound even a single large snapshot.
     if (raw.writableLength + Buffer.byteLength(frame) > maxBufferedBytes) {
-      abort();
+      abort('backpressure');
       return false;
     }
-    if (raw.write(frame)) return true;
+    const writable = raw.write(frame);
+    if (frame.startsWith('event: update\n')) {
+      eventCount++;
+      firstEventSeconds ??= Math.max(0, (performance.now() - started) / 1000);
+    }
+    if (writable) return true;
     return new Promise(resolve => {
-      const timer = setTimeout(abort, drainTimeoutMs);
+      const timer = setTimeout(() => abort('timeout'), drainTimeoutMs);
       timer.unref();
       const drained = () => releaseDrain?.(true);
       releaseDrain = (success: boolean) => {
@@ -85,7 +120,9 @@ export async function streamState<T>(
   async function send(value: T) {
     if (closed) return;
     const last = terminal(value);
-    if (await write('event: update\ndata: ' + JSON.stringify(value) + '\n\n') && last) finish();
+    if (await write('event: update\ndata: ' + JSON.stringify(value) + '\n\n') && last) {
+      finish(observation.terminalOutcome?.(value) ?? 'completed');
+    }
   }
   function resume() {
     busy = false;
@@ -104,20 +141,20 @@ export async function streamState<T>(
         dirty = false;
         await send(await read());
       }
-    })().catch(abort).finally(resume);
+    })().catch(() => abort('error')).finally(resume);
   }
   const changed = () => { if (!closed) { dirty = true; pump(); } };
   const heartbeat = setInterval(() => {
     if (closed || busy || !initialized) return;
     busy = true;
-    void write(': keepalive\n\n').catch(abort).finally(resume);
+    void write(': keepalive\n\n').catch(() => abort('error')).finally(resume);
   }, 15_000);
   heartbeat.unref();
-  group.add(finish);
+  group.add(shutdown);
   raw.on('close', close);
   // A write returning true can still fail asynchronously before end completes.
   raw.on('finish', close);
-  raw.on('error', abort);
+  raw.on('error', onError);
 
   try {
     unsubscribe = await subscribe(changed);

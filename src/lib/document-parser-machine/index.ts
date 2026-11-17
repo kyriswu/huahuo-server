@@ -66,7 +66,7 @@ export class DocumentParserMachine {
     if (config.mode === 'ecs' && config.eciFallback) this.eci = new DocumentParserEciFallback(state, config.eciFallback,
       eciProvider ?? new AliyunEciGpuProvider({ regionId: config.regionId, credentials: config.credentials,
         connectTimeoutMs: 1000, readTimeoutMs: 6000, workloadRamCredentials: true }));
-    const http=new ServiceHttpClient();
+    const http=new ServiceHttpClient({dependency:'processing_node',operation:'health'});
     this.healthy = healthCheck ?? (async ({ baseUrl, signal, headers }) => {
       if (!config.healthPath) return true;
       try {
