@@ -16,4 +16,8 @@ iOS 模拟器通过 App 通用上传库，真实测试服授权、直 OSS PUT、
 
 保留失败事实：首次全量单元测试与会清理 dist 的构建同时运行，4 项读取 dist 的历史外部门禁用例因产物尚未生成失败；构建完成后顺序重跑 1166 项通过，未修改测试或放宽门禁。
 
-实际目标发布与修复后的 iOS 完整联调尚待执行，不以本地结果代替。
+实际测试发布已完成：[PR #28](https://github.com/kyriswu/huahuo-server/pull/28) 经 PR CI、准确合并提交 push CI 后自动发布，[发布运行](https://github.com/kyriswu/huahuo-server/actions/runs/44046156448) 远端五阶段均通过，终态 `TEST_RELEASE_OK`，无排空强退信号。业务 SHA 为 `8b27e01c9ab78188e45573ff1fde98a04d699274`，控制 SHA 为 `64e2a46cee7f89b238875e585c51fda9945fdccf`。随后独立只读核对 current.json、实际镜像及健康：API/Worker 为新业务 SHA，Admin/Scheduler 保留 `5af896d` 镜像，四角色均 healthy。没有新增迁移、真实配置调整或宿主入口操作。
+
+修复后在现有 iPhone 17e 模拟器复用用户登录态，经 App 通用上传库完整验收通过：65,536 字节直传及 complete，Server 新 playback 签名无禁用参数，OSS GET 200 读回 65,536 字节且内容完全一致。取消已受理后，同一个仍有效的签名 GET 在约 45.36 秒后返回 404 / NoSuchKey，确认物理清理；总耗时约 46.79 秒。上传/读取目标均明确验证为测试 Bucket，没有业务认领、短信或模型请求。该次只证明已测前台小文件链路，不外推后台续传、所有移动网络或生产环境。
+
+联调前一轮测试曾将合法的 disposition/encoding 参数也误判为禁用，在发 GET 前失败；更正为仅禁止 response-content-type 后完整通过。失败事实保留。更早的会话探测误用了 drive 默认卸载行为，影响模拟器沙盒，已向用户说明；后续均显式 --keep-app-running，服务器数据未清理。App 详细证据保存在其仓库 docs/acceptance/oss-upload-20261117.md，敏感定位报告不提交。
