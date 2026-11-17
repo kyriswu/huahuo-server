@@ -1,45 +1,28 @@
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import MarkdownIt from 'markdown-it';
+import { kbImages, kbImageTag } from './kb-images.js';
 
 const markdown = new MarkdownIt({ html: true });
-export const imageUuid = (value: string) => /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value);
-export const imageResourceId = (value: string): string | undefined => {
-  const id = value.startsWith('asset://') ? value.slice(8) : value;
-  return imageUuid(id) ? id.toLowerCase() : undefined;
-};
 interface Node {
   type: string; url?: string; identifier?: string; alt?: string | null; title?: string | null;
   children?: Node[]; position?: { start: { offset?: number }; end: { offset?: number } };
 }
-export interface MarkdownImage {
-  url: string; alt: string; start: number; end: number;
+export interface InputImage {
+  url: string; alt: string; title?: string;
   nodeStart: number; nodeEnd: number; kind: 'markdown' | 'html' | 'kbimage';
-  replacementPrefix?: string; replacementSuffix?: string;
+  width?: string; height?: string;
+  sourceHash?: string;
+  imageOnlyDefinitions?: readonly { start: number; end: number }[];
 }
 
-function destination(source: string, start: number, end: number, definition: boolean, expectedUrl: string) {
-  const raw = source.slice(start, end);
-  const state = new markdown.inline.State(raw, markdown, {}, []);
-  const labelEnd = markdown.helpers.parseLinkLabel(state, definition ? 0 : 1, false);
-  let at = labelEnd + 2;
-  if (labelEnd < 0) throw new Error('MARKDOWN_IMAGE_POSITION_INVALID');
-  let continuedLine = false;
-  while (at < raw.length) {
-    if (/\s/u.test(raw[at]!)) { continuedLine ||= raw[at] === '\n' || raw[at] === '\r'; at++; }
-    else if (continuedLine && raw[at] === '>') at++; // CommonMark blockquote continuation.
-    else break;
-  }
-  const parsed = markdown.helpers.parseLinkDestination(raw, at, raw.length);
-  if (!parsed.ok || parsed.str !== expectedUrl) throw new Error('MARKDOWN_IMAGE_POSITION_INVALID');
-  return { start: start + at + (raw[at] === '<' ? 1 : 0), end: start + parsed.pos - (raw[at] === '<' ? 1 : 0) };
-}
-
-function htmlImages(source: string, start: number, end: number, ignore: (start: number, end: number) => void): MarkdownImage[] {
-  const result: MarkdownImage[] = [];
+function htmlImages(source: string, start: number, end: number, protectedImages: readonly InputImage[], ignore: (start: number, end: number) => void): InputImage[] {
+  const result: InputImage[] = [];
   let at = start;
   while (at < end) {
     at = source.indexOf('<', at);
     if (at < 0 || at >= end) break;
+    const protectedImage = protectedImages.find(image => image.nodeStart <= at && image.nodeEnd > at);
+    if (protectedImage) { at = protectedImage.nodeEnd; continue; }
     const tail = source.slice(at, end);
     if (tail.startsWith('<!--') || tail.startsWith('<![CDATA[')) {
       const closing = tail.startsWith('<!--') ? '-->' : ']]>';
@@ -55,78 +38,93 @@ function htmlImages(source: string, start: number, end: number, ignore: (start: 
       const matched = close.exec(source); ignore(at, matched ? close.lastIndex : source.length); at = matched ? close.lastIndex : end;
       continue;
     }
-    if (!closing && (name === 'img' || name === 'kbimage')) {
-      const wanted = name === 'img' ? 'src' : 'uuid';
+    if (!closing && name === 'img') {
       const attrs = [...raw.matchAll(/\s+([a-z_:][a-z\d_:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/giu)];
-      const values = attrs.filter(a => a[1]!.toLowerCase() === wanted);
-      if (values.length > 1) throw new Error('MARKDOWN_IMAGE_ATTRIBUTE_DUPLICATE');
-      const attr = values[0];
-      if (attr) {
-        const value = attr[2] ?? attr[3] ?? attr[4]!;
-        const valueOffset = attr[0].indexOf('=') + 1;
-        let offset = valueOffset;
-        while (/\s/u.test(attr[0][offset] ?? '') && offset < attr[0].length) offset++;
-        if (['"', "'"].includes(attr[0][offset]!)) offset++;
-        const alt = attrs.find(a => a[1]!.toLowerCase() === 'alt');
-        result.push({ url: name === 'kbimage' ? `asset://${value}` : markdown.utils.unescapeAll(value),
-          alt: alt ? markdown.utils.unescapeAll(alt[2] ?? alt[3] ?? alt[4]!) : '',
-          start: at + attr.index + offset, end: at + attr.index + offset + value.length,
-          nodeStart: at, nodeEnd: at + raw.length, kind: name === 'img' ? 'html' : 'kbimage' });
-      }
+      const values = (key: string) => attrs.filter(attr => attr[1]!.toLowerCase() === key);
+      for (const key of ['src', 'alt', 'title', 'width', 'height']) if (values(key).length > 1) throw new Error('MARKDOWN_IMAGE_ATTRIBUTE_DUPLICATE');
+      const value = (key: string) => { const attr = values(key)[0]; return attr ? markdown.utils.unescapeAll(attr[2] ?? attr[3] ?? attr[4]!) : undefined; };
+      const url = value('src');
+      if (url === undefined || !url) throw new Error('MARKDOWN_IMAGE_SOURCE_REQUIRED');
+      result.push({ url, alt: value('alt') ?? '', nodeStart: at, nodeEnd: at + raw.length, kind: 'html',
+        ...(value('title') !== undefined ? { title: value('title')! } : {}),
+        ...(value('width') !== undefined ? { width: value('width')! } : {}),
+        ...(value('height') !== undefined ? { height: value('height')! } : {}),
+      });
     }
     at += raw.length;
   }
   return result;
 }
 
-/** CommonMark positions address the unchanged input, including CRLF and emoji.
- * Only actual image nodes (or their definitions) are eligible for replacement.
- * Code, ordinary links, comments, and image-looking text are never rewritten.
- */
-export function markdownImages(source: string): MarkdownImage[] {
+/** Write-side input adapter. CommonMark is parsed only while accepting content;
+ * stored content and query/display paths use the canonical KBIMAGE scanner. */
+export function inputImages(source: string): InputImage[] {
+  const canonical: InputImage[] = kbImages(source).map(image => ({ url: `asset://${image.resourceId}`, alt: image.alt,
+    nodeStart: image.nodeStart, nodeEnd: image.nodeEnd, kind: 'kbimage' }));
+  if (!source.includes('![') && !/<img\b/iu.test(source)) return canonical;
   const tree: Node = fromMarkdown(source);
-  const definitions = new Map<string, Node>(), shared = new Set<string>();
-  const ignored: Array<{start: number; end: number}> = [], html = new Map<Node, MarkdownImage[]>();
+  const definitions = new Map<string, Node[]>(), linkedDefinitions = new Set<string>();
+  const ignored: Array<{ start: number; end: number }> = [], html = new Map<Node, InputImage[]>();
   const visit = (node: Node, fn: (node: Node) => void) => { fn(node); for (const child of node.children ?? []) visit(child, fn); };
+  const protectedAt = (start: number) => canonical.some(image => image.nodeStart <= start && image.nodeEnd > start);
   visit(tree, node => {
-    if (node.type === 'definition' && !definitions.has(node.identifier!)) definitions.set(node.identifier!, node);
-    if (node.type === 'linkReference') shared.add(node.identifier!);
     if (node.type === 'html' && node.position?.start.offset !== undefined && node.position.end.offset !== undefined)
-      html.set(node, htmlImages(source, node.position.start.offset, node.position.end.offset, (start, end) => ignored.push({start, end})));
+      html.set(node, htmlImages(source, node.position.start.offset, node.position.end.offset, canonical, (start, end) => ignored.push({ start, end })));
+    if (node.position?.start.offset !== undefined && protectedAt(node.position.start.offset)) return;
+    if (node.type === 'definition') definitions.set(node.identifier!, [...definitions.get(node.identifier!) ?? [], node]);
+    if (node.type === 'linkReference') linkedDefinitions.add(node.identifier!);
   });
-  const result: MarkdownImage[] = [];
+  const result: InputImage[] = [];
   visit(tree, node => {
     const start = node.position?.start.offset, end = node.position?.end.offset;
     if (start === undefined || end === undefined) return;
     if (node.type === 'html') { result.push(...html.get(node)!); return; }
+    if (protectedAt(start)) return;
     if (node.type !== 'image' && node.type !== 'imageReference') return;
-    const target = node.type === 'imageReference' ? definitions.get(node.identifier!) : node;
-    if (!target?.url || target.position?.start.offset === undefined || target.position.end.offset === undefined) return;
-    const span = destination(source, target.position.start.offset, target.position.end.offset, node.type === 'imageReference', target.url);
-    if (node.type === 'imageReference' && shared.has(node.identifier!)) {
-      // A definition shared with an ordinary link cannot be rewritten globally.
-      // Expand just the image usage, preserving its original escaped alt label.
-      const raw = source.slice(start, end), state = new markdown.inline.State(raw, markdown, {}, []);
-      const labelEnd = markdown.helpers.parseLinkLabel(state, 1, false);
-      result.push({url: target.url, alt: node.alt ?? '', start, end, nodeStart: start, nodeEnd: end, kind: 'markdown',
-        replacementPrefix: raw.slice(0, labelEnd + 1) + '(<', replacementSuffix: '>' + (target.title ? ` "${target.title.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"` : '') + ')'});
-    } else result.push({ ...span, url: target.url, alt: node.alt ?? '', nodeStart: start, nodeEnd: end, kind: 'markdown' });
+    const referenced = node.type === 'imageReference' ? definitions.get(node.identifier!) : undefined;
+    const target = node.type === 'imageReference' ? referenced?.[0] : node;
+    if (!target?.url) throw new Error('MARKDOWN_IMAGE_SOURCE_REQUIRED');
+    result.push({ url: target.url, alt: node.alt ?? '', nodeStart: start, nodeEnd: end, kind: 'markdown',
+      ...(target.title !== null && target.title !== undefined ? { title: target.title } : {}),
+      ...(referenced && !linkedDefinitions.has(node.identifier!) ? { imageOnlyDefinitions: referenced.flatMap(definition => {
+        const definitionStart = definition.position?.start.offset, definitionEnd = definition.position?.end.offset;
+        return definitionStart === undefined || definitionEnd === undefined ? [] : [{ start: definitionStart, end: definitionEnd }];
+      }) } : {}),
+    });
   });
-  return result.filter(image => !ignored.some(range => image.nodeStart >= range.start && image.nodeStart < range.end)).sort((a, b) => a.nodeStart - b.nodeStart);
+  const ordinary = result.filter(image => !ignored.some(range => image.nodeStart >= range.start && image.nodeStart < range.end));
+  for (const image of ordinary) {
+    const fragment = image.url.indexOf('#');
+    if (fragment < 0) continue;
+    const marker = image.url.slice(fragment);
+    if (!marker.startsWith('#kbimage=')) continue;
+    if (!/^#kbimage=[a-f\d]{64}$/iu.test(marker)) throw new Error('MARKDOWN_IMAGE_ORIGIN_INVALID');
+    image.sourceHash = marker.slice(9).toLowerCase();
+  }
+  return [...canonical.filter(image => !ordinary.some(outer => outer.nodeStart < image.nodeStart && outer.nodeEnd > image.nodeEnd)), ...ordinary]
+    .sort((a, b) => a.nodeStart - b.nodeStart);
 }
 
-/** Change only destination bytes, not surrounding Markdown, spacing, or OCR. */
-export function rewriteImageUrls(source: string, images: readonly MarkdownImage[], replacements: ReadonlyMap<string, string>): string {
-  const edits = new Map<number, { end: number; text: string }>();
+const attribute = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+/** Replace image occurrences and remove their now-unused definitions. Shared
+ * link definitions and other bytes remain intact; KBIMAGE retains metadata/OCR. */
+export function normalizeImageTags(source: string, images: readonly InputImage[], resourceIds: ReadonlyMap<string, string>): string {
+  const edits = new Map<number, { start: number; end: number; text: string }>();
   for (const image of images) {
-    const next = replacements.get(image.url);
-    if (!next) continue;
-    if (image.kind === 'kbimage' && !next.startsWith('asset://')) continue; // UUID attributes remain UUIDs in views.
-    const text = image.kind === 'kbimage' ? next.slice(8) : image.kind === 'html'
-      ? next.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll("'", '&#39;').replaceAll('<', '&lt;') : next;
-    edits.set(image.start, { end: image.end, text: (image.replacementPrefix ?? '') + text + (image.replacementSuffix ?? '') });
+    const resourceId = resourceIds.get(image.url);
+    if (!resourceId) throw new Error('MARKDOWN_IMAGE_RESOURCE_REQUIRED');
+    if (image.kind === 'kbimage') continue;
+    let tag = kbImageTag(resourceId, image.alt, image.title);
+    const dimensions = [image.width !== undefined ? ` width="${attribute(image.width)}"` : '', image.height !== undefined ? ` height="${attribute(image.height)}"` : ''].join('');
+    if (dimensions) tag = tag.replace(/\s*\/>$/u, `${dimensions} />`);
+    edits.set(image.nodeStart, { start: image.nodeStart, end: image.nodeEnd, text: tag });
+    for (const definition of image.imageOnlyDefinitions ?? []) edits.set(definition.start, { ...definition, text: '' });
   }
-  let result = source;
-  for (const [start, edit] of [...edits].sort(([a], [b]) => b - a)) result = result.slice(0, start) + edit.text + result.slice(edit.end);
-  return result;
+  const result: string[] = []; let cursor = 0;
+  for (const edit of [...edits.values()].sort((a, b) => a.start - b.start)) {
+    if (edit.start < cursor) throw new Error('MARKDOWN_IMAGE_OVERLAP');
+    result.push(source.slice(cursor, edit.start), edit.text); cursor = edit.end;
+  }
+  result.push(source.slice(cursor));
+  return result.join('');
 }

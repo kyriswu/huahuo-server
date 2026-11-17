@@ -28,6 +28,15 @@ describe('role configuration',()=>{
   expect(oss).toMatchObject({accessKeyId:'shared-test-id',accessKeySecret:'shared-test-secret',bucket:'test-bucket'});
   expect(credentials).toEqual({accessKeyId:oss?.accessKeyId,accessKeySecret:oss?.accessKeySecret});
  });
+ it('requires a public OSS signing endpoint when the service uses an internal endpoint',()=>{
+  const values={...env,STORAGE_DRIVER:'aliyun-oss',STORAGE_ALIYUN_OSS_ENDPOINT:'https://oss-cn-beijing-internal.aliyuncs.com',
+   STORAGE_ALIYUN_OSS_BUCKET:'test-bucket',ALIYUN_RAM_ACCESS_KEY_ID:'fixture-id',ALIYUN_RAM_ACCESS_KEY_SECRET:'fixture-secret'};
+  expect(()=>loadConfig('api-server',values)).toThrow('INVALID_CONFIG:STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT');
+  expect(loadConfig('api-server',{...values,STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT:'https://oss-cn-beijing.aliyuncs.com'}).storageAliyunOss)
+   .toMatchObject({endpoint:values.STORAGE_ALIYUN_OSS_ENDPOINT,publicEndpoint:'https://oss-cn-beijing.aliyuncs.com'});
+  expect(()=>loadConfig('api-server',{...values,STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT:values.STORAGE_ALIYUN_OSS_ENDPOINT}))
+   .toThrow('INVALID_CONFIG:STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT');
+ });
  it.each(['ALIYUN_RAM_ACCESS_KEY_ID','ALIYUN_RAM_ACCESS_KEY_SECRET'])('requires %s for OSS without falling back to retired aliases',key=>{
   for(const role of ['api-server','worker'] as const)expect(()=>loadConfig(role,{...env,STORAGE_DRIVER:'aliyun-oss',
    STORAGE_ALIYUN_OSS_ENDPOINT:'https://oss-cn-beijing.aliyuncs.com',STORAGE_ALIYUN_OSS_BUCKET:'test-bucket',

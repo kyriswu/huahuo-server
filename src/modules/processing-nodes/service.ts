@@ -111,11 +111,12 @@ export class ProcessingNodes {
    }catch{/* Preserve the durable assignment on ambiguous coordination/storage failure. */}
   }
  }
- async acknowledgeSettled(input:ParserRequest){
-  const row=(await this.pool.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',[input.requestId])).rows[0];if(row?.settled)return;
-  const runtime=await this.runtime(await this.assigned(input.requestId),input.readiness!=='instance');
+ async acknowledgeSettled(input:ParserRequest,db:Pick<pg.PoolClient,'query'>=this.pool){
+  const row=(await db.query('SELECT settled,snapshot FROM processing_node_assignments WHERE request_id=$1',[input.requestId])).rows[0];if(row?.settled)return;
+  if(!row)throw new DomainError(409,'PROCESSING_ASSIGNMENT_MISSING');
+  const runtime=await this.runtime(row.snapshot as ProcessingNode,input.readiness!=='instance');
   try{await runtime.machine.acknowledgeSettled(input);}catch(error){if(!['DOCUMENT_PARSER_LEASE_LOST','DOCUMENT_PARSER_NOT_UNCERTAIN'].includes((error as {code:string}).code))throw error;}
-  await this.settle(input.requestId);
+  await db.query('UPDATE processing_node_assignments SET settled=true,settled_at=coalesce(settled_at,now()) WHERE request_id=$1',[input.requestId]);
  }
  async startMonitors(onError:(error:unknown)=>void=()=>undefined){
   if(!this.config.processingNodes.cloudControlEnabled)return;

@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { Type } from '@sinclair/typebox';
-export function requestTrace(headers: Record<string, unknown>) {
-  const candidate = headers['x-trace-id'] ?? headers['x-request-id'];
-  return typeof candidate === 'string' && /^[A-Za-z0-9._:-]{6,96}$/.test(candidate) ? candidate : randomUUID();
+import {validTraceId} from '../lib/trace.js';
+export function requestTrace(headers: Record<string, unknown>,url?:string) {
+  // Xberg cannot set callback headers; the opaque callback URL carries the same ID.
+  if(url?.startsWith('/api/v1/document-parser/callbacks/')){
+    const trace=new URL(url,'http://internal').searchParams.get('traceId');
+    if(validTraceId(trace))return trace;
+  }
+  const candidate = headers['x-trace-id'];
+  return validTraceId(candidate) ? candidate : randomUUID();
 }
 export const success = <T>(data: T, traceId: string) => ({ success: true as const, data, traceId });
 export const failure = (code: string, message: string, traceId: string, retryable = false) => ({

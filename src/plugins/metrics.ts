@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config/config.js';
 
 const methods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']);
-const taskKinds = new Set(['demo.digest', 'maintenance.check', 'storage.inspect', 'storage.delete', 'storage.expire', 'asset.tag-extract',
+const taskKinds = new Set(['demo.digest', 'maintenance.check', 'storage.delete', 'asset.tag-extract',
   'kb.note-index', 'kb.note-cleanup', 'rag.document-ingest', 'rag.toc-refresh', 'rag.document-cleanup',
   'text.ingest', 'processing.node-start']);
 const excluded = new Set(['/metrics', '/health/live', '/health/ready']);
@@ -17,6 +17,7 @@ export class ApplicationMetrics implements TaskMetrics {
   private readonly requests: Counter<'method' | 'route' | 'status'>;
   private readonly duration: Histogram<'method' | 'route'>;
   private readonly tasks: Counter<'kind' | 'result'>;
+  private readonly recoveryFailures: Counter;
   constructor(config: Pick<AppConfig, 'appEnv' | 'role' | 'metrics'>) {
     this.registry.setDefaultLabels({ env: config.appEnv === 'production' ? 'prod' : config.appEnv, service: config.metrics.service, role: config.role });
     this.requests = new Counter({ name: 'http_requests_total', help: 'Completed HTTP responses by final status.',
@@ -26,6 +27,8 @@ export class ApplicationMetrics implements TaskMetrics {
     this.tasks = new Counter({ name: 'task_processing_attempts_total',
       help: 'Committed task processing attempt results; deferred and unknown external outcomes excluded.',
       labelNames: ['kind', 'result'], registers: [this.registry] });
+    this.recoveryFailures = new Counter({ name: 'task_recovery_failures_total',
+      help: 'Task recovery invariant failures; the affected task remains unchanged for investigation.', registers: [this.registry] });
     new Gauge({ name: 'application_info', help: 'Running application role and environment.', registers: [this.registry] }).set(1);
   }
   recordHttp(method: string, route: string, status: number, seconds: number) {
@@ -36,6 +39,7 @@ export class ApplicationMetrics implements TaskMetrics {
   recordTaskAttempt(kind: string, result: TaskResult) {
     this.tasks.inc({ kind: taskKinds.has(kind) ? kind : 'other', result });
   }
+  recordTaskRecoveryFailures(count: number) { this.recoveryFailures.inc(count); }
 }
 
 declare module 'fastify' { interface FastifyInstance { metrics: ApplicationMetrics; } }

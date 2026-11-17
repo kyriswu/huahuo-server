@@ -1,32 +1,32 @@
 import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
+import {resolveTraceId} from '../../lib/trace.js';
 import { canonical } from '../../lib/crypto.js';
 import { assertScope, transaction, type Scope, DomainError } from '../identity/store.js';
-import { enqueueIntent, event } from '../tasks/model.js';
+import { enqueueIntent, event, newTaskMaxAttempts } from '../tasks/model.js';
 import type { AppConfig } from '../../config/config.js';
 import { sha256 } from './chunkers.js';
 import type { RagMode, RagStage } from './types.js';
 import { fileProcessingSnapshot, type FileProcessingSnapshot } from './processing-profile.js';
-import { isMarkdownSource } from '../ingestion/document-parser.js';
 import { requireTocSection, sectionResult } from '../ingestion/sections.js';
 import type { TocStatus } from '../../lib/document-processing/types.js';
 import type { StoragePort } from '../storage/port.js';
 import { publicToc, readCanonicalSection, type CanonicalTocItem } from './canonical-toc.js';
 import {validUuid} from '../../integrations/document-extraction.js';
-import {createGunzip} from 'node:zlib';
 import {attachResource} from '../storage/references.js';
+import type { ResourceClaims } from '../storage/resource-claims.js';
 import {TaskService} from '../tasks/service.js';
 import type {TaskRow} from '../tasks/model.js';
 
 import { DocumentPreparationError, validateSourceUri } from './document-preparation.js';
 
 export interface CreateRagInput { ossUrl:string; fileName:string; mimeType:string; idempotencyKey?:string; sourceResourceId?:string;parseRunId?:string; }
-export interface RagVersionRow { id:string; user_id:string; workspace_id:string; idempotency_key:string; source_url:string; source_file_name:string; source_mime_type:string; source_size:string|null; source_sha256:string|null; source_object_key:string|null; mode:RagMode; document_key:string; source_type:string;    active:boolean;  canonical_content_uri:string|null; enriched_canonical_markdown_uri?:string|null; raw_markdown_uri:string|null; asset_manifest_uri:string|null; parser_provider:string|null; parser_version:string|null; parser_config_hash:string|null;  status:RagStage; current_stage:RagStage; failed_stage:string|null; error_code:string|null; error_message:string|null; retryable:boolean; attempt_count:number; last_attempt_at:Date|string|null; parser_metadata?:unknown; parse_artifact_uri:string|null;       content_hash:string|null; task_id:string|null; created_at:Date|string; updated_at:Date|string; task_state?:string|null; processing_snapshot?:unknown; processing_info?:{ignoredHeadingRanges?:Array<{sourceStart:number;sourceEnd:number}>}; toc_status:TocStatus; toc:CanonicalTocItem[]|null; toc_error:string|null; deleted_at?:Date|string|null; }
+export interface RagVersionRow { id:string; user_id:string; workspace_id:string; idempotency_key:string; source_url:string; source_file_name:string; source_mime_type:string; source_size:string|null; source_sha256:string|null; source_object_key:string|null; mode:RagMode; document_key:string; source_type:string;    active:boolean;  canonical_content_uri:string|null; raw_markdown_uri:string|null; asset_manifest_uri:string|null; parser_provider:string|null; parser_version:string|null; parser_config_hash:string|null;  status:RagStage; current_stage:RagStage; failed_stage:string|null; error_code:string|null; error_message:string|null; retryable:boolean; attempt_count:number; last_attempt_at:Date|string|null; parser_metadata?:unknown; parse_artifact_uri:string|null;       content_hash:string|null; task_id:string|null; created_at:Date|string; updated_at:Date|string; task_state?:string|null; processing_snapshot?:unknown; toc_status:TocStatus; toc:CanonicalTocItem[]|null; toc_error:string|null; deleted_at:Date|string|null; cleanup_status:string; }
 const hostAllowed=(url:string,hosts:string[],production:boolean)=>{
   try { return validateSourceUri(url,{appEnv:production?'production':'development',rag:{sourceAllowedHosts:hosts}}).toString(); }
   catch(error){if(error instanceof DocumentPreparationError)throw new DomainError(400,error.code);throw error;}
 };
-function modeFor(fileName: string, mimeType: string,structuredEnabled=false): RagMode {
+function modeFor(fileName: string, mimeType: string): RagMode {
   const mime = mimeType.split(';', 1)[0]!.toLowerCase();
   const ext = fileName.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? '';
   const textMimes = new Set(['text/plain', 'text/markdown', 'text/x-markdown', 'text/csv']);
@@ -35,14 +35,28 @@ function modeFor(fileName: string, mimeType: string,structuredEnabled=false): Ra
   const binaryExts = new Set(['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx']);
   if ((textMimes.has(mime) && binaryExts.has(ext)) || (textExts.has(ext) && binaryMimes.has(mime))) throw new DomainError(400, 'RAG_FILE_TYPE_MISMATCH');
   if (binaryMimes.has(mime) || binaryExts.has(ext)) {
-    if(!structuredEnabled)throw new DomainError(400, 'RAG_FILE_TYPE_UNSUPPORTED');
     return 'structured_document';
   }
   if (textMimes.has(mime) || textExts.has(ext)) return 'plain_text';
   throw new DomainError(400, 'RAG_FILE_TYPE_UNSUPPORTED');
 }
+function assertResourceUrl(value:string,objectKey:string,objectVersion:string|null,driver:string,bucket:string,config:AppConfig){
+  const oss=config.storageAliyunOss;
+  if(config.storageDriver!=='aliyun-oss'||!oss||driver!=='aliyun-oss'||bucket!==oss.bucket)throw new DomainError(409,'RAG_SOURCE_STORAGE_MISMATCH');
+  const url=new URL(value);
+  const endpointMatches=[oss.endpoint,oss.publicEndpoint].some(value=>{
+    if(!value)return false;
+    const endpoint=new URL(value),hostname=endpoint.hostname.startsWith(oss.bucket+'.')?endpoint.hostname:`${oss.bucket}.${endpoint.hostname}`;
+    return url.protocol===endpoint.protocol&&url.hostname===hostname&&url.port===endpoint.port;
+  });
+  const prefix=oss.keyPrefix?.replace(/\/+$/,'');
+  const versions=url.searchParams.getAll('versionId'),expectedVersion=objectVersion?.startsWith('oss-version:')?objectVersion.slice('oss-version:'.length):null;
+  const versionMatches=expectedVersion!==null?expectedVersion.length>0&&versions.length===1&&versions[0]===expectedVersion:versions.length===0;
+  let path:string;try{path=decodeURIComponent(url.pathname);}catch{throw new DomainError(400,'RAG_SOURCE_RESOURCE_MISMATCH');}
+  if(!endpointMatches||path!==`/${prefix?prefix+'/':''}${objectKey}`||url.searchParams.has('x-oss-process')||!versionMatches)throw new DomainError(400,'RAG_SOURCE_RESOURCE_MISMATCH');
+}
 export class RagIngestionRepository {
-  constructor(readonly pool:pg.Pool,readonly appConfig:AppConfig){}
+  constructor(readonly pool:pg.Pool,readonly appConfig:AppConfig,private readonly resourceClaims?:ResourceClaims){}
   get appEnv(){return this.appConfig.appEnv;}
   get milvusCollection(){return this.appConfig.kb.documentCollection;}
   get config(){return this.appConfig.rag;}
@@ -51,25 +65,28 @@ export class RagIngestionRepository {
     if(!this.config.enabled)throw new DomainError(503,'RAG_INGESTION_DISABLED');
     const normalized={ossUrl:hostAllowed(input.ossUrl,this.config.sourceAllowedHosts,this.appEnv==='production'),fileName:input.fileName.trim(),mimeType:input.mimeType.split(';',1)[0]!.trim().toLowerCase()};
     if(!normalized.fileName||normalized.fileName.length>255||/[\0\\/]/.test(normalized.fileName))throw new DomainError(400,'RAG_FILE_NAME_INVALID');
-    const mode = modeFor(normalized.fileName, normalized.mimeType,this.appConfig.processingNodes.enabled);
+    if(!this.appConfig.processingNodes.enabled)throw new DomainError(503,'DOCUMENT_PARSER_NOT_CONFIGURED');
+    const mode = modeFor(normalized.fileName, normalized.mimeType);
     if((input.sourceResourceId!==undefined&&!validUuid(input.sourceResourceId))||(input.parseRunId!==undefined&&!validUuid(input.parseRunId)))throw new DomainError(400,'DOCUMENT_EXTRACTION_CONTEXT_INVALID');
-    const format = mode==='structured_document'||isMarkdownSource(normalized) ? 'markdown' : 'text';
+    const format = 'markdown';
     const chunkConfigHash = sha256(canonical({
       format, rules: 'paragraph-2000-zero-overlap',
     }));
     const idem = input.idempotencyKey?.trim() || sha256(canonical({ ...normalized, chunkConfigHash, target: this.milvusCollection,
-      ...(mode==='structured_document'?{sourceResourceId:input.sourceResourceId??null,parseRunId:input.parseRunId??null}:{}), }));
+      sourceResourceId:input.sourceResourceId??null,parseRunId:input.parseRunId??null, }));
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idem)) throw new DomainError(400, 'IDEMPOTENCY_KEY_INVALID');
 
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
       const workspace = (await tx.query<{ id: string }>("SELECT id FROM workspaces WHERE user_id=$1 AND is_default AND state='ready'", [scope.userId])).rows[0];
       if (!workspace) throw new DomainError(409, 'WORKSPACE_NOT_READY');
-      let sourceResource:{object_key:string;sha256:string;size_bytes:string;mime_type:string}|undefined;
-      if(mode==='structured_document'&&input.sourceResourceId){
-        sourceResource=(await tx.query<{object_key:string;sha256:string;size_bytes:string;mime_type:string}>("SELECT object_key,sha256,size_bytes,mime_type FROM resources WHERE resource_id=$1 AND user_id=$2 AND workspace_id=$3 AND status='ready' FOR UPDATE",[input.sourceResourceId,scope.userId,workspace.id])).rows[0];
+      let sourceResource:{object_key:string;object_version:string|null;sha256:string|null;size_bytes:string;mime_type:string;storage_driver:string;storage_bucket:string}|undefined;
+      if(input.sourceResourceId){
+        await this.resourceClaims?.ensure(tx,scope,workspace.id,[input.sourceResourceId]);
+        sourceResource=(await tx.query<NonNullable<typeof sourceResource>>("SELECT object_key,object_version,sha256,size_bytes,mime_type,storage_driver,storage_bucket FROM resources WHERE resource_id=$1 AND user_id=$2 AND workspace_id=$3 AND status='ready' FOR UPDATE",[input.sourceResourceId,scope.userId,workspace.id])).rows[0];
         if(!sourceResource)throw new DomainError(404,'RESOURCE_NOT_FOUND');
         if(sourceResource.mime_type!==normalized.mimeType)throw new DomainError(400,'RAG_FILE_TYPE_MISMATCH');
+        assertResourceUrl(normalized.ossUrl,sourceResource.object_key,sourceResource.object_version,sourceResource.storage_driver,sourceResource.storage_bucket,this.appConfig);
         if(input.parseRunId){
           await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['document.parse:'+scope.userId+':'+input.sourceResourceId+':'+input.parseRunId]);
           const same=(await tx.query<RagVersionRow>(`SELECT * FROM rag_ingestion_versions WHERE user_id=$1 AND workspace_id=$2
@@ -89,9 +106,9 @@ export class RagIngestionRepository {
         return { jobId: existing.task_id!, documentVersionId: existing.id, status: existing.status, reused: true };
       }
       const versionId = randomUUID(), taskId = randomUUID(), inputId = randomUUID();
-      const snapshot = fileProcessingSnapshot(this.appConfig, format,mode==='structured_document'?{
+      const snapshot = fileProcessingSnapshot(this.appConfig, format,{
         sourceResourceId:input.sourceResourceId??versionId,parseRunId:input.parseRunId??randomUUID(),
-      }:undefined);
+      });
       await tx.query(`INSERT INTO rag_ingestion_versions
         (id,user_id,workspace_id,idempotency_key,source_url,source_file_name,source_mime_type,mode,status,current_stage,document_key,source_type,processing_snapshot,task_id)
         VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,'RECEIVED','RECEIVED',$1::text,'file',$9::jsonb,$10)`,
@@ -99,7 +116,7 @@ export class RagIngestionRepository {
       if(sourceResource)await tx.query('UPDATE rag_ingestion_versions SET source_object_key=$2,source_sha256=$3,source_size=$4 WHERE id=$1',[versionId,sourceResource.object_key,sourceResource.sha256,sourceResource.size_bytes]);
       if(sourceResource)await attachResource(tx,scope.userId,input.sourceResourceId!,'document-source',versionId,workspace.id);
       await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)', [inputId, scope.userId, workspace.id, JSON.stringify({ versionId })]);
-      await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,max_attempts) VALUES($1,$2,$3,'rag.document-ingest','content',$4,'queued',3)", [taskId, scope.userId, workspace.id, inputId]);
+      await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,$3,'rag.document-ingest','content',$4,'queued',$5,$6)", [taskId, scope.userId, workspace.id, inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
       await enqueueIntent(tx, taskId);
       await event(tx, taskId);
       return { jobId: taskId, documentVersionId: versionId, status: 'RECEIVED', reused: false };
@@ -119,23 +136,32 @@ export class RagIngestionRepository {
   async detail(scope: Scope, jobId: string) {
     return this.dto(await this.versionForJob(scope, jobId));
   }
-  async extraction(scope:Scope,jobId:string,storage:Pick<StoragePort,'read'>){
+  async extraction(scope:Scope,jobId:string,storage:Pick<StoragePort,'signUrl'>){
     const row=await this.versionForJob(scope,jobId);
     if(row.deleted_at)throw new DomainError(404,'RAG_INGESTION_NOT_FOUND');
     if(!row.parse_artifact_uri)throw new DomainError(409,'DOCUMENT_EXTRACTION_NOT_READY');
-    return (await storage.read(row.parse_artifact_uri)).pipe(createGunzip());
+    const parser=(row.processing_snapshot as FileProcessingSnapshot|null)?.parser;
+    const prefix=parser?`extractions/${parser.sourceResourceId}/${parser.parseRunId}/`:undefined;
+    if(this.appConfig.storageDriver!=='aliyun-oss'||!this.appConfig.storageAliyunOss||!storage.signUrl||!prefix
+      ||!row.parse_artifact_uri.startsWith(prefix)||!/^[a-f\d]{64}\.json\.gz$/u.test(row.parse_artifact_uri.slice(prefix.length)))throw new DomainError(503,'DOCUMENT_EXTRACTION_STORAGE_UNAVAILABLE');
+    const mimeType='application/json',contentEncoding='gzip' as const,expiresSeconds=900;
+    return {url:await storage.signUrl(row.parse_artifact_uri,expiresSeconds,{contentType:mimeType,contentEncoding}),
+      expiresAt:new Date(Date.now()+expiresSeconds*1000).toISOString(),mimeType,contentEncoding};
   }
-  async asset(scope:Scope,jobId:string,resourceId:string,storage:Pick<StoragePort,'read'>){
+  async asset(scope:Scope,jobId:string,resourceId:string,storage:Pick<StoragePort,'signUrl'>){
     const version=await this.versionForJob(scope,jobId);
     if(version.deleted_at)throw new DomainError(404,'RAG_INGESTION_NOT_FOUND');
     const row=(await this.pool.query('SELECT * FROM rag_document_assets WHERE id=$1 AND version_id=$2 AND upload_status=$3',[resourceId,version.id,'ready'])).rows[0];
     if(!row)throw new DomainError(404,'RESOURCE_NOT_FOUND');
     const config=this.appConfig.storageAliyunOss,receipt=row.metadata;
-    if(this.appConfig.storageDriver!=='aliyun-oss'||!config||receipt?.bucket!==config.bucket)throw new DomainError(503,'DOCUMENT_ASSET_STORAGE_UNAVAILABLE');
+    if(this.appConfig.storageDriver!=='aliyun-oss'||!config||!storage.signUrl||receipt?.bucket!==config.bucket)throw new DomainError(503,'DOCUMENT_ASSET_STORAGE_UNAVAILABLE');
     const prefix=config.keyPrefix?.replace(/\/+$/,'');
     if(prefix&&!String(row.object_key).startsWith(prefix+'/'))throw new DomainError(503,'DOCUMENT_ASSET_STORAGE_UNAVAILABLE');
     const key=prefix?String(row.object_key).slice(prefix.length+1):String(row.object_key);
-    return {stream:await storage.read(key),mimeType:String(row.mime_type),sizeBytes:Number(row.byte_size)};
+    if(!/^[a-z\d][a-z\d._/-]{0,1023}$/iu.test(key)||key.includes('..')||key.includes('//'))throw new DomainError(503,'DOCUMENT_ASSET_STORAGE_UNAVAILABLE');
+    const mimeType=String(row.mime_type),expiresSeconds=900;
+    return {url:await storage.signUrl(key,expiresSeconds,{contentType:mimeType}),
+      expiresAt:new Date(Date.now()+expiresSeconds*1000).toISOString(),mimeType,sizeBytes:Number(row.byte_size)};
   }
   async section(scope: Scope, jobId: string, sectionId: string, storage: Pick<StoragePort, 'read'>) {
     const row = await this.versionForJob(scope, jobId);
@@ -163,10 +189,10 @@ export class RagIngestionRepository {
       else await tx.query("UPDATE rag_ingestion_versions SET toc_status='pending',toc_error=NULL WHERE id=$1",[version.id]);
       const taskId=randomUUID(),inputId=randomUUID();
       await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,scope.userId,version.workspace_id,JSON.stringify({versionId:version.id})]);
-      await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state) VALUES($1,$2,$3,$4,'content',$5,'queued')",[taskId,scope.userId,version.workspace_id,action==='delete'?'rag.document-cleanup':'rag.toc-refresh',inputId]);
+      await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,$3,$4,'content',$5,'queued',$6,$7)",[taskId,scope.userId,version.workspace_id,action==='delete'?'rag.document-cleanup':'rag.toc-refresh',inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
       await enqueueIntent(tx,taskId);await event(tx,taskId);return {jobId:taskId,documentVersionId:version.id,status:'RECEIVED'};
     });
   }
   async byId(pool:pg.Pool,id:string){return (await pool.query<RagVersionRow>('SELECT * FROM rag_ingestion_versions WHERE id=$1 FOR UPDATE',[id])).rows[0];}
-  dto(row:RagVersionRow){return {jobId:row.task_id,documentVersionId:row.id,status:row.status,currentStage:row.current_stage,taskState:row.task_state??null,mode:row.mode,fileName:row.source_file_name,mimeType:row.source_mime_type,sourceSha256:row.source_sha256,sourceSizeBytes:row.source_size?Number(row.source_size):null,parserProvider:row.parser_provider,parserVersion:row.parser_version,canonicalMarkdownUri:row.enriched_canonical_markdown_uri??row.canonical_content_uri,rawMarkdownUri:row.raw_markdown_uri,parentId:row.id,sourceType:row.source_type,toc:row.deleted_at||!row.toc?null:publicToc(row.toc),tocStatus:row.toc_status,tocError:row.toc_error,offsetUnit:'utf16' as const,deletedAt:row.deleted_at?new Date(row.deleted_at).toISOString():null,cleanupStatus:(row as RagVersionRow & {cleanup_status?:string}).cleanup_status??'pending',processingComplete:!row.deleted_at&&row.status==='SUCCEEDED'&&row.toc_status==='ready',error:row.error_code?{code:row.error_code,message:row.error_message,retryable:row.retryable}:null,createdAt:new Date(row.created_at).toISOString(),updatedAt:new Date(row.updated_at).toISOString()};}
+  dto(row:RagVersionRow){return {jobId:row.task_id,documentVersionId:row.id,status:row.status,currentStage:row.current_stage,taskState:row.task_state??null,mode:row.mode,fileName:row.source_file_name,mimeType:row.source_mime_type,sourceSha256:row.source_sha256,sourceSizeBytes:row.source_size?Number(row.source_size):null,parserProvider:row.parser_provider,parserVersion:row.parser_version,canonicalMarkdownUri:row.canonical_content_uri,rawMarkdownUri:row.raw_markdown_uri,parentId:row.id,sourceType:row.source_type,toc:row.deleted_at||!row.toc?null:publicToc(row.toc),tocStatus:row.toc_status,tocError:row.toc_error,offsetUnit:'utf16' as const,deletedAt:row.deleted_at?new Date(row.deleted_at).toISOString():null,cleanupStatus:row.cleanup_status,processingComplete:!row.deleted_at&&row.status==='SUCCEEDED'&&row.toc_status==='ready',error:row.error_code?{code:row.error_code,message:row.error_message,retryable:row.retryable}:null,createdAt:new Date(row.created_at).toISOString(),updatedAt:new Date(row.updated_at).toISOString()};}
 }

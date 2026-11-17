@@ -12,6 +12,7 @@ export class ParserMachineIdleMonitor {
   private idleTimer?: NodeJS.Timeout;
   private fallbackTimer?: NodeJS.Timeout;
   private idleActivity?: number;
+  private startTask?: Promise<void>;
   private refreshTask?: Promise<void>;
   private checkTask?: Promise<void>;
   private resubscribeTask?: Promise<void>;
@@ -35,13 +36,21 @@ export class ParserMachineIdleMonitor {
     })().catch(error => { if (!this.stopped) this.events.onError?.(error); });
   };
   private readonly disconnected = () => { this.connected = false; this.clearTimers(); };
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.stopped) return Promise.reject(new Error('DOCUMENT_PARSER_MONITOR_CLOSED'));
+    return this.startTask ??= this.initialize();
+  }
+  private async initialize(): Promise<void> {
     this.subscriber.on('message', this.changed);
     this.subscriber.on('ready', this.ready);
     this.subscriber.on('close', this.disconnected);
     this.subscriber.on('error', this.disconnected);
-    try { await this.subscriber.connect(); await this.subscriber.subscribe(this.channel); }
-    catch { this.disconnected(); throw new Error('DOCUMENT_PARSER_SUBSCRIPTION_FAILED'); }
+    try {
+      await this.subscriber.connect();
+      if (this.stopped) return;
+      await this.subscriber.subscribe(this.channel);
+      if (this.stopped) return;
+    } catch { this.stop(); throw new Error('DOCUMENT_PARSER_SUBSCRIPTION_FAILED'); }
     this.subscriptionInstalled = true; this.connected = true; await this.refresh();
   }
   private clearIdle() { if (this.idleTimer) clearTimeout(this.idleTimer); this.idleTimer = undefined; this.idleActivity = undefined; }
@@ -82,6 +91,7 @@ export class ParserMachineIdleMonitor {
     this.checking = true; this.clearTimers();
     this.checkTask = (async () => {
       const state = await this.machine.state.status();
+      if (this.stopped || !this.connected) return;
       if (!state || state.phase === 'blocked' || state.uncertain > 0 || (state.economicallyStopped && !state.active && !state.queued)) return;
       // Busy work only needs Redis lease reconciliation; no cloud status poll is necessary.
       if (state.phase === 'ready' && (state.active > 0 || state.queued > 0 || state.redisTimeMs - state.lastActivityMs < this.idleMs)) return;
@@ -91,10 +101,15 @@ export class ParserMachineIdleMonitor {
       this.checking = false; await this.refresh();
     });
   }
-  async close(): Promise<void> {
-    this.stopped = true; this.clearTimers();
+  private stop(): void {
+    if (this.stopped) return;
+    this.stopped = true; this.connected = false; this.subscriptionInstalled = false; this.dirty = false; this.clearTimers();
     this.subscriber.off('message', this.changed); this.subscriber.off('ready', this.ready);
     this.subscriber.off('close', this.disconnected); this.subscriber.off('error', this.disconnected);
-    this.subscriber.disconnect(); await Promise.all([this.checkTask, this.refreshTask, this.resubscribeTask]);
+    this.subscriber.disconnect();
+  }
+  async close(): Promise<void> {
+    this.stop();
+    await Promise.all([this.startTask?.catch(() => undefined), this.checkTask, this.refreshTask, this.resubscribeTask]);
   }
 }

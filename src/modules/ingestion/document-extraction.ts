@@ -1,3 +1,4 @@
+import {DOCUMENT_CANONICAL_MAX_BYTES} from '../../config/document-extraction.js';
 import type pg from 'pg';
 import { Readable } from 'node:stream';
 import {createHash} from 'node:crypto';
@@ -10,14 +11,15 @@ import {ProcessingNodes} from '../processing-nodes/service.js';
 import {nodeDocumentConfig} from '../processing-nodes/model.js';
 import { DocumentExtractionClient, DocumentExtractionError, type ExtractionResponse,type ExtractionDocument } from '../../integrations/document-extraction.js';
 import { transaction,DomainError } from '../identity/store.js';
-import {event} from '../tasks/model.js';
+import type {TaskRow} from '../tasks/model.js';
+import {finalizeUnsuccessfulTaskTx} from '../tasks/reservations.js';
 import type { Attempt } from '../tasks/engine.js';
 import type { StoragePort } from '../storage/port.js';
-import type { DownloadedSource } from '../rag/document-preparation.js';
-import { verifyStructuredSource } from '../rag/document-preparation.js';
+import {DocumentPreparationError,validateSourceUri, type DocumentSource} from '../rag/document-preparation.js';
 import type { DocumentParserSnapshot } from '../rag/processing-profile.js';
 import {DocumentCallbacks} from './document-callbacks.js';
 import {decodeDocumentReference,encodeDocumentReference,type DocumentParseState as ParseState} from './document-reference.js';
+import {ownedObjectKey} from '../storage/object-locator.js';
 export interface SavedExtraction {
   response:ExtractionResponse; content:string; contentHash:string; artifactUri:string; canonicalUri:string; manifestUri:string;
   requestId:string; fingerprint:string;
@@ -78,9 +80,10 @@ export class ManagedDocumentExtractor {
       const row=(await tx.query('SELECT id,external_reference FROM tasks WHERE id=$1 AND user_id=$2 AND workspace_id=$3 AND cancel_requested_at IS NOT NULL FOR UPDATE',[a.task.id,a.task.user_id,a.task.workspace_id])).rows[0];
       if(!row||decode(row.external_reference)?.requestId!==state.requestId)throw new ManagedExtractionError('DOCUMENT_EXTRACTION_STALE_ATTEMPT');
       await this.saveState(tx,a,{...state,phase:'cancelled',...{remoteState}});
-      await tx.query("UPDATE tasks SET state='cancelled',version=version+1,lease_owner=NULL,lease_until=NULL,error_code=$2,retryable=false WHERE id=$1",[a.task.id,state.timedOut?'DOCUMENT_EXTRACTION_TIMEOUT':'TASK_CANCELLED']);
+      const current=(await tx.query<TaskRow>('SELECT * FROM tasks WHERE id=$1',[a.task.id])).rows[0]!;
       await this.callbacks.consume(tx,state.requestId);
-      await tx.query("UPDATE task_attempts SET state='abandoned',finished_at=now() WHERE task_id=$1 AND state='running'",[a.task.id]);await event(tx,a.task.id);
+      await tx.query("UPDATE task_attempts SET state='abandoned',finished_at=now() WHERE task_id=$1 AND state='running'",[a.task.id]);
+      await finalizeUnsuccessfulTaskTx(tx,current,{state:'cancelled',errorCode:state.timedOut?'DOCUMENT_EXTRACTION_TIMEOUT':'TASK_CANCELLED'});
     });
   }
   private async put(key:string,text:string|Uint8Array,mime:string){
@@ -95,20 +98,54 @@ export class ManagedDocumentExtractor {
     try{await this.nodes.acknowledgeSettled({requestId:state.requestId,fingerprint:state.fingerprint});}
     catch(error){if(!(error instanceof ParserMachineError&&['DOCUMENT_PARSER_LEASE_LOST','DOCUMENT_PARSER_NOT_UNCERTAIN'].includes(error.code)))throw error;}
   }
-  async parse(a:Attempt,source:DownloadedSource&{cachedObjectKey?:string},snapshot:DocumentParserSnapshot,
+  private async rejectBoundSource(a:Attempt,state:ParseState,error:DocumentPreparationError):Promise<never>{
+    const cancelled=await transaction(this.pool,async tx=>{
+      await this.fence(tx,a);
+      const current=decode((await tx.query('SELECT external_reference FROM tasks WHERE id=$1',[a.task.id])).rows[0]?.external_reference);
+      if(current?.phase!=='bound'||current.requestId!==state.requestId||current.fingerprint!==state.fingerprint)
+        throw new ManagedExtractionError('DOCUMENT_EXTRACTION_STALE_ATTEMPT');
+      // Keep the task locked through settlement: no other attempt may advance this
+      // known-unsubmitted receipt to intent while its admission is being released.
+      try{await this.nodes.acknowledgeSettled({requestId:state.requestId,fingerprint:state.fingerprint},tx);}
+      catch(cause){if(!(cause instanceof DomainError&&cause.code==='PROCESSING_ASSIGNMENT_MISSING'))throw cause;}
+      await this.saveState(tx,a,{...state,phase:'failed'});
+      await this.callbacks.consume(tx,state.requestId);
+      return this.cancellationRequested(tx,a);
+    });
+    if(cancelled){await this.settleCancellation(a,state);throw new ManagedExtractionError('DOCUMENT_EXTRACTION_CANCELLED');}
+    throw new ManagedExtractionError(error.code,error.retryable);
+  }
+  /** Persistent resource identity owns the source; a stored signed URL is only its locator. */
+  private async submissionSource(a:Attempt,source:DocumentSource,snapshot:DocumentParserSnapshot):Promise<DocumentSource>{
+    const key=ownedObjectKey(source.url,this.config);
+    if(key===undefined)return source;
+    if(key!==snapshot.sourceResourceId)throw new ManagedExtractionError('DOCUMENT_SOURCE_RESOURCE_MISMATCH');
+    const row=(await this.pool.query<{file_name:string;mime_type:string;object_key:string;object_version:string;storage_driver:string;storage_bucket:string}>(`SELECT r.file_name,r.mime_type,r.object_key,r.object_version,r.storage_driver,r.storage_bucket
+      FROM resources r JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready'
+      WHERE r.resource_id=$1 AND r.user_id=$2 AND r.workspace_id=$3 AND r.status='ready'`,[snapshot.sourceResourceId,a.task.user_id,a.task.workspace_id])).rows[0];
+    if(!row||row.object_key!==key||row.storage_driver!=='aliyun-oss'||row.storage_bucket!==this.config.storageAliyunOss?.bucket||!this.storage.signUrl)
+      throw new ManagedExtractionError('DOCUMENT_SOURCE_RESOURCE_UNAVAILABLE');
+    const version=row.object_version.startsWith('oss-version:')?row.object_version.slice('oss-version:'.length):null;
+    const versions=new URL(source.url).searchParams.getAll('versionId');
+    if(version?versions.length!==1||versions[0]!==version:versions.length!==0)throw new ManagedExtractionError('DOCUMENT_SOURCE_RESOURCE_MISMATCH');
+    const url=await this.storage.signUrl(row.object_key,3600,{contentType:row.mime_type,version:row.object_version});
+    return {url,fileName:row.file_name,mimeType:row.mime_type};
+  }
+  async parse(a:Attempt,source:DocumentSource,snapshot:DocumentParserSnapshot,
     commit:(tx:pg.PoolClient,saved:SavedExtraction)=>Promise<void>):Promise<SavedExtraction>{
     const previous=await this.state(a),resume=previous?.phase==='job'||previous?.phase==='cancelling';
-    if(!resume&&previous?.phase!=='bound')await verifyStructuredSource(source);
     if(previous?.phase==='intent')throw new ManagedExtractionError('DOCUMENT_EXTRACTION_SUBMISSION_UNKNOWN');
-    const fingerprint=previous&&source.bytes.length===0?previous.fingerprint:digest(canonical({sourceHash:createHash('sha256').update(source.bytes).digest('hex'),fileName:source.fileName,
-      mime:source.contentType,sourceResourceId:snapshot.sourceResourceId,parseRunId:snapshot.parseRunId}));
+    const fingerprint=digest(canonical({sourceUrl:source.url,fileName:source.fileName,
+      mime:source.mimeType,sourceResourceId:snapshot.sourceResourceId,parseRunId:snapshot.parseRunId}));
     if((resume||previous?.phase==='bound')&&previous!.fingerprint!==fingerprint)throw new ManagedExtractionError('DOCUMENT_EXTRACTION_SOURCE_CHANGED');
-    const state:ParseState=resume||previous?.phase==='bound'?previous!:{phase:'bound',requestId:`${a.task.id}:parse:${a.attempt}`,fingerprint,fileName:source.fileName,mimeType:source.contentType??'application/octet-stream',startedAt:Date.now(),...(previous?.phase==='failed'?{retryFrom:previous.requestId}:{})};
-    // Persist admission identity before assignment/startup so redelivery cannot select a second machine.
-    if(!resume&&previous?.phase!=='bound'){
-      state.sourceUri=source.cachedObjectKey??`extractions/${snapshot.sourceResourceId}/${snapshot.parseRunId}/source-${createHash('sha256').update(source.bytes).digest('hex')}`;
-      if(!source.cachedObjectKey)await this.put(state.sourceUri,source.bytes,state.mimeType!);await this.setState(a,state);
+    if(!resume)try{validateSourceUri((await this.submissionSource(a,source,snapshot)).url,this.config);}
+    catch(error){
+      if(previous?.phase==='bound'&&error instanceof DocumentPreparationError)return this.rejectBoundSource(a,previous,error);
+      throw error;
     }
+    const state:ParseState=resume||previous?.phase==='bound'?previous!:{phase:'bound',requestId:`${a.task.id}:parse:${a.attempt}`,fingerprint,startedAt:Date.now(),...(previous?.phase==='failed'?{retryFrom:previous.requestId}:{})};
+    // Persist admission identity before assignment/startup so redelivery cannot select a second machine.
+    if(!resume&&previous?.phase!=='bound')await this.setState(a,state);
     let providerFailure:DocumentExtractionError|undefined;
     try{
       if(!resume&&state.startedAt&&Date.now()-state.startedAt>3600000){await this.nodes.acknowledgeSettled({requestId:state.requestId,fingerprint});throw new ManagedExtractionError('DOCUMENT_PARSER_STARTUP_TIMEOUT');}
@@ -129,10 +166,9 @@ export class ManagedDocumentExtractor {
           if(inbox&&inbox.deadline_at.getTime()<Date.now()){
             state.timedOut=true;await transaction(this.pool,async tx=>{await this.fence(tx,a);await tx.query('UPDATE tasks SET cancel_requested_at=coalesce(cancel_requested_at,now()) WHERE id=$1',[a.task.id]);await this.saveState(tx,a,state);});
           }
-          let bytes=source.bytes;
-          if(!resume&&!bytes.length&&state.sourceUri){const parts:Buffer[]=[];for await(const part of await this.storage.read(state.sourceUri))parts.push(Buffer.from(part));bytes=Buffer.concat(parts);}
-          response=await new DocumentExtractionClient(extraction,this.fetchImpl,this.config.rag.maxSourceBytes).extract([{
-            bytes,fileName:state.fileName??source.fileName,mimeType:state.mimeType??source.contentType??'application/octet-stream',
+          const requestSource=resume?source:await this.submissionSource(a,source,snapshot);
+          response=await new DocumentExtractionClient(extraction,this.fetchImpl).extract([{
+            ...requestSource,
             source_resource_id:snapshot.sourceResourceId,parse_run_id:snapshot.parseRunId,
           }],context,{
             beforeSubmit:async()=>{await transaction(this.pool,async tx=>{
@@ -142,6 +178,10 @@ export class ManagedDocumentExtractor {
               if(current?.phase!=='bound'||current.requestId!==state.requestId||current.fingerprint!==state.fingerprint)
                 throw new DocumentExtractionError('DOCUMENT_EXTRACTION_SUBMISSION_UNKNOWN','unknown');
               if(await this.cancellationRequested(tx,a))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CANCELLED','settled');
+              // Startup/queueing can outlast a signed URL. Recheck before recording
+              // intent so an expired source never becomes an ambiguous submission.
+              try{validateSourceUri(requestSource.url,this.config);}
+              catch(error){if(error instanceof DocumentPreparationError)throw new DocumentExtractionError(error.code,'settled',error.retryable);throw error;}
               state.phase='intent';await this.saveState(tx,a,state);
             });},
             submitted:async jobId=>{state.phase='job';state.jobId=jobId;await this.recordJob(a,state);},
@@ -152,7 +192,7 @@ export class ManagedDocumentExtractor {
           }
           if(await this.cancellation(a,state))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CANCELLED','settled',false,undefined,'completed');
           if(response.summary.errors||response.results.length!==1)throw new DocumentExtractionError('DOCUMENT_EXTRACTION_FAILED','settled',true);
-          if(Buffer.byteLength(response.results[0]!.content)>16*1024*1024)throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CONTENT_TOO_LARGE','settled');
+          if(Buffer.byteLength(response.results[0]!.content)>DOCUMENT_CANONICAL_MAX_BYTES)throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CONTENT_TOO_LARGE','settled');
         }catch(error){if(error instanceof DocumentExtractionError)providerFailure=error;throw error;}
         const content=response.results[0]!.content,contentHash=digest(content),raw=JSON.stringify(response),rawHash=digest(raw);
         const prefix=`extractions/${snapshot.sourceResourceId}/${snapshot.parseRunId}`;

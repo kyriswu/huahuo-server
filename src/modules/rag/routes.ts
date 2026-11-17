@@ -11,15 +11,16 @@ import type { RagQueryService } from './query-service.js';
 import type { StoragePort } from '../storage/port.js';
 import { NoteQueryTiming } from './query-timing.js';
 const errors={400:ErrorSchema,401:ErrorSchema,404:ErrorSchema,409:ErrorSchema,413:ErrorSchema,429:ErrorSchema,503:ErrorSchema};
-const body=Type.Object({ossUrl:Type.String({maxLength:4096}),fileName:Text(255),mimeType:Type.String({minLength:1,maxLength:128,description:'UTF-8 text, or PDF/Office when document extraction is enabled.'}),idempotencyKey:Type.Optional(Text(128)),sourceResourceId:Type.Optional(Id),parseRunId:Type.Optional(Id)},Strict);
+const body=Type.Object({ossUrl:Type.String({maxLength:4096}),fileName:Text(255),mimeType:Type.String({minLength:1,maxLength:128,description:'TXT, Markdown, CSV, PDF or Office. All files require external document extraction.'}),idempotencyKey:Type.Optional(Text(128)),sourceResourceId:Type.Optional(Id),parseRunId:Type.Optional(Id)},Strict);
 const result=Type.Object({jobId:Id,documentVersionId:Id,status:Type.String(),reused:Type.Boolean()},Strict);
 const queryBody=Type.Object({query:Text(2000),sourceType:Type.Optional(Type.Union([Type.Literal('file'),Type.Literal('note'),Type.Literal('text')])),assetMode:Type.Optional(Type.Union([Type.Literal('ids'),Type.Literal('links')])),mode:Type.Optional(Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')])),topK:Type.Optional(Type.Integer({minimum:1,maximum:50})),documentKey:Type.Optional(Text(128)),},Strict);
 const queryResult=Type.Object({mode:Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')]),query:Type.String(),results:Type.Array(Type.Any())},Strict);
+const objectLink=Type.Object({url:Type.String(),expiresAt:Type.String(),mimeType:Type.String(),sizeBytes:Type.Optional(Type.Integer({minimum:0})),contentEncoding:Type.Optional(Type.Literal('gzip'))},Strict);
 const detail=Type.Object({jobId:Id,documentVersionId:Id,status:Type.String(),currentStage:Type.String(),taskState:Type.Union([Type.String(),Type.Null()]),mode:Type.Union([Type.Literal('structured_document'),Type.Literal('plain_text')]),fileName:Type.String(),mimeType:Type.String(),sourceSha256:Type.Union([Type.String(),Type.Null()]),sourceSizeBytes:Type.Union([Type.Integer(),Type.Null()]),parserProvider:Type.Union([Type.String(),Type.Null()]),parserVersion:Type.Union([Type.String(),Type.Null()]),canonicalMarkdownUri:Type.Union([Type.String(),Type.Null()]),rawMarkdownUri:Type.Union([Type.String(),Type.Null()]),parentId:Type.Optional(Type.String()),sourceType:Type.Optional(Type.String()),...TocFields,tocError:Type.Optional(Type.Union([Type.String(),Type.Null()])),deletedAt:Type.Optional(Type.Union([Type.String(),Type.Null()])),cleanupStatus:Type.Optional(Type.String()),processingComplete:Type.Optional(Type.Boolean()),error:Type.Union([Type.Object({code:Type.String(),message:Type.Union([Type.String(),Type.Null()]),retryable:Type.Boolean()}),Type.Null()]),createdAt:Type.String(),updatedAt:Type.String()},Strict);
 const scope=(req:FastifyRequest)=>{if(!req.authScope)throw new DomainError(401,'UNAUTHORIZED');return req.authScope;};
 export function registerRagRoutes(
   app: FastifyInstance, repository: RagIngestionRepository,
-  storage: Pick<StoragePort, 'read'>, queryService?: RagQueryService,
+  storage: Pick<StoragePort, 'read'|'signUrl'>, queryService?: RagQueryService,
 ) {
   const guard = async (req: FastifyRequest) => {
     req.authScope = readTrustedScope(req.headers, req.id);
@@ -37,11 +38,11 @@ export function registerRagRoutes(
     }, async req => success(await repository.action(scope(req), req.params.jobId, action), req.id));
   }
   app.get<{Params:{jobId:string}}>(`${ingestionPath}/:jobId/extraction`,{
-    preHandler:readGuard,schema:{params:Type.Object({jobId:Id},Strict),querystring:emptyQuery},
-  },async(req,reply)=>{const result=await repository.extraction(scope(req),req.params.jobId,storage);return reply.type('application/json').send(result);});
+    preHandler:readGuard,schema:{params:Type.Object({jobId:Id},Strict),querystring:emptyQuery,response:{200:Envelope(objectLink),...errors}},
+  },async(req,reply)=>{reply.header('Cache-Control','no-store');return success(await repository.extraction(scope(req),req.params.jobId,storage),req.id);});
   app.get<{Params:{jobId:string;resourceId:string}}>(`${ingestionPath}/:jobId/assets/:resourceId`,{
-    preHandler:readGuard,schema:{params:Type.Object({jobId:Id,resourceId:Id},Strict),querystring:emptyQuery},
-  },async(req,reply)=>{const asset=await repository.asset(scope(req),req.params.jobId,req.params.resourceId,storage);return reply.type(asset.mimeType).header('Content-Length',asset.sizeBytes).header('X-Content-Type-Options','nosniff').header('Content-Security-Policy',"default-src 'none'; sandbox").send(asset.stream);});
+    preHandler:readGuard,schema:{params:Type.Object({jobId:Id,resourceId:Id},Strict),querystring:emptyQuery,response:{200:Envelope(objectLink),...errors}},
+  },async(req,reply)=>{reply.header('Cache-Control','no-store');return success(await repository.asset(scope(req),req.params.jobId,req.params.resourceId,storage),req.id);});
   app.post<{ Body: import('./repository.js').CreateRagInput }>(ingestionPath, {
     preHandler: guard,
     schema: { body, querystring: emptyQuery, response: { 200: Envelope(result), ...errors } },

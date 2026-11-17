@@ -1,5 +1,6 @@
 import {beforeAll,afterAll,describe,it,expect,vi} from 'vitest';
-import {randomUUID} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
+import {Readable} from 'node:stream';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -12,6 +13,7 @@ import {NoteIndexJobs} from '../../src/modules/ingestion/jobs.js';
 import {KnowledgeIndexJobs} from '../../src/modules/kb/jobs.js';
 import {kbSnapshot,kbEmbedding} from '../../src/modules/kb/profile.js';
 import {mockKnowledgeIndex} from '../support/kb-index.js';
+import {mockOssUploadConfig} from '../support/oss-upload.js';
 import type {KbBuild,KbSnapshot} from '../../src/modules/kb/types.js';
 import {RagQueryService,ragImageKey,type RagImageRequest} from '../../src/modules/rag/query-service.js';
 import {RagIngestionRepository} from '../../src/modules/rag/repository.js';
@@ -30,6 +32,7 @@ import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {RuntimeSettings} from '../../src/modules/runtime-settings/service.js';
 import {configureTestMilvus} from '../support/milvus.js';
 import {DataType} from '@zilliz/milvus2-sdk-node';
+import * as markdownInput from '../../src/lib/markdown-images.js';
 const url=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!url||!/^huahuo_test_/.test(new URL(url).pathname.slice(1)))throw new Error('ISOLATED_TEST_DB_REQUIRED');
 const temp=await mkdtemp(join(tmpdir(),'kb-integration-'));
@@ -49,9 +52,10 @@ const embeddings=vi.fn(async(s:KbSnapshot)=>kbEmbedding(config,s));
 const deps={index:factory,embedding:(s:KbSnapshot)=>{const e=kbEmbedding(config,s);return {...e,model:s.embedding!.model,dimensions:1024,embed:vi.fn(async(texts:string[])=>{await embeddings(s);return e.embed(texts);})};}};
 const queries=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'note-hybrid','markdown')).embed(texts)}});
 const assets=new AssetService(pool,config.appTokenSecret!,config,queries);
+const imageConfig=mockOssUploadConfig(config),imageAssets=new AssetService(pool,imageConfig.appTokenSecret!,imageConfig,queries);
 const notes=new NoteIndexService(pool,config),jobs=new NoteIndexJobs(wp,workerConfig,deps),engine=new TaskEngine(wp,120000);
 async function fixture(){const userId=await insertFixtureUser(root),sessionId=randomUUID(),workspaceId=randomUUID();const bearer=await insertFixtureSession(root,userId,sessionId);await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'KB',true,$3)",[workspaceId,userId,randomUUID()]);return {bearer,workspaceId,scope:{userId,sessionId,traceId:randomUUID()}};}
-async function latest(id:string){return (await root.query<KbBuild>(`SELECT * FROM kb_note_hybrid_builds WHERE source_id=$1 AND source_revision=(SELECT part_revision_id::text FROM note_part_revisions WHERE note_id=$1 AND part='raw' ORDER BY revision DESC LIMIT 1) ORDER BY created_at DESC LIMIT 1`,[id])).rows[0]!;}
+async function latest(id:string){return (await root.query<KbBuild>(`SELECT * FROM kb_note_hybrid_builds WHERE source_id=$1 AND source_revision=(SELECT part_revision_id::text FROM note_parts WHERE note_id=$1 AND part='raw' ORDER BY revision DESC LIMIT 1) ORDER BY created_at DESC LIMIT 1`,[id])).rows[0]!;}
 async function runNote(id:string,indexer=jobs){const b=await latest(id);const a=await vi.waitFor(async()=>{const claim=await engine.claim(b.task_id,randomUUID());expect(claim).toBeTruthy();return claim!;},{interval:20,timeout:3000});const r=await indexer.execute(a);expect(await engine.finish(a,r.digest,r.bytes)).toBe(true);return b;}
 async function create(body='PostgreSQL 数据库支持 MVCC 和 B-tree 索引。'){const f=await fixture();const note=await assets.createNote(f.scope,f.workspaceId,{title:'KB fixture',parts:{raw:body}},randomUUID());return {...f,note};}
 beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:url}));await root.query(`UPDATE runtime_configuration SET "values"="values"||'{"features.noteIndexing":true,"rag.embeddingBatchSize":2,"rag.embeddingMaxRetries":0}'::jsonb,revision=revision+1`);});
@@ -80,11 +84,13 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('keeps canonical rerank evidence and hydrates only deduplicated images of final topK on explicit request',async()=>{
   const f=await fixture(),a=randomUUID(),b=randomUUID();
-  for(const id of [a,b])await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,source_scene,file_name,mime_type,size_bytes,duration_seconds,sha256,object_key,object_version,storage_driver,status)
-   VALUES($1,$2,$3,$4,'note_image','fixture.png','image/png',1,0,$5,$1,'fixture','local','ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64)]);
-  const first=await assets.createNote(f.scope,f.workspaceId,{title:'A',parts:{raw:`imageselect ![A](asset://${a})`}},randomUUID());
-  const body=`imageselect ![B](asset://${b}) ![repeat](asset://${b})`;
-  const second=await assets.createNote(f.scope,f.workspaceId,{title:'B',parts:{raw:body}},randomUUID());
+  for(const id of [a,b])await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
+   VALUES($1,$2,$3,$4,'fixture.png','image/png',1,$5,$1,'fixture','aliyun-oss',$6,'ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
+  const first=await imageAssets.createNote(f.scope,f.workspaceId,{title:'A',parts:{raw:`imageselect ![A](asset://${a})`}},randomUUID());
+  const inputBody=`imageselect ![B](asset://${b}) ![repeat](asset://${b})`;
+  const second=await imageAssets.createNote(f.scope,f.workspaceId,{title:'B',parts:{raw:inputBody}},randomUUID());
+  const body=second.parts.raw!.contentMarkdown;
+  expect(body).toContain('<KBIMAGE');expect(body).not.toContain('![');
   await runNote(first.noteId);await runNote(second.noteId);
   const resolveImages=vi.fn(async(_scope:unknown,images:RagImageRequest[])=>new Map(images.map(image=>[ragImageKey(image),{url:`https://preview.test/${image.resourceId}`,expiresAt:'2099-01-01T00:00:00.000Z'}])));
   const rerank=vi.fn(async(_query:string,candidates:import('../../src/modules/rag/search.js').RagSearchCandidate[])=>{
@@ -101,17 +107,45 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(resolveImages.mock.calls[0]![1]).toHaveLength(1);
    expect(links.results[0]).toMatchObject({content:body,evidence:{child:body},sourceStart:0,sourceEnd:body.length});
    expect(links.results[0]!.displayMarkdown).toContain(`https://preview.test/${b}`);
+   const imageSpans=links.results[0]!.images as Array<{sourceStart:number;sourceEnd:number}>;
+   expect(imageSpans).toHaveLength(2);for(const span of imageSpans)expect(body.slice(span.sourceStart,span.sourceEnd)).toContain(`<KBIMAGE uuid="${b}"`);
   }finally{await q.close();}
  });
  it('never requests previews for a candidate deleted during reranking',async()=>{
   const f=await fixture(),id=randomUUID();
-  await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,source_scene,file_name,mime_type,size_bytes,duration_seconds,sha256,object_key,object_version,storage_driver,status)
-   VALUES($1,$2,$3,$4,'note_image','fixture.png','image/png',1,0,$5,$1,'fixture','local','ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64)]);
-  const note=await assets.createNote(f.scope,f.workspaceId,{title:'删除竞态',parts:{raw:`imagedelete ![图](asset://${id})`}},randomUUID());await runNote(note.noteId);
+  await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
+   VALUES($1,$2,$3,$4,'fixture.png','image/png',1,$5,$1,'fixture','aliyun-oss',$6,'ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
+  const note=await imageAssets.createNote(f.scope,f.workspaceId,{title:'删除竞态',parts:{raw:`imagedelete ![图](asset://${id})`}},randomUUID());await runNote(note.noteId);
   const resolveImages=vi.fn(async()=>new Map());
   const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'note-hybrid','markdown')).embed(texts)},resolveImages,
-   rerank:{rerank:async(_query,candidates)=>{await assets.deleteNote(f.scope,f.workspaceId,note.noteId,note.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
+   rerank:{rerank:async(_query,candidates)=>{await imageAssets.deleteNote(f.scope,f.workspaceId,note.noteId,note.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
   try{expect((await q.query(f.scope,{query:'imagedelete',mode:'hybrid',assetMode:'links',documentKey:note.noteId})).results).toEqual([]);expect(resolveImages).not.toHaveBeenCalled();}finally{await q.close();}
+ });
+ it('associates OCR-only chunks with their whole KBIMAGE without parsing input Markdown at query time',async()=>{
+  const f=await fixture(),id=randomUUID();
+  await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
+   VALUES($1,$2,$3,$4,'fixture.png','image/png',1,$5,$1,'fixture','aliyun-oss',$6,'ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
+  const tag=`<KBIMAGE uuid="${id}" page="1"><![CDATA[${'crossimage '.repeat(150)}]]></KBIMAGE>`;
+  const body=`正文\n\n${tag}\n\n尾部`,start=body.indexOf('<KBIMAGE'),end=start+tag.length;
+  const note=await imageAssets.createNote(f.scope,f.workspaceId,{title:'OCR范围',parts:{raw:body}},randomUUID());await runNote(note.noteId);
+  const resolveImages=vi.fn(async(_scope:unknown,images:RagImageRequest[])=>new Map(images.map(image=>[ragImageKey(image),{url:`https://preview.test/${image.resourceId}`,expiresAt:'2099-01-01T00:00:00.000Z'}])));
+  const q=new RagQueryService(pool,config,{index:factory,resolveImages});
+  const parseInput=vi.spyOn(markdownInput,'inputImages').mockImplementation(()=>{throw new Error('QUERY_MUST_NOT_PARSE_INPUT_MARKDOWN');});
+  try{
+   const result=await q.query(f.scope,{query:'crossimage',mode:'keyword',topK:10,documentKey:note.noteId,assetMode:'links'});
+   expect(result.results.length).toBeGreaterThan(1);
+   expect(result.results.some(hit=>Number(hit.sourceStart)>start&&!String(hit.content).includes('<KBIMAGE'))).toBe(true);
+   for(const hit of result.results){
+    expect(hit.content).toBe(body.slice(Number(hit.sourceStart),Number(hit.sourceEnd)));
+    expect(hit.evidence).toEqual({child:hit.content});
+    expect(hit.images).toEqual([{resourceId:id,alt:'',sourceStart:start,sourceEnd:end,url:`https://preview.test/${id}`,expiresAt:'2099-01-01T00:00:00.000Z'}]);
+    // A partial tag remains evidence; its image is exposed separately, never
+    // repaired with invented markup or an offset into the signed view.
+    expect(hit.displayMarkdown).toBe(hit.content);
+   }
+   expect(resolveImages).toHaveBeenCalledTimes(1);expect(resolveImages.mock.calls[0]![1]).toHaveLength(1);
+   expect(parseInput).not.toHaveBeenCalled();
+  }finally{parseInput.mockRestore();await q.close();}
  });
  it('initializes exactly four metadata tables with indexed associations and no physical FKs',async()=>{
   const cols=await root.query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name LIKE 'kb_%'");
@@ -147,7 +181,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(r.statusCode,r.body).toBe(200);expect(r.json().data.results.some((r:{documentKey:string})=>r.documentKey===f.note.noteId)).toBe(true);
    const detail=await api.inject({method:'GET',url:`/api/v1/workspaces/${f.workspaceId}/notes/${f.note.noteId}?revisionId=${f.note.noteRevisionId}`,headers:{...fixtureScopeHeaders(f.bearer)}});
    expect(detail.statusCode,detail.body).toBe(200);expect(detail.json().data.noteRevisionId).toBe(f.note.noteRevisionId);
-   const part=await api.inject({method:'GET',url:`/api/v1/workspaces/${f.workspaceId}/notes/${f.note.noteId}/parts/raw?partRevisionId=${f.note.parts.raw!.partRevisionId}`,headers:{...fixtureScopeHeaders(f.bearer)}});
+   const part=await api.inject({method:'GET',url:`/api/v1/workspaces/${f.workspaceId}/notes/${f.note.noteId}/parts/raw`,headers:{...fixtureScopeHeaders(f.bearer)}});
    expect(part.statusCode,part.body).toBe(200);expect(part.json().data.partRevisionId).toBe(f.note.parts.raw!.partRevisionId);
    const wrong=await api.inject({method:'GET',url:`/api/v1/workspaces/${f.workspaceId}/notes/${f.note.noteId}?revisionId=${randomUUID()}`,headers:{...fixtureScopeHeaders(f.bearer)}});expect(wrong.statusCode).toBe(409);
 
@@ -218,27 +252,41 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(select).toHaveBeenCalled();expect(backend).not.toHaveProperty('hybridSearch');
   }finally{await q.close();}
  });
- it('rejects binary file parsing through authenticated HTTP without creating a task',async()=>{
-  const f=await fixture();const api=await buildApiServer({config});
+ it('requires the external parser for every file input while manual text remains available',async()=>{
+  const f=await fixture();const api=await buildApiServer({config:{...config,processingNodes:{...config.processingNodes,enabled:false}}});
   try{
-   for(const[fileName,mimeType]of [['document.pdf','application/pdf'],['document.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document']]){
-    const result=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers:{...fixtureScopeHeaders(f.bearer)},payload:{ossUrl:'https://fixture.test/'+fileName,fileName,mimeType}});
-    expect(result.statusCode,result.body).toBe(400);expect(result.json().error.code).toBe('RAG_FILE_TYPE_UNSUPPORTED');
+   for(const[fileName,mimeType]of [['document.txt','text/plain'],['document.md','text/markdown'],['document.csv','text/csv'],['document.pdf','application/pdf'],['document.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document']]){
+    const headers={...fixtureScopeHeaders(f.bearer),'x-idempotency-key':randomUUID()};
+    const result=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers,payload:{ossUrl:'https://fixture.test/'+fileName,fileName,mimeType}});
+    expect(result.statusCode,result.body).toBe(503);expect(result.json().error.code).toBe('DOCUMENT_PARSER_NOT_CONFIGURED');
+    const text=await api.inject({method:'POST',url:'/api/v1/text-ingestions',headers,payload:{source_type:'FILE_UPLOAD',origin_resource_uri:'https://fixture.test/'+fileName}});
+    expect(text.statusCode,text.body).toBe(503);expect(text.json().error.code).toBe('DOCUMENT_PARSER_NOT_CONFIGURED');
    }
    expect(Number((await root.query('SELECT count(*) FROM rag_ingestion_versions WHERE user_id=$1',[f.scope.userId])).rows[0].count)).toBe(0);
-   expect(Number((await root.query("SELECT count(*) FROM tasks WHERE user_id=$1 AND kind='rag.document-ingest'",[f.scope.userId])).rows[0].count)).toBe(0);
+   expect(Number((await root.query('SELECT count(*) FROM text_ingestion_jobs WHERE created_by=$1',[f.scope.userId])).rows[0].count)).toBe(0);
+   expect(Number((await root.query("SELECT count(*) FROM tasks WHERE user_id=$1 AND kind IN ('rag.document-ingest','text.ingest')",[f.scope.userId])).rows[0].count)).toBe(0);
+   const manual=await api.inject({method:'POST',url:'/api/v1/text-ingestions',headers:{...fixtureScopeHeaders(f.bearer),'x-idempotency-key':randomUUID()},payload:{source_type:'MANUAL_INPUT',raw_content:'手动正文保持可用'}});
+   expect(manual.statusCode,manual.body).toBe(200);expect(manual.json().data.raw_content).toBe('手动正文保持可用');
   }finally{await api.close();}
  });
- it('uses the native Markdown file entry and saves the original body before keyword indexing',async()=>{
-  const f=await fixture();const repo=new RagIngestionRepository(pool,config);
+ it('resumes keyword indexing and TOC from persisted external canonical Markdown',async()=>{
+  const f=await fixture();const settings={...config,processingNodes:{...config.processingNodes,enabled:true}};
+  const repo=new RagIngestionRepository(pool,settings);
   const created=await repo.create(f.scope,{ossUrl:'https://fixture.test/document.md',fileName:'document.md',mimeType:'text/markdown'});
-  const source=storageFor(config);const data=Buffer.from('# Document\n\nPostgreSQL MVCC 资料关键词。\n');await source.put('fixture-source.md',await import('node:stream').then(m=>m.Readable.from([data])),'text/markdown',1000);
-  const sha=await import('node:crypto').then(m=>m.createHash('sha256').update(data).digest('hex'));
-  await root.query('UPDATE rag_ingestion_versions SET source_object_key=$2,source_sha256=$3 WHERE id=$1',[created.documentVersionId,'fixture-source.md',sha]);
-  const a=await engine.claim(created.jobId,randomUUID());const pipeline=new RagIngestionJobs(wp,workerConfig,source,{kb:{index:factory,embedding:()=>{throw new Error('MODEL_CALLED');}}});
-  await pipeline.execute(a!);
-  expect((await root.query('SELECT * FROM kb_document_keyword_builds WHERE source_id=$1',[created.documentVersionId])).rows[0]).toMatchObject({published:true,status:'ready'});
-  const saved=(await root.query('SELECT canonical_content_uri FROM rag_ingestion_versions WHERE id=$1',[created.documentVersionId])).rows[0];expect(saved.canonical_content_uri).toBeTruthy();
+  const source=storageFor(config),canonical='# Document\n\nPostgreSQL MVCC 资料关键词。\n',data=Buffer.from(canonical),canonicalUri='fixture-extracted.md';
+  await source.put(canonicalUri,Readable.from([data]),'text/markdown',1000);
+  const sha=createHash('sha256').update(data).digest('hex');
+  // The external parser already committed its output; this fixture covers indexing recovery only.
+  await root.query("UPDATE rag_ingestion_versions SET canonical_content_uri=$2,raw_markdown_uri=$2,content_hash=$3,parser_provider='xberg',status='PARSED',current_stage='PARSED' WHERE id=$1",[created.documentVersionId,canonicalUri,sha]);
+  const a=await engine.claim(created.jobId,randomUUID());expect(a).not.toBeNull();
+  const pipeline=new RagIngestionJobs(wp,{...workerConfig,processingNodes:{...workerConfig.processingNodes,enabled:true}},source,{kb:{index:factory,embedding:()=>{throw new Error('MODEL_CALLED');}}});
+  try{
+   await pipeline.execute(a!);
+   expect((await root.query('SELECT * FROM kb_document_keyword_builds WHERE source_id=$1',[created.documentVersionId])).rows[0]).toMatchObject({published:true,status:'ready'});
+   const saved=(await root.query('SELECT canonical_content_uri,content_hash,status,toc_status,toc FROM rag_ingestion_versions WHERE id=$1',[created.documentVersionId])).rows[0];
+   expect(saved).toMatchObject({canonical_content_uri:canonicalUri,content_hash:sha,status:'SUCCEEDED',toc_status:'ready'});
+   expect(saved.toc).toEqual(expect.arrayContaining([expect.objectContaining({title:'Document'})]));
+  }finally{await pipeline.close();}
  });
  it('restores a deleted Note by recreating missing points rather than trusting retired metadata',async()=>{
   const f=await create();await runNote(f.note.noteId);await assets.deleteNote(f.scope,f.workspaceId,f.note.noteId,f.note.etag,randomUUID());
@@ -272,7 +320,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('does not let an old task publish or overwrite a replacement build with the same body revision',async()=>{
   const f=await create();const b=await latest(f.note.noteId);const a=await engine.claim(b.task_id,randomUUID());const taskId=randomUUID(),inputId=randomUUID();let replaced=false;
-  const runner=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:snapshot=>{const real=requireIndexKind(factory(snapshot),'hybrid');return {kind:'hybrid',ensureReady:()=>real.ensureReady(),upsert:async rows=>{await real.upsert(rows);if(!replaced){replaced=true;await root.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,f.scope.userId,f.workspaceId,JSON.stringify({buildId:b.id})]);await root.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state) VALUES($1,$2,$3,'kb.note-index','content',$4,'queued')",[taskId,f.scope.userId,f.workspaceId,inputId]);await root.query('UPDATE kb_note_hybrid_builds SET task_id=$2 WHERE id=$1',[b.id,taskId]);}},search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:()=>real.close()};}});
+  const runner=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:snapshot=>{const real=requireIndexKind(factory(snapshot),'hybrid');return {kind:'hybrid',ensureReady:()=>real.ensureReady(),upsert:async rows=>{await real.upsert(rows);if(!replaced){replaced=true;await root.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,f.scope.userId,f.workspaceId,JSON.stringify({buildId:b.id})]);await root.query("INSERT INTO tasks(trace_id,id,user_id,workspace_id,kind,queue,input_id,state) VALUES(gen_random_uuid()::text,$1,$2,$3,'kb.note-index','content',$4,'queued')",[taskId,f.scope.userId,f.workspaceId,inputId]);await root.query('UPDATE kb_note_hybrid_builds SET task_id=$2 WHERE id=$1',[b.id,taskId]);}},search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:()=>real.close()};}});
   await expect(runner.executeBuild(b.id,a!,'note-hybrid')).rejects.toThrow('KB_SOURCE_SUPERSEDED');
   const current=(await root.query('SELECT task_id,status,published FROM kb_note_hybrid_builds WHERE id=$1',[b.id])).rows[0];expect(current).toEqual({task_id:taskId,status:'indexing',published:false});
   await runNote(f.note.noteId);expect((await queries.query(f.scope,{query:'MVCC',mode:'keyword',documentKey:f.note.noteId})).results.length).toBeGreaterThan(0);

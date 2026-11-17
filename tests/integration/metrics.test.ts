@@ -6,7 +6,8 @@ import { migrate } from '../../src/db/migrate.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { ApplicationMetrics, listenMetrics, closeMetrics } from '../../src/plugins/metrics.js';
 import { TaskEngine } from '../../src/modules/tasks/engine.js';
-import { QueuePublisher, TaskWorkers } from '../../src/modules/tasks/queue.js';
+import { QueuePublisher } from '../../src/modules/tasks/publisher.js';
+import { TaskWorkers } from '../../src/modules/tasks/queue.js';
 import { hash, queues, type QueueName } from '../../src/modules/tasks/model.js';
 import { insertFixtureUser } from './jwt-fixture.js';
 
@@ -22,7 +23,7 @@ const total = (body: string, kind: string, result: string) => body.split('\n')
   .reduce((sum, line) => sum + Number(line.split(' ').at(-1)), 0);
 async function queued(kind = 'maintenance.check', queue: QueueName = 'maintenance') {
   const id = randomUUID();
-  await root.query("INSERT INTO tasks(id,kind,queue,state,user_id,workspace_id) VALUES($1,$2,$3,'queued',$4,$5)", [id, kind, queue, userId, workspaceId]); return id;
+  await root.query("INSERT INTO tasks(trace_id,id,kind,queue,state,user_id,workspace_id) VALUES(gen_random_uuid()::text,$1,$2,$3,'queued',$4,$5)", [id, kind, queue, userId, workspaceId]); return id;
 }
 beforeAll(async () => {
   await migrate(migrator); await insertFixtureUser(root, userId);

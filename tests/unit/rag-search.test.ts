@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { dedupeByChunkKey, HttpRerankAdapter, MockRerankAdapter, rerankWithinBudget, type RagSearchCandidate, type RerankAdapter } from '../../src/modules/rag/search.js';
+import { HttpRerankAdapter, MockRerankAdapter, rerankWithinBudget, type RagSearchCandidate, type RerankAdapter } from '../../src/modules/rag/search.js';
 
 const row = (chunkKey: string, parentId = 'doc-1'): RagSearchCandidate => ({
   chunkKey,
@@ -14,18 +14,8 @@ const row = (chunkKey: string, parentId = 'doc-1'): RagSearchCandidate => ({
 });
 
 describe('RAG query ranking helpers', () => {
-  it('deduplicates logical chunk keys without treating equal text as the same chunk', () => {
-    const result = dedupeByChunkKey([row('c0'), { ...row('c0'), rrfScore: 0.05 }, { ...row('c1'), content: row('c0').content }]);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toMatchObject({ chunkKey: 'c0', rrfScore: 0.05 });
-  });
-
-  it('keeps the highest scored duplicate and supports the explicit Mock reranker', async () => {
+  it('supports the explicit Mock reranker', async () => {
     const merged = [row('c0'), row('c1'), row('c2')];
-    const duplicate = [...merged, { ...merged[0]!, rerankScore: 99 }];
-    const deduped = dedupeByChunkKey(duplicate);
-    expect(deduped.filter((item) => item.chunkKey === 'c0')).toHaveLength(1);
-    expect(deduped.find((item) => item.chunkKey === 'c0')?.rerankScore).toBe(99);
     const reranked = await new MockRerankAdapter().rerank('content c1', merged);
     expect(reranked[0]?.chunkKey).toBe('c1');
   });

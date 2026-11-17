@@ -7,6 +7,8 @@ const controlFiles = new Set([
   '.github/workflows/test-server-release.yml', '.github/workflows/main-release-readiness.yml',
   'scripts/release/release-events.mjs', 'scripts/release/test-release-source.mjs',
   'scripts/release/test-release-trigger.mjs', 'scripts/release/main-release-readiness.mjs',
+  'scripts/release/deployment-policy.py', 'tests/unit/deployment-policy.test.ts',
+  'src/release/plan.ts', 'tests/unit/release-plan.test.ts',
   'scripts/release/test-publish.mjs', 'tests/unit/test-publish.test.ts',
   'tests/unit/test-release-source.test.ts', 'tests/unit/release-events.test.ts',
   'tests/unit/test-release-trigger.test.ts', 'tests/unit/main-release-readiness.test.ts',

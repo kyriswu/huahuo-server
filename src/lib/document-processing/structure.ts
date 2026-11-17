@@ -15,11 +15,6 @@ export function sourceLineOffsets(content: string): number[] {
   return offsets;
 }
 
-export function sourceBoundary(content: string, index: number): boolean {
-  const code = content.charCodeAt(index);
-  return index >= 0 && index <= content.length && !(code >= 0xDC00 && code <= 0xDFFF);
-}
-
 function frontMatterEnd(content: string, offsets: number[]): number {
   const line = (index: number) => content.slice(offsets[index], offsets[index + 1] ?? content.length).trimEnd();
   if (line(0).replace(/^\uFEFF/u, '') !== '---') return 0;
@@ -38,8 +33,6 @@ function frontMatterEnd(content: string, offsets: number[]): number {
 export async function analyzeDocumentStructure(content: string, options: StructureOptions = {}): Promise<DocumentStructure> {
   const maxDepth = options.maxHeadingDepth ?? 6;
   if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 6) throw new DocumentProcessingError('STRUCTURE_OPTIONS_INVALID', 'Heading depth must be between 1 and 6');
-  const ignored = options.ignoreHeadingRanges ?? [];
-  if (!Array.isArray(ignored) || ignored.some(range => !range || !Number.isInteger(range.sourceStart) || !Number.isInteger(range.sourceEnd) || range.sourceStart < 0 || range.sourceEnd < range.sourceStart || range.sourceEnd > content.length || !sourceBoundary(content, range.sourceStart) || !sourceBoundary(content, range.sourceEnd))) throw new DocumentProcessingError('STRUCTURE_OPTIONS_INVALID', 'Ignored heading ranges must address this UTF-16 source');
   const offsets = sourceLineOffsets(content);
   const roots: SectionNode[] = [];
   const stack: SectionNode[] = [];
@@ -58,8 +51,7 @@ export async function analyzeDocumentStructure(content: string, options: Structu
     const inline = tokens[index + 1];
     const title = inline?.children?.map(child => child.type === 'image' ? child.content : child.type === 'text' || child.type === 'code_inline' ? child.content : child.type === 'softbreak' ? ' ' : '').join('').trim() || inline?.content.trim() || '';
     const start = offsets[token.map[0]] ?? content.length;
-    const headingEnd = offsets[token.map[1]] ?? content.length;
-    if (start < metadataEnd || ignored.some(range => range.sourceStart < headingEnd && range.sourceEnd > start)) continue;
+    if (start < metadataEnd) continue;
     while (stack.length && stack.at(-1)!.level >= level) stack.pop()!.sourceEnd = start;
     const parent = stack.at(-1);
     const slug = title.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').trim().replace(/\s+/gu, '-') || 'section';

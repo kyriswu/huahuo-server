@@ -11,7 +11,7 @@ import type {EmbeddingClient} from './adapters/embedding.js';
 import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,type RerankAdapter,type RagSearchCandidate} from './search.js';
 import {NoteQueryTiming} from './query-timing.js';
 import { NOTE_EMBEDDING_MODEL, NOTE_EMBEDDING_PROFILE } from './model-profile.js';
-import {imageResourceId,markdownImages,rewriteImageUrls,type MarkdownImage} from '../../lib/markdown-images.js';
+import {kbImages,renderKbImages,type KbImage} from '../../lib/kb-images.js';
 export type RagQueryMode='keyword'|'dense'|'hybrid';
 export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:KbSourceType;topK?:number;documentKey?:string;workspaceId?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
 export interface RagImageRequest{sourceType:KbSourceType;sourceId:string;workspaceId:string;sourceRevision:string;resourceId:string;}
@@ -48,7 +48,7 @@ export class RagQueryService {
   return transaction(this.pool,async tx=>{await assertScope(tx,scope);
    const values:unknown[]=[scope.userId,type,input.documentKey??null,input.workspaceId??null];
    let sourceJoin=type==='note'?`JOIN notes n ON n.note_id=b.source_id AND n.workspace_id=b.workspace_id AND n.state='active' AND n.processing_status='ready'
-     JOIN LATERAL(SELECT part_revision_id FROM note_part_revisions WHERE note_id=n.note_id AND part='raw' ORDER BY revision DESC LIMIT 1)p ON p.part_revision_id::text=b.source_revision`
+     JOIN note_parts p ON p.note_id=n.note_id AND p.part='raw' AND p.part_revision_id::text=b.source_revision`
     :type==='file'?`JOIN rag_ingestion_versions v ON v.id=b.source_id AND v.user_id=b.user_id AND v.workspace_id=b.workspace_id AND v.content_hash=b.source_revision AND v.active AND v.deleted_at IS NULL AND v.status='SUCCEEDED'`
     :`JOIN text_ingestion_jobs j ON j.id=b.source_id AND j.created_by=b.user_id AND j.workspace_id=b.workspace_id AND j.content_hash=b.source_revision AND j.ingest_status='success'`;
    if(type==='note'){
@@ -113,25 +113,25 @@ export class RagQueryService {
    const current=new Map((await timing.measure('pg_recheck',()=>this.eligible(scope,input,sourceType))).map(b=>[b.id,b]));
    // Only final, rechecked topK chunks can request images. UUIDs stay in the
    // evidence; expiring URLs are a separate view, never rerank input or offsets.
-   const parsed=new Map<string,MarkdownImage[]>(),requests=new Map<string,RagImageRequest>();
+   const parsed=new Map<string,KbImage[]>(),requests=new Map<string,RagImageRequest>();
    const selectedChunks=ranked.filter(c=>current.has(String(c.metadata!.buildId))).slice(0,topK).map(c=>{
     const build=current.get(String(c.metadata!.buildId))!;
     let all=parsed.get(build.id);
-    if(!all){try{all=markdownImages(loaded.get(build.id)!.content);}catch{all=[];}parsed.set(build.id,all);}
+    if(!all){all=kbImages(loaded.get(build.id)!.content);parsed.set(build.id,all);}
     const start=Number(c.metadata!.sourceStart),end=Number(c.metadata!.sourceEnd);
-    const images=all.filter(image=>image.nodeStart<end&&image.nodeEnd>start&&imageResourceId(image.url)).map(image=>{
-     const request={sourceType,sourceId:build.source_id,workspaceId:build.workspace_id,sourceRevision:build.source_revision,resourceId:imageResourceId(image.url)!};
+    const images=all.filter(image=>image.nodeStart<end&&image.nodeEnd>start).map(image=>{
+     const request={sourceType,sourceId:build.source_id,workspaceId:build.workspace_id,sourceRevision:build.source_revision,resourceId:image.resourceId};
      requests.set(ragImageKey(request),request);return {image,request};
     });
     return {c,build,start,end,images};
    });
    const links=input.assetMode==='links'&&requests.size&&this.dependencies.resolveImages?await this.dependencies.resolveImages(scope,[...requests.values()]):new Map<string,RagImageLink>();
    const results=selectedChunks.map(({c,build,start,end,images})=>{
-    const replacements=new Map(images.flatMap(({image,request})=>{const link=links.get(ragImageKey(request));return link?[[image.url,link.url] as const]:[];}));
-    const localImages=images.map(({image})=>image).filter(image=>image.start>=start&&image.end<=end).map(image=>({...image,start:image.start-start,end:image.end-start}));
+    const replacements=new Map(images.flatMap(({image,request})=>{const link=links.get(ragImageKey(request));return link?[[image.resourceId,link.url] as const]:[];}));
+    const localImages=images.map(({image})=>image).filter(image=>image.nodeStart>=start&&image.nodeEnd<=end).map(image=>({...image,nodeStart:image.nodeStart-start,nodeEnd:image.nodeEnd-start,contentStart:image.contentStart-start,contentEnd:image.contentEnd-start}));
     return {...c,chunkId:c.chunkKey,sourceType,sourceRevision:c.metadata!.sourceRevision,sourceStart:start,sourceEnd:end,part:note?'raw':null,revisionId:note?build.note_revision_id:c.metadata!.sourceRevision,...(note?{partRevisionId:c.metadata!.sourceRevision}:{}),
      images:images.map(({image,request})=>({resourceId:request.resourceId,alt:image.alt,sourceStart:image.nodeStart,sourceEnd:image.nodeEnd,...links.get(ragImageKey(request))})),
-     ...(input.assetMode==='links'?{displayMarkdown:rewriteImageUrls(c.content,localImages,replacements)}:{}),evidence:{child:c.content},context:null};
+     ...(input.assetMode==='links'?{displayMarkdown:renderKbImages(c.content,localImages,replacements)}:{}),evidence:{child:c.content},context:null};
    });
    return {mode,query,results};
   }catch(e){if(e instanceof DomainError)throw e;throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE',false,{cause:e});}

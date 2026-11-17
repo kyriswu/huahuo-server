@@ -9,7 +9,8 @@ describe('Embedding attempt observations', () => {
     const fetchImpl=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({output:{embeddings:[{text_index:1,embedding:[3,4]},{text_index:0,embedding:[1,2]}]}})));
     const client=new BailianEmbeddingClient({...options,fetchImpl});
     expect(await client.embed(['one','two'],{textType:'query'})).toEqual([[1,2],[3,4]]);
-    expect(fetchImpl).toHaveBeenCalledWith('https://embedding.test/v1/services/embeddings/text-embedding/text-embedding',expect.objectContaining({redirect:'error',headers:{'content-type':'application/json',authorization:'Bearer test-only-not-a-real-key'}}));
+    expect(fetchImpl).toHaveBeenCalledWith('https://embedding.test/v1/services/embeddings/text-embedding/text-embedding',expect.objectContaining({redirect:'error'}));
+    expect(Object.fromEntries(new Headers(fetchImpl.mock.calls[0]![1]?.headers))).toEqual({'content-type':'application/json',authorization:'Bearer test-only-not-a-real-key'});
     expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]!.body))).toEqual({model:'test',input:{texts:['one','two']},parameters:{text_type:'query'}});
   });
   it('splits oversized logical batches at the provider limit of 20 without losing order',async()=>{

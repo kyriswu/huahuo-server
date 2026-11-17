@@ -4,7 +4,6 @@ import {randomUUID} from 'node:crypto';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {Readable} from 'node:stream';
 import {Redis} from 'ioredis';
 import {loadTestConfig as loadConfig} from '../sms-fixture.js';
 import {extractionConfig} from '../support/extraction-config.js';
@@ -13,26 +12,32 @@ import {poolFor} from '../../src/plugins/dependencies.js';
 import {buildApiServer} from '../../src/apps/api-server.js';
 import {RagIngestionJobs} from '../../src/modules/rag/jobs.js';
 import {RagIngestionRepository} from '../../src/modules/rag/repository.js';
+import {ResourceClaims} from '../../src/modules/storage/resource-claims.js';
+import {RedisTemporaryUploads} from '../../src/modules/storage/temporary-uploads.js';
 import {TaskEngine} from '../../src/modules/tasks/engine.js';
 import {TaskService} from '../../src/modules/tasks/service.js';
 import {TaskScheduler} from '../../src/modules/tasks/scheduler.js';
+import {BillingService} from '../../src/modules/billing/service.js';
 import {TextIngestionService} from '../../src/modules/text-ingestion/service.js';
 import {TextIngestionJobs} from '../../src/modules/text-ingestion/jobs.js';
-import {storageFor} from '../../src/modules/storage/port.js';
+import {mockOssUploadConfig,MockOssStorageAdapter,testOssConfig} from '../support/oss-upload.js';
 import {StorageService} from '../../src/modules/storage/service.js';
 import {mockKnowledgeIndex} from '../support/kb-index.js';
 import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.js';
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {sampleExtraction} from '../support/document-extraction.js';
-import type {ExtractionResponse,FileContext} from '../../src/integrations/document-extraction.js';
+import {DocumentExtractionClient,type ExtractionResponse,type FileContext} from '../../src/integrations/document-extraction.js';
 import type {Attempt} from '../../src/modules/tasks/engine.js';
 import {RagQueryService} from '../../src/modules/rag/query-service.js';
 import {knowledgeIndex} from '../../src/modules/kb/profile.js';
 import {ProcessingNodes} from '../../src/modules/processing-nodes/service.js';
-import {ParserExecutionError} from '../../src/lib/document-parser-machine/index.js';
+import {ParserExecutionDeferred,ParserExecutionError} from '../../src/lib/document-parser-machine/index.js';
 import type {KbSnapshot} from '../../src/modules/kb/types.js';
 import {decodeDocumentReference,encodeDocumentReference} from '../../src/modules/ingestion/document-reference.js';
 import {configureTestMilvus} from '../support/milvus.js';
+import {withTraceId} from '../../src/lib/trace.js';
+import {AliyunOssStorageAdapter} from '../../src/integrations/object-storage/aliyun-oss.js';
+import OSS from 'ali-oss';
 
 const database=process.env.TEST_DATABASE_MIGRATION_URL,redisUrl=process.env.REDIS_QUEUE_URL;
 if(!database||!/^huahuo_test_/.test(new URL(database).pathname.slice(1))||!redisUrl||!['127.0.0.1','localhost'].includes(new URL(redisUrl).hostname)||Number(new URL(redisUrl).pathname.slice(1))<10)throw new Error('ISOLATED_REAL_DEPENDENCIES_REQUIRED');
@@ -46,12 +51,12 @@ let deliverCallback:((url:string,jobId:string,result:ExtractionResponse)=>Promis
 let onGet:(()=>Promise<void>)|undefined;
 let beforeAsyncReply:(()=>Promise<void>)|undefined;
 let replyJobId:string|undefined;
-const requests:Array<{contexts:Array<FileContext|null>;config:unknown}> = [];
+const requests:Array<{inputs:Array<{kind:string;uri:string;mime_type:string}>;contexts:Array<FileContext|null>;config:unknown;traceId?:string}> = [];
 const remoteJobs=new Map<string,{response:ExtractionResponse;cancelled:boolean;consumed?:boolean;callbackUrl:string}>();
 const errors:unknown[]=[];
 const server=createServer((req,res)=>{void(async()=>{
  req.url=req.url?.replace(/^\/node-[^/]+/,'');
- if(req.url==='/source.pdf'){sourceReads++;res.writeHead(200,{'content-type':'application/pdf'});res.end(pdf);return;}
+ if(req.url?.startsWith('/source.')){sourceReads++;res.writeHead(200,{'content-type':'application/pdf'});res.end(pdf);return;}
  const jobMatch=/^\/jobs\/([A-Za-z0-9_-]+)(?:\/(result|ack))?$/.exec(req.url??'');
  if(jobMatch){
   if(req.method==='GET')getCount++;
@@ -74,15 +79,19 @@ const server=createServer((req,res)=>{void(async()=>{
  }
  if(req.method==='POST'&&['/extract','/extract-async'].includes(req.url??'')){
   postCount++;const parts:Buffer[]=[];for await(const b of req)parts.push(Buffer.from(b));
-  const form=await new Request('http://local.test',{method:'POST',headers:{'content-type':req.headers['content-type']!},body:Buffer.concat(parts)}).formData();
-  const contexts=JSON.parse(form.get('file_contexts') as string) as FileContext[];
-  expect(form.getAll('files')).toHaveLength(contexts.length);expect(Buffer.from(await(form.get('files') as File).arrayBuffer())).toEqual(pdf);
-  const config=JSON.parse(form.get('config') as string);requests.push({contexts,config});
+  expect(req.headers['content-type']).toBe('application/json');
+  const payload=JSON.parse(Buffer.concat(parts).toString()) as {inputs:Array<{kind:string;uri:string;mime_type:string}>;file_contexts:FileContext[];config?:unknown;callback_url:string};
+  const contexts=payload.file_contexts;
+  expect(payload.inputs).toHaveLength(contexts.length);
+  expect(payload.inputs[0]).toMatchObject({kind:'uri',mime_type:expect.any(String)});
+  expect(new URL(payload.inputs[0]!.uri).protocol).toMatch(/^https?:$/);
+  expect(payload).not.toHaveProperty('files');
+  const config=payload.config??null;requests.push({inputs:payload.inputs,contexts,config,traceId:typeof req.headers['x-trace-id']==='string'?req.headers['x-trace-id']:undefined});
   let body=sampleExtraction(contexts[0]!);lastResponse=body;
   if(scenario==='unknown-post'){res.writeHead(503);res.end('{}');return;}
   if(scenario==='failed-file'){scenario='success';body={summary:{inputs:1,results:0,errors:1},results:[],errors:[{index:0,error:'temporary file failure'}]};}
   if(req.url==='/extract-async'){
-   const id=randomUUID(),callbackUrl=String(form.get('callback_url'));expect(new URL(callbackUrl).origin).toBe('http://api.internal.test');expect(new URL(callbackUrl).pathname).toMatch(/^\/api\/v1\/document-parser\/callbacks\//);remoteJobs.set(id,{response:body,cancelled:false,callbackUrl});
+   const id=randomUUID(),callbackUrl=payload.callback_url;expect(new URL(callbackUrl).origin).toBe('http://api.internal.test');expect(new URL(callbackUrl).pathname).toMatch(/^\/api\/v1\/document-parser\/callbacks\//);remoteJobs.set(id,{response:body,cancelled:false,callbackUrl});
    if(scenario==='accepted-without-reply'){res.writeHead(503);res.end('{}');return;}
    await beforeAsyncReply?.();if(autoCallback)await deliverCallback!(callbackUrl,id,body);res.writeHead(202);res.end(JSON.stringify({job_id:replyJobId??id}));return;
   }
@@ -91,14 +100,14 @@ const server=createServer((req,res)=>{void(async()=>{
  res.writeHead(404);res.end('{}');
  })().catch(error=>{errors.push(error);res.writeHead(500);res.end('{}');});});
 let originalNodes:Record<string,unknown>[]=[];
-beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();originalNodes=(await root.query('SELECT * FROM processing_nodes')).rows;await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw new Error('TEST_ADDRESS');baseUrl=`http://127.0.0.1:${address.port}`;});
+beforeAll(async()=>{vi.spyOn(OSS.prototype,'request').mockRejectedValue(new Error('OSS_NETWORK_FORBIDDEN'));await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();originalNodes=(await root.query('SELECT * FROM processing_nodes')).rows;await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw new Error('TEST_ADDRESS');baseUrl=`http://127.0.0.1:${address.port}`;});
 afterAll(async()=>{await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query('DELETE FROM processing_nodes');for(const row of originalNodes)await root.query('INSERT INTO processing_nodes(id,config,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5)',[row.id,JSON.stringify(row.config),row.revision,row.created_at,row.updated_at]);redis.disconnect();await root.end();await new Promise<void>(done=>server.close(()=>done()));await rm(directory,{recursive:true,force:true});});
 
 async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=false,serviceDefaults=false){
  scenario=state;autoCallback=state==='success'||state==='failed-file';getCount=0;postCount=0;sourceReads=0;deleteCount=0;failGet=state==='get-error';hold=state==='pending'||state==='cancel-error';onGet=undefined;beforeAsyncReply=undefined;replyJobId=undefined;requests.splice(0);errors.splice(0);remoteJobs.clear();
  const prefix='extract_'+randomUUID().replaceAll('-','');
  const env={...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_PUBLIC_BASE_URL:'http://api.test',API_SERVICE_BASE_URL:'http://api.internal.test',ADMIN_PUBLIC_BASE_URL:'http://admin.test',APP_TOKEN_SECRET:'a'.repeat(48),ADMIN_SESSION_SECRET:'b'.repeat(48),REDIS_CACHE_URL:process.env.REDIS_CACHE_URL,REDIS_QUEUE_URL:redisUrl,REDIS_KEY_PREFIX:prefix,
-  RAG_PROVIDER_MODE:'mock',ALLOW_MOCK_PROVIDERS:'true',RAG_SOURCE_ALLOWED_HOSTS:'127.0.0.1',STORAGE_DRIVER:'local',STORAGE_LOCAL_ROOT:join(directory,prefix),
+  RAG_PROVIDER_MODE:'mock',ALLOW_MOCK_PROVIDERS:'true',RAG_SOURCE_ALLOWED_HOSTS:'127.0.0.1,fixture-assets.oss-cn-beijing.aliyuncs.com',STORAGE_DRIVER:'local',STORAGE_LOCAL_ROOT:join(directory,prefix),
   PROCESSING_NODES_ENABLED:'true'};
  const apiConfig=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL}),workerConfig=loadConfig('worker',{...env,DATABASE_URL:process.env.TEST_DATABASE_WORKER_URL});
  if(realKeyword)for(const cfg of [apiConfig,workerConfig])configureTestMilvus(cfg);
@@ -109,28 +118,29 @@ async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=fa
  const nodeId=randomUUID(),nodePrefix=prefix+':processing-node:{'+nodeId+'}';
  await root.query('INSERT INTO processing_nodes(id,config) VALUES($1,$2)',[nodeId,JSON.stringify({documentApi,name:'loopback parser',capabilities:['document'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:baseUrl+'/node-'+prefix,healthPath:'',tokenEnv:null,eciFallback:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:true})]);
  apiConfig.rag.enabled=true;workerConfig.rag.enabled=true;
- const apiPool=poolFor(apiConfig),workerPool=poolFor(workerConfig),storage=storageFor(workerConfig),memory=mockKnowledgeIndex();
+ const apiPool=poolFor(apiConfig),workerPool=poolFor(workerConfig),storage=new MockOssStorageAdapter(workerConfig.storageLocalRoot),memory=mockKnowledgeIndex();
  const deps={index:(snapshot:KbSnapshot)=>realKeyword?knowledgeIndex(apiConfig,snapshot):memory.keyword,
   embedding:()=>{throw new Error('DOCUMENT_PATH_MUST_NOT_USE_EMBEDDING');},tokenizer:()=>{throw new Error('DOCUMENT_PATH_MUST_NOT_USE_MODEL_TOKENIZER');}};
  const pipeline=new RagIngestionJobs(workerPool,workerConfig,storage,{kb:deps});
  const engine=new TaskEngine(workerPool,120000,undefined,undefined,undefined,pipeline);
  const userId=await insertFixtureUser(root),sessionId=randomUUID(),workspaceId=randomUUID();const bearer=await insertFixtureSession(root,userId,sessionId);
  await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'Extraction test',true,$3)",[workspaceId,userId,randomUUID()]);
- const scope={userId,sessionId,traceId:randomUUID()},repository=new RagIngestionRepository(apiPool,apiConfig);
+ const uploads=new RedisTemporaryUploads(apiConfig),claims=new ResourceClaims(apiConfig,uploads);
+ const scope={userId,sessionId,traceId:randomUUID()},repository=new RagIngestionRepository(apiPool,apiConfig,claims);
  const api=await buildApiServer({config:apiConfig});
- deliverCallback=async(url,id,result)=>{const response=await api.inject({method:'POST',url:new URL(url).pathname,payload:{event:'extraction.completed',event_id:randomUUID(),job_id:id,state:'completed',result}});expect(response.statusCode,response.body).toBe(200);};
+ deliverCallback=async(url,id,result)=>{const target=new URL(url),response=await api.inject({method:'POST',url:target.pathname+target.search,payload:{event:'extraction.completed',event_id:randomUUID(),job_id:id,state:'completed',result}});expect(response.statusCode,response.body).toBe(200);if(target.searchParams.has('traceId')){expect(response.headers['x-trace-id']).toBe(target.searchParams.get('traceId'));expect(response.json().traceId).toBe(target.searchParams.get('traceId'));}};
  const start=async()=>{
   const response=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers:{...fixtureScopeHeaders(bearer),'x-idempotency-key':randomUUID()},payload:{ossUrl:baseUrl+'/source.pdf',fileName:'source.pdf',mimeType:'application/pdf'}});
   expect(response.statusCode,response.body).toBe(200);return response.json().data as {jobId:string;documentVersionId:string};
  };
  const attempt=async(id:string)=>vi.waitFor(async()=>{const a=await engine.claim(id,randomUUID());expect(a,a?undefined:JSON.stringify((await root.query('SELECT state,attempt_no,max_attempts,available_at,clock_timestamp() AS clock,external_state FROM tasks WHERE id=$1',[id])).rows)).not.toBeNull();return a!;},{interval:20,timeout:3000});
- const run=async(a:Attempt,executor=engine)=>{for(let phase=0;phase<6;phase++){try{await executor.execute(a);}catch(error){const e=error as {code?:string;retryable?:boolean};await executor.fail(a,e.code??'TEST_FAILED',e.retryable!==false);return error;}
+ const run=(a:Attempt,executor=engine)=>withTraceId(a.task.trace_id,async()=>{for(let phase=0;phase<6;phase++){try{await executor.execute(a);}catch(error){const e=error as {code?:string;retryable?:boolean};await executor.fail(a,e.code??'TEST_FAILED',e.retryable!==false);return error;}
   const row=(await root.query('SELECT state FROM tasks WHERE id=$1',[a.task.id])).rows[0];const ready=(await root.query('SELECT 1 FROM document_parse_callbacks WHERE task_id=$1 AND terminal_state IS NOT NULL AND NOT consumed',[a.task.id])).rowCount;
   if(!ready||!['waiting_external','reconciling'].includes(row.state))return undefined;a=await attempt(a.task.id);
- }throw Error('TEST_PHASE_LIMIT');};
+ }throw Error('TEST_PHASE_LIMIT');});
  const task=async(id:string)=>(await root.query('SELECT * FROM tasks WHERE id=$1',[id])).rows[0];
- const close=async()=>{deliverCallback=undefined;onGet=undefined;beforeAsyncReply=undefined;await api.close();await pipeline.close();await Promise.all([apiPool.end(),workerPool.end()]);const keys=await redis.keys(prefix+':*');if(keys.length)await redis.del(...keys);};
- return {apiConfig,workerConfig,apiPool,workerPool,storage,deps,pipeline,engine,scope,bearer,repository,api,start,attempt,run,task,close,prefix,nodePrefix,nodeId,documentApi};
+ const close=async()=>{deliverCallback=undefined;onGet=undefined;beforeAsyncReply=undefined;await api.close();await pipeline.close();await uploads.close();await Promise.all([apiPool.end(),workerPool.end()]);const keys=await redis.keys(prefix+':*');if(keys.length)await redis.del(...keys);};
+ return {apiConfig,workerConfig,apiPool,workerPool,storage,uploads,deps,pipeline,engine,scope,bearer,repository,api,start,attempt,run,task,close,prefix,nodePrefix,nodeId,documentApi};
 }
 
 describe('existing document workflows: real isolated PG/Redis/storage, loopback fake parser, no private requests',()=>{
@@ -139,7 +149,9 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    const created=await s.start(),version=(await root.query('SELECT processing_snapshot FROM rag_ingestion_versions WHERE id=$1',[created.documentVersionId])).rows[0];
    const parser=version.processing_snapshot.parser;expect(parser.sourceResourceId).toBe(created.documentVersionId);expect(parser.parseRunId).toMatch(/^[a-f0-9-]{36}$/);
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect((await s.task(created.jobId)).state).toBe('succeeded');
-   expect(postCount).toBe(1);expect(sourceReads).toBe(1);expect(requests[0]!.config).toEqual(s.documentApi.parameters);expect(parser).not.toHaveProperty('extraction');
+   const traceId=(await s.task(created.jobId)).trace_id;expect(traceId).toMatch(/^[a-f0-9-]{36}$/);expect(requests[0]!.traceId).toBe(traceId);
+   expect(new URL([...remoteJobs.values()][0]!.callbackUrl).searchParams.get('traceId')).toBe(traceId);
+   expect(postCount).toBe(1);expect(sourceReads).toBe(0);expect(requests[0]!.config).toEqual(s.documentApi.parameters);expect(parser).not.toHaveProperty('extraction');
    expect(requests[0]!.contexts).toEqual([{source_resource_id:parser.sourceResourceId,parse_run_id:parser.parseRunId}]);
    const row=(await root.query('SELECT * FROM rag_ingestion_versions WHERE id=$1',[created.documentVersionId])).rows[0];
    const chunks:Buffer[]=[];for await(const chunk of await s.storage.read(row.canonical_content_uri))chunks.push(Buffer.from(chunk));expect(Buffer.concat(chunks).toString()).toBe(lastResponse!.results[0]!.content);
@@ -147,14 +159,38 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    expect(assets).toHaveLength(1);expect(assets[0]).toMatchObject({upload_status:'ready',char_start:null,char_end:null});
    const assetConfig={...s.apiConfig,storageDriver:'aliyun-oss' as const,storageAliyunOss:{region:'cn-beijing',endpoint:'https://oss.example.invalid',bucket:'fixture-bucket',accessKeyId:'test',accessKeySecret:'test',secure:true,timeoutMs:1000,keyPrefix:'fixture-resources',maxBytes:100000}};
    const assetRepository=new RagIngestionRepository(s.apiPool,assetConfig);
-   const read=vi.fn(async()=>Readable.from([Buffer.from('fake-image')]));
-   await assetRepository.asset(s.scope,created.jobId,assets[0].id,{read});expect(read).toHaveBeenCalledExactlyOnceWith(assets[0].id);
+   const read=vi.fn(async()=>{throw new Error('DOWNLOAD_PROXY_FORBIDDEN');}),signUrl=vi.fn(async(key:string)=>`https://signed.test/${key}`),directStorage={read,signUrl};
+   const imageLink=await assetRepository.asset(s.scope,created.jobId,assets[0].id,directStorage);
+   expect(imageLink).toMatchObject({url:`https://signed.test/${assets[0].id}`,mimeType:assets[0].mime_type,sizeBytes:Number(assets[0].byte_size)});
+   expect(signUrl).toHaveBeenCalledExactlyOnceWith(assets[0].id,900,{contentType:assets[0].mime_type});
+   const extractionLink=await assetRepository.extraction(s.scope,created.jobId,directStorage);
+   expect(extractionLink).toMatchObject({url:`https://signed.test/${row.parse_artifact_uri}`,mimeType:'application/json',contentEncoding:'gzip'});
+   expect(signUrl).toHaveBeenLastCalledWith(row.parse_artifact_uri,900,{contentType:'application/json',contentEncoding:'gzip'});expect(read).not.toHaveBeenCalled();
+   await expect(assetRepository.asset(s.scope,created.jobId,randomUUID(),directStorage)).rejects.toMatchObject({code:'RESOURCE_NOT_FOUND'});
+   await expect(new RagIngestionRepository(s.apiPool,{...assetConfig,storageAliyunOss:{...assetConfig.storageAliyunOss,bucket:'other-bucket'}}).asset(s.scope,created.jobId,assets[0].id,directStorage)).rejects.toMatchObject({code:'DOCUMENT_ASSET_STORAGE_UNAVAILABLE'});
+   await expect(new RagIngestionRepository(s.apiPool,{...assetConfig,storageAliyunOss:{...assetConfig.storageAliyunOss,keyPrefix:'other-prefix'}}).asset(s.scope,created.jobId,assets[0].id,directStorage)).rejects.toMatchObject({code:'DOCUMENT_ASSET_STORAGE_UNAVAILABLE'});
+   expect(signUrl).toHaveBeenCalledTimes(2);expect(read).not.toHaveBeenCalled();
    expect(Number((await root.query('SELECT count(*) FROM kb_document_keyword_builds WHERE source_id=$1 AND published',[created.documentVersionId])).rows[0].count)).toBe(1);
-   const response=await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(s.bearer)}});
-   expect(response.statusCode,response.body).toBe(200);expect(response.json()).toEqual(lastResponse);expect(response.body).not.toContain('data_base64');
-   const other=await insertFixtureUser(root),otherToken=await insertFixtureSession(root,other,randomUUID());
-   expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(otherToken)}})).statusCode).toBe(404);
-   await s.repository.action(s.scope,created.jobId,'delete');expect((await s.api.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/extraction`,headers:{...fixtureScopeHeaders(s.bearer)}})).statusCode).toBe(404);
+   const assetApi=await buildApiServer({config:assetConfig}),readObject=vi.spyOn(AliyunOssStorageAdapter.prototype,'read').mockRejectedValue(new Error('DOWNLOAD_PROXY_FORBIDDEN'));
+   try{
+    const extractionPath=`/api/v1/rag/ingestions/${created.jobId}/extraction`,assetPath=`/api/v1/rag/ingestions/${created.jobId}/assets/${assets[0].id}`;
+    const response=await assetApi.inject({method:'GET',url:extractionPath,headers:fixtureScopeHeaders(s.bearer)});
+    expect(response.statusCode,response.body).toBe(200);expect(response.headers['cache-control']).toBe('no-store');
+    const data=response.json().data,signed=new URL(data.url);expect(data).toMatchObject({mimeType:'application/json',contentEncoding:'gzip'});
+    expect(signed.pathname).toBe(`/fixture-resources/${row.parse_artifact_uri}`);expect(signed.searchParams.get('response-content-type')).toBe('application/json');expect(signed.searchParams.get('response-content-encoding')).toBe('gzip');
+    expect(response.body).not.toContain('data_base64');expect(data).not.toHaveProperty('results');expect(Date.parse(data.expiresAt)).toBeGreaterThan(Date.now());
+    const imageResponse=await assetApi.inject({method:'GET',url:assetPath,headers:fixtureScopeHeaders(s.bearer)});
+    expect(imageResponse.statusCode,imageResponse.body).toBe(200);expect(imageResponse.headers['cache-control']).toBe('no-store');
+    expect(imageResponse.json().data).toMatchObject({mimeType:assets[0].mime_type,sizeBytes:Number(assets[0].byte_size)});
+    expect(new URL(imageResponse.json().data.url).pathname).toBe(`/fixture-resources/${assets[0].id}`);
+    const other=await insertFixtureUser(root),otherToken=await insertFixtureSession(root,other,randomUUID());
+    for(const url of [extractionPath,assetPath])expect((await assetApi.inject({method:'GET',url,headers:fixtureScopeHeaders(otherToken)})).statusCode).toBe(404);
+    expect((await assetApi.inject({method:'GET',url:`/api/v1/rag/ingestions/${randomUUID()}/extraction`,headers:fixtureScopeHeaders(s.bearer)})).statusCode).toBe(404);
+    expect((await assetApi.inject({method:'GET',url:`/api/v1/rag/ingestions/${created.jobId}/assets/${randomUUID()}`,headers:fixtureScopeHeaders(s.bearer)})).statusCode).toBe(404);
+    await s.repository.action(s.scope,created.jobId,'delete');
+    for(const url of [extractionPath,assetPath])expect((await assetApi.inject({method:'GET',url,headers:fixtureScopeHeaders(s.bearer)})).statusCode).toBe(404);
+    expect(readObject).not.toHaveBeenCalled();
+   }finally{readObject.mockRestore();await assetApi.close();}
    expect(errors).toHaveLength(0);
   }finally{await s.close();}
  });
@@ -168,7 +204,7 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    const [id,remote]=[...remoteJobs][0]!;await deliverCallback!(remote.callbackUrl,id,remote.response);
    const due=(await root.query("SELECT available_at<=clock_timestamp() AS due FROM task_outbox WHERE task_id=$1 AND status='pending'",[created.jobId])).rows[0];expect(due.due).toBe(true);
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();
-   const done=await s.task(created.jobId);expect(done).toMatchObject({state:'succeeded',attempt_no:2,resume_count:1});expect(getCount).toBe(0);expect(sourceReads).toBe(1);
+   const done=await s.task(created.jobId);expect(done).toMatchObject({state:'succeeded',attempt_no:2,resume_count:1});expect(getCount).toBe(0);expect(sourceReads).toBe(0);
    expect(await redis.zcard(s.nodePrefix+':active')).toBe(0);expect(errors).toHaveLength(0);
   }finally{await s.close();}
  });
@@ -179,7 +215,7 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();expect((await s.task(created.jobId)).state).toBe('reconciling');
    await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{documentApi,timeoutSeconds}','4000'),revision=revision+1 WHERE id=$1`,[s.nodeId]);
    await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
-   expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect(postCount).toBe(1);expect(sourceReads).toBe(1);expect((await s.task(created.jobId)).state).toBe('succeeded');
+   expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect(postCount).toBe(1);expect(sourceReads).toBe(0);expect((await s.task(created.jobId)).state).toBe('succeeded');
   }finally{await s.close();}
  });
  it('retains ambiguous submission without a job ID and never blindly reclaims/resubmits it',async()=>{
@@ -204,7 +240,7 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    expect((await s.api.inject({method:'POST',url,payload:{...payload,job_id:randomUUID()}})).statusCode).toBe(409);
    expect((await s.api.inject({method:'POST',url,payload:{event:'extraction.failed',event_id:randomUUID(),job_id:jobId,state:'failed'}})).statusCode).toBe(409);
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect((await s.task(created.jobId)).state).toBe('succeeded');
-   expect(postCount).toBe(1);expect(sourceReads).toBe(1);expect(getCount).toBe(0);expect(await redis.zcard(s.nodePrefix+':active')).toBe(0);
+   expect(postCount).toBe(1);expect(sourceReads).toBe(0);expect(getCount).toBe(0);expect(await redis.zcard(s.nodePrefix+':active')).toBe(0);
    expect((await root.query('SELECT count(*)::int AS n FROM task_results WHERE task_id=$1',[created.jobId])).rows[0].n).toBe(1);
    expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',[decodeDocumentReference(bound.external_reference)!.requestId])).rows[0].settled).toBe(true);
    expect((await s.api.inject({method:'POST',url,payload})).json().data.duplicate).toBe(true);expect(await s.engine.claim(created.jobId,randomUUID())).toBeNull();
@@ -243,7 +279,12 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
  });
  it('preserves cancellation when an ambiguous submission and its completed callback race',async()=>{
   const s=await setup('async','accepted-without-reply');try{
-   const created=await s.start();expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();
+   const created=await s.start();
+   const billing=new BillingService(s.apiPool,{...s.apiConfig,billingMode:'development'});
+   const reservation=await billing.reserveCredits({userId:s.scope.userId,taskId:created.jobId,reservationKey:`task:${created.jobId}`,requestedCredits:5n});
+   await root.query('UPDATE tasks SET reservation_id=$2 WHERE id=$1',[created.jobId,reservation.reservationId]);
+   expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();
+   expect((await root.query('SELECT status FROM credit_reservations WHERE reservation_id=$1',[reservation.reservationId])).rows[0].status).toBe('reserved');
    const [jobId,job]=[...remoteJobs.entries()][0]!;
    const [callback]=await Promise.all([
     s.api.inject({method:'POST',url:new URL(job.callbackUrl).pathname,payload:{event:'extraction.completed',event_id:randomUUID(),job_id:jobId,state:'completed',result:job.response}}),
@@ -251,6 +292,8 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    ]);
    expect(callback.statusCode,callback.body).toBe(200);expect((await s.task(created.jobId)).cancel_requested_at).not.toBeNull();
    expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();expect((await s.task(created.jobId)).state).toBe('cancelled');
+   expect((await root.query('SELECT status FROM credit_reservations WHERE reservation_id=$1',[reservation.reservationId])).rows[0].status).toBe('released');
+   expect((await root.query("SELECT count(*)::int AS n FROM credit_ledger_entries WHERE reservation_id=$1 AND entry_type='release'",[reservation.reservationId])).rows[0].n).toBe(1);
    expect(postCount).toBe(1);expect(deleteCount).toBe(0);expect(await redis.zcard(s.nodePrefix+':active')).toBe(0);
    expect((await root.query('SELECT count(*)::int AS n FROM task_results WHERE task_id=$1',[created.jobId])).rows[0].n).toBe(0);
    expect((await root.query('SELECT canonical_content_uri FROM rag_ingestion_versions WHERE id=$1',[created.documentVersionId])).rows[0].canonical_content_uri).toBeNull();
@@ -290,6 +333,42 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    expect(assignments).toEqual([{request_id:created.jobId+':parse:1',settled:true}]);
   }finally{crash.mockRestore();await s.close();}
  });
+ it.each([false,true])('releases unsubmitted admission when its signed URL expires (cancelled=%s)',async cancelled=>{
+  const s=await setup('async'),expiry=Math.floor(Date.now()/1000)+3600;
+  const defer=vi.spyOn(ProcessingNodes.prototype,'withNode').mockImplementationOnce(async function(this:ProcessingNodes,capability,input){
+   const node=await this.bind(input.requestId,capability),runtime=await this.runtime(node);
+   return runtime.machine.withDocumentParser(input,async()=>{throw new ParserExecutionDeferred('admitting',1);});
+  });
+  try{
+   const created=await s.repository.create(s.scope,{ossUrl:baseUrl+`/source.pdf?Expires=${expiry}`,fileName:'source.pdf',mimeType:'application/pdf'});
+   expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();
+   expect((await s.task(created.jobId)).external_reference).toMatch(/^xberg-bound:/);expect(postCount).toBe(0);
+   if(cancelled)await new TaskService(s.apiPool,s.apiConfig.appTokenSecret!).mutate(s.scope,created.jobId,'cancel',randomUUID(),{});
+   await root.query("UPDATE tasks SET available_at=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
+   const next=await s.attempt(created.jobId),clock=vi.spyOn(Date,'now').mockReturnValue(expiry*1000+1);
+   try{expect(await s.run(next)).toBeTruthy();}finally{clock.mockRestore();}
+   const task=await s.task(created.jobId);
+   expect(task).toMatchObject({state:cancelled?'cancelled':'failed',external_state:'none',error_code:cancelled?'TASK_CANCELLED':'RAG_SOURCE_URL_EXPIRED'});
+   expect(decodeDocumentReference(task.external_reference)?.phase).toBe(cancelled?'cancelled':'failed');
+   expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id LIKE $1',[created.jobId+':%'])).rows).toEqual([{settled:true}]);
+   expect(await redis.hlen(s.nodePrefix+':jobs')).toBe(0);expect(await redis.zcard(s.nodePrefix+':active')).toBe(0);expect(postCount).toBe(0);expect(sourceReads).toBe(0);
+  }finally{defer.mockRestore();await s.close();}
+ });
+ it('rechecks signed URL expiry immediately before submission and settles without an HTTP POST',async()=>{
+  const s=await setup('async'),expiry=Math.floor(Date.now()/1000)+3600,extract=DocumentExtractionClient.prototype.extract;
+  const advance=vi.spyOn(DocumentExtractionClient.prototype,'extract').mockImplementationOnce(async function(this:DocumentExtractionClient,...args:Parameters<DocumentExtractionClient['extract']>){
+   const clock=vi.spyOn(Date,'now').mockReturnValue(expiry*1000+1);
+   try{return await extract.call(this,...args);}finally{clock.mockRestore();}
+  });
+  try{
+   const created=await s.repository.create(s.scope,{ossUrl:baseUrl+`/source.pdf?Expires=${expiry}`,fileName:'source.pdf',mimeType:'application/pdf'});
+   expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();
+   expect(await s.task(created.jobId)).toMatchObject({state:'failed',external_state:'none',error_code:'RAG_SOURCE_URL_EXPIRED'});
+   expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id LIKE $1',[created.jobId+':%'])).rows).toEqual([{settled:true}]);
+   expect((await root.query('SELECT job_id,consumed FROM document_parse_callbacks WHERE task_id=$1',[created.jobId])).rows).toEqual([{job_id:null,consumed:true}]);
+   expect(postCount).toBe(0);expect(sourceReads).toBe(0);expect(await redis.hlen(s.nodePrefix+':jobs')).toBe(0);
+  }finally{advance.mockRestore();await s.close();}
+ });
  it('reuses both UUIDs and the complete admission snapshot on a safe same-batch retry',async()=>{
   const s=await setup('sync','failed-file');try{
    const created=await s.start();expect(await s.run(await s.attempt(created.jobId))).toBeTruthy();expect((await s.task(created.jobId)).state).toBe('retry_scheduled');
@@ -308,29 +387,77 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    expect(Number((await root.query('SELECT count(*) FROM task_results WHERE task_id=$1',[created.jobId])).rows[0].count)).toBe(0);
   }finally{await s.close();}
  });
- it('uses the same managed extractor for the existing FILE_UPLOAD workflow',async()=>{
+ it.each([['pdf','application/pdf'],['txt','text/plain'],['md','text/markdown'],['csv','text/csv']])('sends FILE_UPLOAD %s as a URL to the external extractor without source reads',async(ext,mime)=>{
   const s=await setup('async');const text=new TextIngestionJobs(s.workerPool,s.workerConfig,s.deps);
   try{
    s.apiConfig.rag.providerMode='disabled';s.workerConfig.rag.providerMode='disabled';
-   const service=new TextIngestionService(s.apiPool,s.apiConfig),job=await service.create(s.scope,{source_type:'FILE_UPLOAD',origin_resource_uri:baseUrl+'/source.pdf'},randomUUID());
+   const service=new TextIngestionService(s.apiPool,s.apiConfig),job=await service.create(s.scope,{source_type:'FILE_UPLOAD',origin_resource_uri:baseUrl+'/source.'+ext},randomUUID());
    const row=(await root.query('SELECT current_task_id FROM text_ingestion_jobs WHERE id=$1',[job.id])).rows[0];
    const engine=new TaskEngine(s.workerPool,120000,undefined,undefined,undefined,undefined,undefined,text),a=await engine.claim(row.current_task_id,randomUUID());expect(a).not.toBeNull();
    expect(await s.run(a!,engine)).toBeUndefined();const saved=(await root.query('SELECT * FROM text_ingestion_jobs WHERE id=$1',[job.id])).rows[0];
+   expect(sourceReads).toBe(0);expect(postCount).toBe(1);expect(requests[0]!.inputs).toEqual([{kind:'uri',uri:baseUrl+'/source.'+ext,mime_type:mime}]);
    expect(saved.ingest_status).toBe('success');expect(saved.raw_content).toBe(lastResponse!.results[0]!.content);expect(requests[0]!.contexts).toEqual([{source_resource_id:job.id,parse_run_id:row.current_task_id}]);
   }finally{await text.close();await s.close();}
  });
- it('reuses an already uploaded mother resource and serializes same-batch retries across admission keys',async()=>{
-  const s=await setup('sync');try{
-   const storage=new StorageService(s.apiPool,s.apiConfig,s.storage),upload=await storage.createUpload(s.scope,{sourceScene:'note_import',fileName:'source.pdf',mimeType:'application/pdf',sizeBytes:BigInt(pdf.byteLength),durationSeconds:0},randomUUID());
-   await storage.put(upload.uploadId,upload.headers['X-Upload-Capability'],Readable.from([pdf]));await storage.complete(s.scope,upload.uploadId,randomUUID());
-   const batch=randomUUID(),input={ossUrl:baseUrl+'/source.pdf',fileName:'source.pdf',mimeType:'application/pdf',sourceResourceId:upload.resourceId,parseRunId:batch};
+ it.each([false,true])('resumes accepted text jobs after URL expiry and allowlist removal (cancelled=%s)',async cancelled=>{
+  const s=await setup('async','pending'),text=new TextIngestionJobs(s.workerPool,s.workerConfig,s.deps),expiry=Math.floor(Date.now()/1000)+60;
+  const engine=new TaskEngine(s.workerPool,120000,undefined,undefined,undefined,undefined,undefined,text);
+  try{
+   const job=await new TextIngestionService(s.apiPool,s.apiConfig).create(s.scope,{source_type:'FILE_UPLOAD',origin_resource_uri:baseUrl+`/source.md?Expires=${expiry}`},randomUUID());
+   const taskId=(await root.query('SELECT current_task_id FROM text_ingestion_jobs WHERE id=$1',[job.id])).rows[0].current_task_id;
+   expect(await s.run(await s.attempt(taskId),engine)).toBeUndefined();expect(postCount).toBe(1);
+   s.workerConfig.rag.sourceAllowedHosts=[];
+   if(cancelled)await new TaskService(s.apiPool,s.apiConfig.appTokenSecret!).mutate(s.scope,taskId,'cancel',randomUUID(),{});
+   else {const [id,remote]=[...remoteJobs][0]!;await deliverCallback!(remote.callbackUrl,id,remote.response);}
+   const next=await s.attempt(taskId),clock=vi.spyOn(Date,'now').mockReturnValue(expiry*1000+1);
+   try{await s.run(next,engine);}finally{clock.mockRestore();}
+   expect((await s.task(taskId)).state).toBe(cancelled?'cancelled':'succeeded');
+   expect(postCount).toBe(1);expect(sourceReads).toBe(0);expect(deleteCount).toBe(cancelled?1:0);expect(await redis.hlen(s.nodePrefix+':jobs')).toBe(0);
+  }finally{await text.close();await s.close();}
+ });
+ it.each([false,true])('reuses an already uploaded mother resource and serializes same-batch retries across admission keys (versioned=%s)',async versioned=>{
+  const s=await setup('sync');
+  // The worker signs as OSS but the test writes extraction artifacts on disk.
+  // Route the indexer's separately constructed reader to that same test disk;
+  // the SDK request guard still prevents every unmocked cloud method.
+  const readObject=vi.spyOn(AliyunOssStorageAdapter.prototype,'read').mockImplementation(async key=>{
+   if(!key.startsWith('extractions/'))throw new Error('SOURCE_READ_FORBIDDEN');
+   return s.storage.read(key);
+  });
+  try{
+   Object.assign(s.apiConfig,mockOssUploadConfig(s.apiConfig));
+   Object.assign(s.workerConfig,mockOssUploadConfig(s.workerConfig));
+   Object.assign(s.apiConfig.storageAliyunOss!,{endpoint:'https://oss-cn-beijing-internal.aliyuncs.com',publicEndpoint:testOssConfig.endpoint});
+   const storage=new StorageService(s.apiPool,s.apiConfig,s.storage,s.uploads),upload=await storage.createUpload(s.scope,{fileName:'source.pdf',mimeType:'application/pdf',sizeBytes:BigInt(pdf.byteLength)},randomUUID());
+   await s.storage.uploadPart(upload.uploadUrl,pdf);
+   s.storage.setHeadMetadata(upload.resourceId,{version:versioned?'oss-version:source-version':'etag:"source-etag"'});
+   await storage.complete(s.scope,upload.uploadId,randomUUID());
+   const sourceUrl=(await storage.playback(s.scope,upload.resourceId)).url;
+   expect(new URL(sourceUrl).searchParams.get('versionId')).toBe(versioned?'source-version':null);
+   const batch=randomUUID(),input={ossUrl:sourceUrl,fileName:'source.pdf',mimeType:'application/pdf',sourceResourceId:upload.resourceId,parseRunId:batch};
+   const wrongVersion=new URL(sourceUrl);wrongVersion.searchParams.set('versionId','different-version');
+   await expect(s.repository.create(s.scope,{...input,ossUrl:wrongVersion.toString()})).rejects.toMatchObject({code:'RAG_SOURCE_RESOURCE_MISMATCH'});
+   if(versioned){
+    const missingVersion=new URL(sourceUrl);missingVersion.searchParams.delete('versionId');
+    await expect(s.repository.create(s.scope,{...input,ossUrl:missingVersion.toString()})).rejects.toMatchObject({code:'RAG_SOURCE_RESOURCE_MISMATCH'});
+   }
+   await expect(s.repository.create(s.scope,{...input,ossUrl:sourceUrl.replace(upload.resourceId,randomUUID())})).rejects.toMatchObject({code:'RAG_SOURCE_RESOURCE_MISMATCH'});
    const results=await Promise.all([s.repository.create(s.scope,{...input,idempotencyKey:randomUUID()}),s.repository.create(s.scope,{...input,idempotencyKey:randomUUID()})]);
    expect(results[0]!.jobId).toBe(results[1]!.jobId);expect(results.filter(r=>r.reused)).toHaveLength(1);
+   expect((await root.query('SELECT source_sha256 FROM rag_ingestion_versions WHERE id=$1',[results[0]!.documentVersionId])).rows[0].source_sha256).toBeNull();
    await expect(storage.remove(s.scope,(await root.query('SELECT workspace_id FROM resources WHERE resource_id=$1',[upload.resourceId])).rows[0].workspace_id,upload.resourceId,randomUUID())).rejects.toMatchObject({code:'RESOURCE_REFERENCED'});
+   // Simulate an admitted file waiting until its original URL expires. Only its
+   // owned resource/version may supply a fresh URL at parser submission time.
+   const expired=new URL(sourceUrl);expired.searchParams.set('x-oss-date','20000101T000000Z');
+   await root.query('UPDATE rag_ingestion_versions SET source_url=$2 WHERE id=$1',[results[0]!.documentVersionId,expired.href]);
    expect(await s.run(await s.attempt(results[0]!.jobId))).toBeUndefined();expect(sourceReads).toBe(0);expect(postCount).toBe(1);
-   expect(requests[0]!.contexts).toEqual([{source_resource_id:upload.resourceId,parse_run_id:batch}]);
+   expect(requests[0]!.contexts).toEqual([{source_resource_id:upload.resourceId,parse_run_id:batch}]);expect(new URL(String(requests[0]!.inputs[0]!.uri)).pathname).toBe(new URL(sourceUrl).pathname);expect(new URL(String(requests[0]!.inputs[0]!.uri)).searchParams.get('x-oss-expires')).toBe('3600');
+   expect(new URL(String(requests[0]!.inputs[0]!.uri)).searchParams.get('x-oss-date')).not.toBe('20000101T000000Z');
+   expect(readObject).toHaveBeenCalled();expect(readObject.mock.calls.every(([key])=>key.startsWith('extractions/'))).toBe(true);
+   expect(OSS.prototype.request).not.toHaveBeenCalled();
+   await expect(s.repository.create(s.scope,{...input,ossUrl:sourceUrl.replace(upload.resourceId,randomUUID())})).rejects.toMatchObject({code:'RAG_SOURCE_RESOURCE_MISMATCH'});
    await s.repository.action(s.scope,results[0]!.jobId,'delete');expect(Number((await root.query("SELECT count(*) FROM resource_refs WHERE resource_id=$1 AND ref_kind='document-source'",[upload.resourceId])).rows[0].count)).toBe(0);
-  }finally{await s.close();}
+  }finally{readObject.mockRestore();await s.close();}
  });
  it('only hands a cancelled parser step off for its live owner, attempt and recoverable receipt',async()=>{
   const s=await setup('async','pending');try{

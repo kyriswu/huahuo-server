@@ -2,12 +2,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { AppConfig } from '../../config/config.js';
 import { idempotent } from '../../lib/idempotency.js';
+import { kbImages } from '../../lib/kb-images.js';
+import { EDITABLE_MARKDOWN_MAX_CHARS } from '../../lib/kb-image-markdown.js';
 import { assertScope, DomainError, transaction, type Scope } from '../identity/store.js';
-import { enqueueIntent, event } from '../tasks/model.js';
+import { normalizeOwnedImageParts, restoreOwnedImageParts } from '../storage/image-content.js';
+import { enqueueIntent, event, newTaskMaxAttempts, terminal, type TaskRow } from '../tasks/model.js';
+import { finalizeUnsuccessfulTaskTx } from '../tasks/reservations.js';
 import { fileProcessingSnapshot, type FileProcessingSnapshot } from '../rag/processing-profile.js';
 import { validateSourceUri, DocumentPreparationError } from '../rag/document-preparation.js';
-import { assertCreateTextIngestionInput, assertManualTextEditable, assertUpdateTextIngestionInput } from './policy.js';
+import { assertCreateTextIngestionInput, assertManualTextEditable, assertTextIngestionContent, assertUpdateTextIngestionInput } from './policy.js';
 import { TextIngestionSourceType, type TextIngestionJob, type TextIngestionStatus } from './types.js';
+import {resolveTraceId} from '../../lib/trace.js';
+import type { ResourceClaims } from '../storage/resource-claims.js';
+import { ownedObjectKey } from '../storage/object-locator.js';
+import { attachResource } from '../storage/references.js';
 
 interface TextJobRow {
   id: string; source_type: TextIngestionSourceType; raw_content: string | null;
@@ -28,9 +36,10 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 
 /** Independent source record; execution and delivery remain in Task/Outbox. */
 export class TextIngestionService {
-  constructor(private readonly pool: pg.Pool, private readonly config: AppConfig) {}
+  constructor(private readonly pool: pg.Pool, private readonly config: AppConfig, private readonly resourceClaims?: ResourceClaims) {}
   private available(source: TextIngestionSourceType): void {
     if (!this.config.rag.enabled) throw new DomainError(503, 'TEXT_INGESTION_DISABLED');
+    if (source === TextIngestionSourceType.FILE_UPLOAD && !this.config.processingNodes.enabled) throw new DomainError(503, 'DOCUMENT_PARSER_NOT_CONFIGURED');
     if (source !== TextIngestionSourceType.MANUAL_INPUT && source !== TextIngestionSourceType.FILE_UPLOAD) throw new DomainError(503, 'TEXT_SOURCE_ADAPTER_UNAVAILABLE');
   }
   private async owned(tx: pg.PoolClient, scope: Scope, id: string, lock = false): Promise<TextJobRow> {
@@ -45,12 +54,19 @@ export class TextIngestionService {
     const inputId = randomUUID();
     await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',
       [inputId, scope.userId, workspaceId, JSON.stringify({ jobId: id, snapshot })]);
-    await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,max_attempts) VALUES($1,$2,$3,'text.ingest','content',$4,'queued',3)",
-      [taskId, scope.userId, workspaceId, inputId]);
+    await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,$3,'text.ingest','content',$4,'queued',$5,$6)",
+      [taskId, scope.userId, workspaceId, inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
     await enqueueIntent(tx, taskId); await event(tx, taskId);
   }
+  /** The normalizer already locked and authorized these images in this transaction. */
+  private async syncImageRefs(tx: pg.PoolClient, scope: Scope, workspaceId: string, id: string, content: string): Promise<void> {
+    const ids = [...new Set(kbImages(content).map(image => image.resourceId))];
+    await tx.query("DELETE FROM resource_refs WHERE user_id=$1 AND workspace_id=$2 AND ref_kind='text-image' AND ref_id_external=$3 AND NOT(resource_id=ANY($4::uuid[]))", [scope.userId, workspaceId, id, ids]);
+    if (ids.length) await tx.query(`INSERT INTO resource_refs(resource_id,user_id,workspace_id,ref_kind,ref_id_external)
+      SELECT resource_id,$2,$3,'text-image',$4 FROM unnest($1::uuid[]) x(resource_id) ON CONFLICT DO NOTHING`, [ids, scope.userId, workspaceId, id]);
+  }
   async create(scope: Scope, input: unknown, key: string): Promise<TextIngestionJob> {
-    assertCreateTextIngestionInput(input, Math.min(50_000, this.config.rag.plainTextMaxChars));
+    assertCreateTextIngestionInput(input, EDITABLE_MARKDOWN_MAX_CHARS);
     this.available(input.source_type);
     if (input.source_type !== TextIngestionSourceType.MANUAL_INPUT) {
       try { validateSourceUri(input.origin_resource_uri, this.config); }
@@ -58,18 +74,39 @@ export class TextIngestionService {
     }
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
-      const workspace = (await tx.query<{ id: string }>("SELECT id FROM workspaces WHERE user_id=$1 AND is_default AND state='ready' FOR SHARE", [scope.userId])).rows[0];
+      const workspace = (await tx.query<{ id: string }>("SELECT id FROM workspaces WHERE user_id=$1 AND is_default AND state='ready'", [scope.userId])).rows[0];
       if (!workspace) throw new DomainError(409, 'WORKSPACE_NOT_READY');
-      return idempotent(tx, this.config.appTokenSecret!, scope.userId, 'text-ingestion.create', key, input, async () => {
+      const prepared = input.source_type === TextIngestionSourceType.MANUAL_INPUT
+        ? await normalizeOwnedImageParts(tx, scope, workspace.id, { raw: input.raw_content }, this.config, this.resourceClaims)
+        : undefined;
+      const sourceResourceId = input.source_type === TextIngestionSourceType.FILE_UPLOAD ? ownedObjectKey(input.origin_resource_uri, this.config) : undefined;
+      if (sourceResourceId !== undefined) {
+        if (!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/iu.test(sourceResourceId)) throw new DomainError(404, 'RESOURCE_NOT_FOUND');
+        await this.resourceClaims?.ensure(tx, scope, workspace.id, [sourceResourceId]);
+      }
+      // Claiming takes the account lock first. Plain text/external sources do not
+      // need that lock; both paths recheck and hold the workspace before writing.
+      if (!(await tx.query("SELECT id FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready' FOR SHARE", [workspace.id, scope.userId])).rowCount) throw new DomainError(409, 'WORKSPACE_NOT_READY');
+      const stableInput = prepared ? { ...input, raw_content: prepared.parts.raw, imageOrigins: prepared.imageOrigins } : input;
+      return idempotent(tx, this.config.appTokenSecret!, scope.userId, 'text-ingestion.create', key, stableInput, async () => {
         const id = randomUUID(), taskId = randomUUID();
-        const raw = input.source_type === TextIngestionSourceType.MANUAL_INPUT ? input.raw_content : null;
+        if (sourceResourceId !== undefined) {
+          await attachResource(tx, scope.userId, sourceResourceId, 'text-source', id, workspace.id);
+          const resource = (await tx.query<{object_version:string}>("SELECT object_version FROM resources WHERE resource_id=$1", [sourceResourceId])).rows[0]!;
+          const versions = new URL(input.origin_resource_uri!).searchParams.getAll('versionId');
+          const version = resource.object_version.startsWith('oss-version:') ? resource.object_version.slice('oss-version:'.length) : null;
+          if (version ? versions.length !== 1 || versions[0] !== version : versions.length !== 0) throw new DomainError(400, 'RESOURCE_URL_INVALID');
+        }
+        const raw = prepared ? restoreOwnedImageParts({}, prepared).raw! : null;
+        if (raw !== null) assertTextIngestionContent(raw, Math.min(50_000, this.config.rag.plainTextMaxChars));
         const uri = input.source_type === TextIngestionSourceType.MANUAL_INPUT ? null : input.origin_resource_uri;
         const row = (await tx.query<TextJobRow>(`INSERT INTO text_ingestion_jobs
           (id,source_type,raw_content,origin_resource_uri,created_by,workspace_id,current_task_id,content_hash)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
         [id, input.source_type, raw, uri, scope.userId, workspace.id, taskId, raw === null ? null : hash(raw)])).rows[0]!;
+        if (raw !== null) await this.syncImageRefs(tx, scope, workspace.id, id, raw);
         await this.schedule(tx, scope, workspace.id, id, taskId,fileProcessingSnapshot(this.config,'markdown',
-          input.source_type===TextIngestionSourceType.FILE_UPLOAD?{sourceResourceId:id,parseRunId:taskId}:undefined));
+          input.source_type===TextIngestionSourceType.FILE_UPLOAD?{sourceResourceId:sourceResourceId??id,parseRunId:taskId}:undefined));
         return textIngestionDto(row);
       });
     });
@@ -92,22 +129,35 @@ export class TextIngestionService {
     });
   }
   async update(scope: Scope, id: string, input: unknown, key: string, ifMatch: string): Promise<TextIngestionJob> {
-    assertUpdateTextIngestionInput(input, Math.min(50_000, this.config.rag.plainTextMaxChars));
+    assertUpdateTextIngestionInput(input, EDITABLE_MARKDOWN_MAX_CHARS);
     return transaction(this.pool, async tx => {
-      await assertScope(tx, scope); await this.owned(tx, scope, id);
-      return idempotent(tx, this.config.appTokenSecret!, scope.userId, `text-ingestion.update:${id}`, key, { input, ifMatch }, async () => {
+      await assertScope(tx, scope);
+      const current = await this.owned(tx, scope, id);
+      assertManualTextEditable(current.source_type);
+      const prepared = await normalizeOwnedImageParts(tx, scope, current.workspace_id, { raw: input.raw_content }, this.config, this.resourceClaims);
+      const stableInput = { raw_content: prepared.parts.raw, imageOrigins: prepared.imageOrigins };
+      return idempotent(tx, this.config.appTokenSecret!, scope.userId, `text-ingestion.update:${id}`, key, { input: stableInput, ifMatch }, async () => {
         const row = await this.owned(tx, scope, id, true);
         assertManualTextEditable(row.source_type); this.available(row.source_type);
         if (etag(row) !== ifMatch) throw new DomainError(412, 'TEXT_INGESTION_CHANGED');
-        if (row.raw_content === input.raw_content) return textIngestionDto(row);
+        const raw = restoreOwnedImageParts({ raw: row.raw_content! }, prepared).raw!;
+        assertTextIngestionContent(raw, Math.min(50_000, this.config.rag.plainTextMaxChars));
+        if (row.raw_content === raw) return textIngestionDto(row);
         const taskId = randomUUID();
         // Fence the old execution before publishing another delivery. Its vectors
         // remain readable only through the previous active_task_id until replacement.
-        const cancelled = await tx.query("UPDATE tasks SET state=CASE WHEN state IN ('running','cancel_requested') THEN 'cancel_requested' ELSE 'cancelled' END,cancel_requested_at=now(),version=version+1,lease_owner=NULL,lease_until=NULL,retryable=false WHERE id=$1 AND state NOT IN ('succeeded','failed','cancelled') RETURNING id", [row.current_task_id]);
-        if (cancelled.rowCount) await event(tx, row.current_task_id);
+        const previous = (await tx.query<TaskRow>('SELECT * FROM tasks WHERE id=$1 FOR UPDATE', [row.current_task_id])).rows[0]!;
+        if (!terminal(previous.state)) {
+          if (previous.external_state==='none'&&!['running','cancel_requested'].includes(previous.state)) await finalizeUnsuccessfulTaskTx(tx,previous,{state:'cancelled'});
+          else {
+            await tx.query("UPDATE tasks SET state='cancel_requested',cancel_requested_at=now(),version=version+1,lease_owner=NULL,lease_until=NULL,retryable=false WHERE id=$1", [row.current_task_id]);
+            await event(tx,row.current_task_id);
+          }
+        }
         const updated = (await tx.query<TextJobRow>(`UPDATE text_ingestion_jobs SET raw_content=$2,content_hash=$3,
           current_task_id=$4,ingest_status='pending',error_msg=NULL,updated_at=now() WHERE id=$1 RETURNING *`,
-        [id, input.raw_content, hash(input.raw_content), taskId])).rows[0]!;
+        [id, raw, hash(raw), taskId])).rows[0]!;
+        await this.syncImageRefs(tx, scope, row.workspace_id, id, raw);
         await this.schedule(tx, scope, row.workspace_id, id, taskId);
         return textIngestionDto(updated);
       });

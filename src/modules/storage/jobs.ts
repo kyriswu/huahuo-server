@@ -1,48 +1,51 @@
 import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import { transaction } from '../identity/store.js';
-import { event, enqueueIntent } from '../tasks/model.js';
+import { event, enqueueIntent, newTaskMaxAttempts } from '../tasks/model.js';
 import type { Attempt } from '../tasks/engine.js';
 import type { StoragePort } from './port.js';
-export async function storageJob(tx:pg.PoolClient,user:string,workspace:string,operation:'inspect'|'delete'|'expire',target:string){
- const targetTable=operation==='expire'?'upload_sessions':'resources';
- const targetKey=operation==='expire'?'upload_id':'resource_id';
- const source=await tx.query(`SELECT 1 FROM ${targetTable} WHERE ${targetKey}=$1 AND user_id=$2 AND workspace_id=$3 FOR SHARE`,[target,user,workspace]);
+import {resolveTraceId} from '../../lib/trace.js';
+import type { AppConfig } from '../../config/config.js';
+export async function storageJob(tx:pg.PoolClient,user:string,workspace:string,operation:'delete',target:string){
+ const source=await tx.query('SELECT 1 FROM resources WHERE resource_id=$1 AND user_id=$2 AND workspace_id=$3 FOR SHARE',[target,user,workspace]);
  if(!source.rowCount)throw new Error('STORAGE_TARGET_NOT_FOUND');
- const id=randomUUID();await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state) VALUES($1,$2,$3,$4,$5,'queued')",[id,user,workspace,`storage.${operation}`,operation==='inspect'?'content':'maintenance']);
- await tx.query(`INSERT INTO storage_jobs(task_id,${operation==='expire'?'upload_id':'resource_id'},operation) VALUES($1,$2,$3)`,[id,target,operation]);await enqueueIntent(tx,id);await event(tx,id);return id;
+ const id=randomUUID();await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state,trace_id,max_attempts) VALUES($1,$2,$3,$4,'maintenance','queued',$5,$6)",[id,user,workspace,`storage.${operation}`,resolveTraceId(),newTaskMaxAttempts()]);
+ await tx.query('INSERT INTO storage_jobs(task_id,resource_id,operation) VALUES($1,$2,$3)',[id,target,operation]);await enqueueIntent(tx,id);await event(tx,id);return id;
 }
-export async function expireUploads(pool:pg.Pool){return transaction(pool,async tx=>{
- const r=await tx.query("SELECT * FROM upload_sessions u WHERE (status IN ('failed','expired') OR (status IN ('initiated','uploading','uploaded') AND expires_at<now())) AND NOT EXISTS(SELECT 1 FROM storage_jobs j WHERE j.upload_id=u.upload_id AND operation='expire') ORDER BY expires_at LIMIT 50 FOR UPDATE SKIP LOCKED");
- for(const s of r.rows){await tx.query("UPDATE upload_sessions SET status=CASE WHEN status='failed' THEN 'failed' ELSE 'expired' END,updated_at=now() WHERE upload_id=$1",[s.upload_id]);await tx.query("UPDATE storage_reservations SET status='released',updated_at=now() WHERE reservation_id=$1 AND status='reserved'",[s.reservation_id]);await storageJob(tx,s.user_id,s.workspace_id,'expire',s.upload_id);}return r.rowCount;
-});}
 /** All effects are immutable/idempotent. Only the active durable task lease can publish state changes. */
 export class StorageJobs {
- constructor(readonly pool:pg.Pool,readonly storage:StoragePort){}
+ constructor(readonly pool:pg.Pool,readonly storage:StoragePort,readonly config:AppConfig){}
  async execute(a:Attempt){
  const j=(await this.pool.query('SELECT * FROM storage_jobs WHERE task_id=$1',[a.task.id])).rows[0];if(!j)throw new Error('STORAGE_JOB_NOT_FOUND');
- const s=(await this.pool.query(j.operation==='expire'?'SELECT *,resource_id AS object_key FROM upload_sessions WHERE upload_id=$1':'SELECT * FROM resources WHERE resource_id=$1',[j.operation==='expire'?j.upload_id:j.resource_id])).rows[0];if(!s||s.user_id!==a.task.user_id||s.workspace_id!==a.task.workspace_id)throw new Error('STORAGE_TARGET_NOT_FOUND');
- if(j.operation==='inspect'){
-  if(s.status!=='ready')return {digest:s.sha256,bytes:0};
-  const meta=await this.storage.stat(s.object_key,s.mime_type);const valid=meta.sha256===s.sha256&&meta.bytes===Number(s.size_bytes);
-  await transaction(this.pool,async tx=>{if(!await this.fence(tx,a))return;await tx.query("UPDATE resources SET processing_status=$2,status=CASE WHEN $3 THEN status ELSE 'quarantined' END WHERE resource_id=$1 AND status='ready'",[s.resource_id,valid?'inspected':'failed',valid]);});if(!valid)throw new Error('RESOURCE_INTEGRITY_FAILED');return {digest:meta.sha256,bytes:meta.bytes};
- }
- return transaction(this.pool,async tx=>{
+ if(j.operation!=='delete'||a.task.kind!=='storage.delete')throw new Error('STORAGE_OPERATION_INVALID');
+ const s=(await this.pool.query('SELECT * FROM resources WHERE resource_id=$1',[j.resource_id])).rows[0];if(!s||s.user_id!==a.task.user_id||s.workspace_id!==a.task.workspace_id)throw new Error('STORAGE_TARGET_NOT_FOUND');
+ const removed=await transaction(this.pool,async tx=>{
   if(!await this.fence(tx,a))throw new Error('STORAGE_LEASE_LOST');
-  if(j.operation==='delete'){
-   const locked=(await tx.query('SELECT status FROM resources WHERE resource_id=$1 FOR UPDATE',[s.resource_id])).rows[0];
-   if(locked.status==='deleted')return {digest:s.sha256,bytes:0};
-   if(locked.status!=='deleting'||(await tx.query('SELECT 1 FROM resource_refs WHERE resource_id=$1',[s.resource_id])).rowCount)throw new Error('RESOURCE_REFERENCED');
-  }
-  await this.storage.remove(s.object_key,s.object_version);
-  // Local partial files are removed only by the Worker after upload expiry.
-  if('cleanup' in this.storage && typeof this.storage.cleanup==='function')await this.storage.cleanup(s.object_key);
-  if(j.operation==='delete'){
-   await tx.query("UPDATE resources SET status='deleted',deleted_at=now() WHERE resource_id=$1",[s.resource_id]);
-   await tx.query("UPDATE storage_reservations SET status='released',updated_at=now() WHERE user_id=$1 AND resource_key=$2",[s.user_id,`resource:${s.resource_id}`]);
-  }
-  return {digest:s.sha256??s.received_sha256??'expired',bytes:0};
+  const locked=(await tx.query('SELECT status FROM resources WHERE resource_id=$1 FOR UPDATE',[s.resource_id])).rows[0];
+  if(locked.status==='deleted')return true;
+  if(locked.status!=='deleting'||(await tx.query('SELECT 1 FROM resource_refs WHERE resource_id=$1',[s.resource_id])).rowCount)throw new Error('RESOURCE_REFERENCED');
+  return false;
  });
+ if(!removed){
+  const bucket=this.config.storageDriver==='aliyun-oss'?this.config.storageAliyunOss?.bucket:this.config.storageDriver==='s3'?this.config.storageS3?.bucket:null;
+  if(s.storage_driver!==this.config.storageDriver||s.storage_bucket!==bucket)throw new Error('RESOURCE_STORAGE_MISMATCH');
+  // A deleting resource cannot acquire new references. No transaction or task
+  // row lock is held across the object-storage request and lease heartbeats.
+  await this.storage.remove(s.object_key,s.object_version);
+  await transaction(this.pool,async tx=>{
+   // Account before task/resource, including callers that attach billing to a task.
+   await tx.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[s.user_id]);
+   if(!await this.fence(tx,a))throw new Error('STORAGE_LEASE_LOST');
+   const changed=await tx.query("UPDATE resources SET status='deleted',deleted_at=now() WHERE resource_id=$1 AND status='deleting' RETURNING resource_id",[s.resource_id]);
+   if(changed.rowCount){
+    const released=await tx.query<{confirmed_bytes:string}>("UPDATE storage_reservations SET status='released',updated_at=now() WHERE user_id=$1 AND resource_key=$2 AND status='confirmed' RETURNING confirmed_bytes",[s.user_id,`resource:${s.resource_id}`]);
+    if(released.rowCount!==1)throw new Error('STORAGE_USAGE_INCONSISTENT');
+    const counted=await tx.query('UPDATE users SET storage_used_bytes=storage_used_bytes-$2::bigint WHERE id=$1 AND storage_used_bytes>=$2::bigint RETURNING id',[s.user_id,released.rows[0]!.confirmed_bytes]);
+    if(!counted.rowCount)throw new Error('STORAGE_USAGE_INCONSISTENT');
+   }
+  });
+ }
+ return {digest:s.object_version,bytes:0};
  }
  private async fence(tx:pg.PoolClient,a:Attempt){return Boolean((await tx.query("SELECT id FROM tasks WHERE id=$1 AND state='running' AND version=$2 AND lease_owner=$3 AND attempt_no=$4 AND lease_until>now() FOR UPDATE",[a.task.id,a.version,a.owner,a.attempt])).rowCount);}
 }

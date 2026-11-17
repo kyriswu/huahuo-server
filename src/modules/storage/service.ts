@@ -1,52 +1,181 @@
 import { idempotent } from '../../lib/idempotency.js';
 import type pg from 'pg';
-import type { Readable } from 'node:stream';
 import { storageJob } from './jobs.js';
-import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import { transaction, assertScope, DomainError, type Scope } from '../identity/store.js';
 import type { AppConfig } from '../../config/config.js';
-import { storageFor, type StoredObject, type StoragePort } from './port.js';
-const uuid=(v:string)=>/^[0-9a-f-]{36}$/i.test(v);
-const sha=(v?:string)=>!v||/^[a-f0-9]{64}$/.test(v);
-const dto=(r:Record<string,unknown>)=>({resourceId:String(r.resource_id),sourceScene:String(r.source_scene),fileName:String(r.file_name),mimeType:String(r.mime_type),sizeBytes:Number(r.size_bytes),durationSeconds:Number(r.duration_seconds),sha256:String(r.sha256)});
-export interface UploadInput {sourceScene:string;fileName:string;mimeType:string;sizeBytes:bigint;durationSeconds:number;sha256?:string;workspaceId?:string;distillToDigitalTwin?:boolean;}
+import { storageFor, type ObjectMetadata, type StoragePort } from './port.js';
+import { RedisTemporaryUploads, type TemporaryUpload, type TemporaryUploadStore } from './temporary-uploads.js';
+import { findUploadedObject, validateUploadedObject, withUploadLock } from './upload-session.js';
+
+const uuid=(value:string)=>/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/iu.test(value);
+const dto=(r:Record<string,unknown>)=>({resourceId:String(r.resource_id),fileName:String(r.file_name),mimeType:String(r.mime_type),sizeBytes:Number(r.size_bytes),sha256:typeof r.sha256==='string'?r.sha256:null});
+const temporaryDto=(r:TemporaryUpload)=>({resourceId:r.id,fileName:r.fileName,mimeType:r.mimeType,sizeBytes:r.sizeBytes,sha256:null});
+export interface UploadInput {fileName:string;mimeType:string;sizeBytes:bigint;workspaceId?:string;}
+
+/** Uploads are temporary Redis receipts. Only a later business transaction claims a resource. */
 export class StorageService {
  readonly storage:StoragePort;
- constructor(readonly pool:pg.Pool,readonly config:AppConfig,storage?:StoragePort){this.storage=storage??storageFor(config);}
- private validate(i:UploadInput){if(!/^[a-z][a-z0-9_:-]{1,63}$/.test(i.sourceScene)||!i.fileName||i.fileName.length>120||/[\\/\0]/.test(i.fileName)||i.fileName.endsWith('.part')||!/^[\w.+-]+\/[\w.+-]+$/.test(i.mimeType)||i.sizeBytes<=0n||i.sizeBytes>BigInt(this.config.maxUploadBytes)||i.durationSeconds<0||!sha(i.sha256)||i.distillToDigitalTwin===true)throw new DomainError(400,i.distillToDigitalTwin?'DISTILL_NOT_SUPPORTED':'UPLOAD_METADATA_INVALID');}
- private cap(uploadId:string,expires:number){const raw=`${uploadId}.${expires}`;return `${raw}.${createHmac('sha256',this.config.appTokenSecret!).update(raw).digest('base64url')}`;}
- private verifyCap(id:string,value:string){const p=value.split('.');if(p.length!==3||p[0]!==id)return false;const exp=Number(p[1]);if(!Number.isSafeInteger(exp)||exp<Date.now())return false;const expected=createHmac('sha256',this.config.appTokenSecret!).update(`${p[0]}.${p[1]}`).digest();const got=Buffer.from(p[2]!, 'base64url');return got.length===expected.length&&timingSafeEqual(got,expected);}
- async createUpload(scope:Scope,input:UploadInput,key:string){this.validate(input);const normalized={...input,sizeBytes:input.sizeBytes.toString()};return transaction(this.pool,async tx=>{await assertScope(tx,scope);return idempotent(tx,this.config.appTokenSecret!,scope.userId,'media.upload-token',key,normalized,async()=>{
-  const wid=input.workspaceId??(await tx.query<{id:string}>('SELECT id FROM workspaces WHERE user_id=$1 AND is_default AND state=\'ready\'',[scope.userId])).rows[0]?.id;if(!wid||!uuid(wid))throw new DomainError(409,'WORKSPACE_NOT_READY');
-  const workspace=await tx.query("SELECT id FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready' FOR SHARE",[wid,scope.userId]);if(!workspace.rowCount)throw new DomainError(404,'WORKSPACE_NOT_FOUND');const user=await tx.query("SELECT id FROM users WHERE id=$1 AND status='active' FOR UPDATE",[scope.userId]);if(!user.rowCount)throw new DomainError(401,'UNAUTHORIZED');
-  const used=await tx.query<{n:string}>("SELECT coalesce(sum(requested_bytes),0)::text n FROM storage_reservations WHERE user_id=$1 AND status IN ('reserved','confirmed')",[scope.userId]);if(BigInt(used.rows[0]!.n)+input.sizeBytes>BigInt(this.config.storageQuotaBytes))throw new DomainError(409,'STORAGE_QUOTA_EXCEEDED');
-  const uploadId=randomUUID(),resourceId=randomUUID(),reservationId=randomUUID(),expires=new Date(Date.now()+3600_000);
-  await tx.query("INSERT INTO storage_reservations(reservation_id,user_id,resource_key,requested_bytes,status,expires_at) VALUES($1,$2,$3,$4,'reserved',$5)",[reservationId,scope.userId,`resource:${resourceId}`,input.sizeBytes,expires]);
-  await tx.query(`INSERT INTO upload_sessions(upload_id,user_id,workspace_id,resource_id,reservation_id,source_scene,file_name,mime_type,expected_bytes,expected_sha256,duration_seconds,status,storage_driver,storage_bucket,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'initiated',$12,$13,$14)`,[uploadId,scope.userId,wid,resourceId,reservationId,input.sourceScene,input.fileName,input.mimeType,input.sizeBytes,input.sha256??null,input.durationSeconds,this.config.storageDriver,this.config.storageS3?.bucket??null,expires]);
-  const cap=this.cap(uploadId,expires.getTime());return {uploadId,resourceId,uploadUrl:`${this.config.appPublicBaseUrl}/api/v1/media/uploads/${uploadId}/object`,method:'PUT',headers:{'Content-Type':input.mimeType,'X-Upload-Capability':cap},expiresAt:expires.toISOString()};
- });});}
- authorizeUpload(id:string,cap:string){if(!uuid(id)||!this.verifyCap(id,cap))throw new DomainError(401,'UPLOAD_CAPABILITY_INVALID');}
- async recover(scope:Scope,id:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const s=(await tx.query('SELECT * FROM upload_sessions WHERE upload_id=$1 AND user_id=$2',[id,scope.userId])).rows[0];if(!s)throw new DomainError(404,'UPLOAD_NOT_FOUND');return {uploadId:id,resourceId:s.resource_id,status:s.status,expiresAt:s.expires_at.toISOString(),receivedBytes:Number(s.received_bytes),errorCode:s.error_code};});}
- async put(uploadId:string,capability:string,input:NodeJS.ReadableStream){if(!uuid(uploadId)||!this.verifyCap(uploadId,capability))throw new DomainError(401,'UPLOAD_CAPABILITY_INVALID');const r=await this.pool.query('SELECT * FROM upload_sessions WHERE upload_id=$1',[uploadId]);const s=r.rows[0];if(!s)throw new DomainError(404,'UPLOAD_NOT_FOUND');if(new Date(s.expires_at).getTime()<Date.now()){await this.pool.query("UPDATE upload_sessions SET status='expired',error_code='UPLOAD_EXPIRED' WHERE upload_id=$1 AND status<>'completed'",[uploadId]);throw new DomainError(410,'UPLOAD_TOKEN_EXPIRED');}if(s.status==='completed')return {bytes:Number(s.received_bytes),sha256:String(s.received_sha256)};if(s.status==='uploaded')return {bytes:Number(s.received_bytes),sha256:String(s.received_sha256)};
-  const claimed=await this.pool.query("UPDATE upload_sessions SET status='uploading',updated_at=now() WHERE upload_id=$1 AND status='initiated' AND expires_at>now()+interval '2 minutes' RETURNING upload_id",[uploadId]);if(!claimed.rowCount)throw new DomainError(409,'UPLOAD_ALREADY_STARTED');try{const stored=await this.storage.put(s.resource_id,input as Readable,s.mime_type,Number(s.expected_bytes));if(s.expected_sha256&&stored.sha256!==s.expected_sha256)throw new DomainError(400,'UPLOAD_HASH_MISMATCH');if(BigInt(stored.bytes)!==BigInt(s.expected_bytes))throw new DomainError(400,'UPLOAD_SIZE_MISMATCH');await this.pool.query("UPDATE upload_sessions SET status='uploaded',received_bytes=$2,received_sha256=$3,verified_duration=$4,object_version=$5,updated_at=now() WHERE upload_id=$1 AND status='uploading'",[uploadId,stored.bytes,stored.sha256,stored.durationSeconds,stored.version]);return stored;}catch(e){await this.pool.query("UPDATE upload_sessions SET status='failed',error_code=$2,updated_at=now() WHERE upload_id=$1 AND status<>'completed'",[uploadId,e instanceof DomainError?e.code:'UPLOAD_STORAGE_FAILED']);await this.pool.query("UPDATE storage_reservations SET status='released',updated_at=now() WHERE resource_key=$1 AND status='reserved'",[`resource:${s.resource_id}`]);if(e instanceof DomainError)throw e;const code=e instanceof Error?e.message:'';throw new DomainError(code.startsWith('UPLOAD_')?400:503,code.startsWith('UPLOAD_')?code:'UPLOAD_STORAGE_FAILED',false,{cause:e});}}
- async complete(scope:Scope,uploadId:string,key:string,workspaceId?:string){if(!uuid(uploadId))throw new DomainError(400,'UPLOAD_ID_INVALID');const pre=await transaction(this.pool,async tx=>{await assertScope(tx,scope);return (await tx.query("SELECT s.* FROM upload_sessions s JOIN workspaces w ON w.id=s.workspace_id AND w.user_id=s.user_id AND w.state='ready' WHERE s.upload_id=$1 AND s.user_id=$2",[uploadId,scope.userId])).rows[0];});if(!pre)throw new DomainError(404,'UPLOAD_NOT_FOUND');let verified:StoredObject|undefined;if(['uploaded','uploading'].includes(pre.status)){try{verified=await this.storage.stat(pre.resource_id,pre.mime_type);}catch{throw new DomainError(409,'UPLOAD_NOT_READY');}}return transaction(this.pool,async tx=>{await assertScope(tx,scope);return idempotent(tx,this.config.appTokenSecret!,scope.userId,'media.upload-complete',key,{uploadId,workspaceId:workspaceId??null},async()=>{const r=await tx.query('SELECT * FROM upload_sessions WHERE upload_id=$1 AND user_id=$2 FOR UPDATE',[uploadId,scope.userId]);const s=r.rows[0];if(!s)throw new DomainError(404,'UPLOAD_NOT_FOUND');const workspace=await tx.query("SELECT 1 FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready' FOR SHARE",[s.workspace_id,scope.userId]);if(!workspace.rowCount)throw new DomainError(404,'WORKSPACE_NOT_FOUND');if(workspaceId&&workspaceId!==s.workspace_id)throw new DomainError(409,'UPLOAD_WORKSPACE_CONFLICT');if(s.status==='completed'){const q=await tx.query('SELECT * FROM resources WHERE resource_id=$1 AND upload_id=$2 AND user_id=$3 AND workspace_id=$4',[s.resource_id,uploadId,scope.userId,s.workspace_id]);if(!q.rows[0])throw new DomainError(409,'UPLOAD_RESOURCE_NOT_FOUND');return {uploadId,status:'completed',resource:dto(q.rows[0])};}if(!['uploaded','uploading'].includes(s.status))throw new DomainError(409,'UPLOAD_NOT_READY');if(new Date(s.expires_at).getTime()<Date.now())throw new DomainError(410,'UPLOAD_TOKEN_EXPIRED');
-  const st=verified;if(!st)throw new DomainError(409,'UPLOAD_NOT_READY');if(BigInt(st.bytes)!==BigInt(s.expected_bytes)||st.sha256!==(s.expected_sha256??st.sha256))throw new DomainError(400,'UPLOAD_VERIFICATION_FAILED');if(s.verified_duration&&Math.abs(Number(s.verified_duration)-st.durationSeconds)>1)throw new DomainError(400,'UPLOAD_DURATION_MISMATCH');
-  const reservation=await tx.query("SELECT reservation_id FROM storage_reservations WHERE reservation_id=$1 AND user_id=$2 AND resource_key=$3 AND requested_bytes=$4 AND status='reserved' FOR UPDATE",[s.reservation_id,scope.userId,`resource:${s.resource_id}`,s.expected_bytes]);if(!reservation.rowCount)throw new DomainError(409,'STORAGE_RESERVATION_NOT_ACTIVE');
-  await tx.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,source_scene,file_name,mime_type,size_bytes,duration_seconds,sha256,object_key,object_version,storage_driver,storage_bucket,status,processing_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$1,$11,$12,$13,'ready','inspection_pending')`,[s.resource_id,s.user_id,s.workspace_id,s.upload_id,s.source_scene,s.file_name,s.mime_type,st.bytes,st.durationSeconds,st.sha256,st.version,s.storage_driver,s.storage_bucket]);
-  await tx.query("UPDATE upload_sessions SET status='completed',received_bytes=$2,received_sha256=$3,verified_duration=$4,object_version=$5,updated_at=now() WHERE upload_id=$1",[uploadId,st.bytes,st.sha256,st.durationSeconds,st.version]);await tx.query("UPDATE storage_reservations SET status='confirmed',confirmed_bytes=$2,updated_at=now() WHERE reservation_id=$1 AND status='reserved'",[s.reservation_id,st.bytes]);
-  await storageJob(tx,s.user_id,s.workspace_id,'inspect',s.resource_id);const q=await tx.query('SELECT * FROM resources WHERE resource_id=$1',[s.resource_id]);return {uploadId,status:'completed',resource:dto(q.rows[0])};});});}
+ readonly uploads:TemporaryUploadStore;
+ private readonly ownsUploads:boolean;
+ constructor(readonly pool:pg.Pool,readonly config:AppConfig,storage?:StoragePort,uploads?:TemporaryUploadStore){
+  this.storage=storage??storageFor(config);
+  this.uploads=uploads??new RedisTemporaryUploads(config);
+  this.ownsUploads=!uploads;
+ }
+ async close(){if(this.ownsUploads)await this.uploads.close();}
+ private validate(input:UploadInput){
+  if(!input.fileName||input.fileName.length>120||/[\\/\0]/.test(input.fileName)||
+   !/^[-\w!#$&^.+]+\/[-\w!#$&^.+]+$/u.test(input.mimeType)||input.mimeType.length>128||
+   input.sizeBytes<=0n||input.sizeBytes>BigInt(Math.min(this.config.maxUploadBytes,this.config.uploadHardMaxBytes)))
+   throw new DomainError(400,'UPLOAD_METADATA_INVALID');
+ }
+ private direct(){
+  const storage=this.storage;
+  if(this.config.storageDriver!=='aliyun-oss'||!this.config.storageAliyunOss||!storage.beginUpload||!storage.signUploadPart||
+   !storage.inspectUploadPart||!storage.completeUpload||!storage.abortUpload||!storage.head)
+   throw new DomainError(503,'DIRECT_UPLOAD_NOT_CONFIGURED');
+  return {
+   begin:storage.beginUpload.bind(storage),sign:storage.signUploadPart.bind(storage),
+   inspect:storage.inspectUploadPart.bind(storage),complete:storage.completeUpload.bind(storage),
+  };
+ }
+ private async authorize(client:pg.PoolClient,scope:Scope,workspaceId?:string){
+  await assertScope(client,scope);
+  if(workspaceId&&!(await client.query("SELECT 1 FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready'",[workspaceId,scope.userId])).rowCount)
+   throw new DomainError(404,'WORKSPACE_NOT_FOUND');
+ }
+ private async owned(client:pg.PoolClient,scope:Scope,id:string,workspaceId?:string){
+  if(!uuid(id))throw new DomainError(400,'UPLOAD_ID_INVALID');
+  await this.authorize(client,scope,workspaceId);
+  const upload=await this.uploads.get(id);
+  if(!upload||upload.userId!==scope.userId)throw new DomainError(404,'UPLOAD_NOT_FOUND');
+  if(workspaceId&&upload.workspaceId!==workspaceId)throw new DomainError(409,'UPLOAD_WORKSPACE_CONFLICT');
+  await this.authorize(client,scope,upload.workspaceId);
+  if(upload.storageDriver!==this.config.storageDriver||upload.storageBucket!==this.config.storageAliyunOss?.bucket)
+   throw new DomainError(503,'DIRECT_UPLOAD_NOT_CONFIGURED');
+  return upload;
+ }
+ private active(upload:TemporaryUpload){
+  if(upload.expiresAt<=Date.now())throw new DomainError(410,'UPLOAD_TOKEN_EXPIRED');
+  if(upload.status==='cancelled')throw new DomainError(409,'UPLOAD_CANCELLED');
+ }
+ async createUpload(scope:Scope,input:UploadInput,key:string){
+  this.validate(input);const direct=this.direct();
+  // Temporary files have no account-space charge or reservation. A later
+  // business claim checks permanent capacity and records usage in its transaction.
+  const admitted=await transaction(this.pool,async tx=>{
+   await assertScope(tx,scope);
+   if(!(await tx.query("SELECT id FROM users WHERE id=$1 AND status='active' AND deleted_at IS NULL FOR SHARE",[scope.userId])).rowCount)
+    throw new DomainError(401,'UNAUTHORIZED');
+   const wid=input.workspaceId??(await tx.query<{id:string}>("SELECT id FROM workspaces WHERE user_id=$1 AND is_default AND state='ready'",[scope.userId])).rows[0]?.id;
+   if(!wid||!uuid(wid))throw new DomainError(409,'WORKSPACE_NOT_READY');
+   if(!(await tx.query("SELECT id FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready' FOR SHARE",[wid,scope.userId])).rowCount)throw new DomainError(404,'WORKSPACE_NOT_FOUND');
+   return this.uploads.admit({userId:scope.userId,workspaceId:wid,fileName:input.fileName,mimeType:input.mimeType.toLowerCase(),sizeBytes:Number(input.sizeBytes),storageDriver:'aliyun-oss',storageBucket:this.config.storageAliyunOss!.bucket},key);
+  });
+  return withUploadLock(this.pool,admitted.id,async client=>{
+   const upload=await this.owned(client,scope,admitted.id);
+   this.active(upload);
+   if(upload.status==='completed')throw new DomainError(409,'UPLOAD_ALREADY_COMPLETED');
+   if(!upload.remoteUploadId){
+    try{
+     upload.remoteUploadId=await direct.begin(upload.id,upload.mimeType,upload.id);
+     await this.uploads.save(upload);
+    }catch(error){throw new DomainError(503,'UPLOAD_INITIALIZATION_UNAVAILABLE',false,{cause:error});}
+   }
+   await this.authorize(client,scope,upload.workspaceId);
+   const seconds=Math.max(1,Math.min(3600,Math.floor((upload.expiresAt-Date.now())/1000)));
+   const signed=await direct.sign(upload.id,upload.remoteUploadId,upload.mimeType,upload.sizeBytes,seconds);
+   return {uploadId:upload.id,resourceId:upload.id,uploadUrl:signed.url,method:'PUT' as const,headers:signed.headers,
+    expiresAt:new Date(Date.now()+seconds*1000).toISOString(),retentionExpiresAt:new Date(upload.expiresAt).toISOString()};
+  });
+ }
+ async recover(scope:Scope,id:string){return transaction(this.pool,async tx=>{
+  if(!uuid(id))throw new DomainError(400,'UPLOAD_ID_INVALID');
+  await this.authorize(tx,scope);
+  const resource=(await tx.query("SELECT r.* FROM resources r JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready' WHERE r.upload_id=$1 AND r.user_id=$2",[id,scope.userId])).rows[0];
+  if(resource)return {uploadId:id,resourceId:resource.resource_id,status:'claimed',expiresAt:null,receivedBytes:Number(resource.size_bytes),errorCode:null};
+  const upload=await this.owned(tx,scope,id);
+  return {uploadId:id,resourceId:id,status:upload.expiresAt<=Date.now()?'expired':upload.status,expiresAt:new Date(upload.expiresAt).toISOString(),receivedBytes:upload.object?.bytes??0,errorCode:null};
+ });}
+ async complete(scope:Scope,id:string,key:string,workspaceId?:string){
+  if(!key)throw new DomainError(400,'IDEMPOTENCY_KEY_REQUIRED');
+  const direct=this.direct();
+  if(!uuid(id))throw new DomainError(400,'UPLOAD_ID_INVALID');
+  return withUploadLock(this.pool,id,async client=>{
+   await this.authorize(client,scope,workspaceId);
+   const resource=(await client.query("SELECT r.* FROM resources r JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready' WHERE r.upload_id=$1 AND r.user_id=$2",[id,scope.userId])).rows[0];
+   if(resource){
+    if(workspaceId&&resource.workspace_id!==workspaceId)throw new DomainError(409,'UPLOAD_WORKSPACE_CONFLICT');
+    if(resource.status!=='ready')throw new DomainError(409,'RESOURCE_NOT_READY');
+    return {uploadId:id,status:'completed' as const,resource:dto(resource)};
+   }
+   const upload=await this.owned(client,scope,id,workspaceId);this.active(upload);
+   if(upload.status==='completed')return {uploadId:id,status:'completed' as const,resource:temporaryDto(upload)};
+   if(!upload.remoteUploadId)throw new DomainError(409,'UPLOAD_NOT_READY');
+   let object:ObjectMetadata|undefined;
+   try{
+    // A previous Complete may have succeeded while its response was lost.
+    if(upload.completionStartedAt)object=await findUploadedObject(this.storage,id);
+    if(!object){
+     const part=await direct.inspect(id,upload.remoteUploadId);
+     if(part.bytes!==upload.sizeBytes)throw new DomainError(400,'UPLOAD_SIZE_MISMATCH');
+     upload.completionStartedAt=Date.now();await this.uploads.save(upload);
+     try{await direct.complete(id,upload.remoteUploadId,part.etag);}
+     catch(error){
+      object=await findUploadedObject(this.storage,id);
+      if(!object)throw error;
+     }
+     object??=await findUploadedObject(this.storage,id);
+    }
+    if(!object)throw new DomainError(409,'UPLOAD_NOT_READY');
+    validateUploadedObject(upload,object);
+    await this.authorize(client,scope,upload.workspaceId);
+    this.active(upload);
+    upload.object=object;upload.status='completed';await this.uploads.save(upload);
+   }catch(error){
+    if(error instanceof DomainError)throw error;
+    if((error as {code?:string})?.code==='UPLOAD_PARTS_INVALID')throw new DomainError(409,'UPLOAD_PARTS_INVALID',false,{cause:error});
+    throw new DomainError(409,'UPLOAD_NOT_READY',false,{cause:error});
+   }
+   return {uploadId:id,status:'completed' as const,resource:temporaryDto(upload)};
+  });
+ }
+ async cancel(scope:Scope,id:string,key:string){
+  if(!key)throw new DomainError(400,'IDEMPOTENCY_KEY_REQUIRED');
+  if(!uuid(id))throw new DomainError(400,'UPLOAD_ID_INVALID');
+  return withUploadLock(this.pool,id,async client=>{
+   await this.authorize(client,scope);
+   if((await client.query('SELECT 1 FROM resources WHERE resource_id=$1 AND user_id=$2',[id,scope.userId])).rowCount)throw new DomainError(409,'UPLOAD_ALREADY_CLAIMED');
+   const upload=await this.owned(client,scope,id);
+   upload.status='cancelled';await this.uploads.save(upload);
+   return {uploadId:id,status:'cancel_pending' as const};
+  });
+ }
  async playbacks(scope:Scope,ids:string[],workspaceId?:string){
   const unique=[...new Set(ids)];
   if(unique.some(id=>!uuid(id))||unique.length>1000)throw new DomainError(400,'RESOURCE_IDS_INVALID');
   if(!unique.length)return [];
-  const rows=await transaction(this.pool,async tx=>{
+  if(this.config.storageDriver!=='aliyun-oss'||!this.config.storageAliyunOss||!this.storage.signUrl)throw new DomainError(503,'DIRECT_READ_NOT_CONFIGURED');
+  const signUrl=this.storage.signUrl.bind(this.storage),bucket=this.config.storageAliyunOss.bucket;
+  const {rows,permanent}=await transaction(this.pool,async tx=>{
    await assertScope(tx,scope);
-   return (await tx.query<{resource_id:string;mime_type:string;file_name:string}>(`SELECT r.resource_id,r.mime_type,r.file_name FROM resources r
+   const rows=(await tx.query<{resource_id:string;mime_type:string;file_name:string;object_key:string;object_version:string}>(`SELECT r.resource_id,r.mime_type,r.file_name,r.object_key,r.object_version FROM resources r
     JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready'
-    WHERE r.resource_id=ANY($1::uuid[]) AND r.user_id=$2 AND r.status='ready' AND ($3::uuid IS NULL OR r.workspace_id=$3)`,[unique,scope.userId,workspaceId??null])).rows;
+    WHERE r.resource_id=ANY($1::uuid[]) AND r.user_id=$2 AND r.status='ready' AND r.storage_driver='aliyun-oss' AND r.storage_bucket=$4 AND ($3::uuid IS NULL OR r.workspace_id=$3)`,[unique,scope.userId,workspaceId??null,bucket])).rows;
+   // A deleting/deleted resource must never become readable through an old Redis receipt.
+   const permanent=(await tx.query<{resource_id:string}>('SELECT resource_id FROM resources WHERE resource_id=ANY($1::uuid[])',[unique])).rows.map(row=>row.resource_id);
+   return {rows,permanent};
   });
+  const registered=new Set(permanent);
+  const pending=(await Promise.all(unique.filter(id=>!registered.has(id)).map(id=>this.uploads.get(id))))
+   .filter((upload):upload is TemporaryUpload=>Boolean(upload&&upload.userId===scope.userId&&upload.status==='completed'&&upload.object&&upload.expiresAt>Date.now()
+    &&upload.storageDriver==='aliyun-oss'&&upload.storageBucket===bucket&&(!workspaceId||upload.workspaceId===workspaceId)));
+  if(pending.length){
+   const workspaces=new Set((await this.pool.query<{id:string}>("SELECT id FROM workspaces WHERE id=ANY($1::uuid[]) AND user_id=$2 AND state='ready'",[[...new Set(pending.map(upload=>upload.workspaceId))],scope.userId])).rows.map(row=>row.id));
+   for(const upload of pending)if(workspaces.has(upload.workspaceId))rows.push({resource_id:upload.id,mime_type:upload.mimeType,file_name:upload.fileName,object_key:upload.id,object_version:upload.object!.version});
+  }
   const exp=Date.now()+15*60_000;
-  return rows.map(row=>({resourceId:row.resource_id,url:`${this.config.appPublicBaseUrl}/api/v1/media/resources/${row.resource_id}/object?playbackToken=${encodeURIComponent(this.cap(row.resource_id,exp))}`,mimeType:row.mime_type,fileName:row.file_name,expiresAt:new Date(exp).toISOString()}));
+  return Promise.all(rows.map(async row=>({resourceId:row.resource_id,url:await signUrl(row.object_key,900,{contentType:row.mime_type,contentDisposition:`inline; filename="${row.file_name.replace(/[^A-Za-z0-9._-]/gu,'_')}"`,contentEncoding:'identity',version:row.object_version}),mimeType:row.mime_type,fileName:row.file_name,expiresAt:new Date(exp).toISOString()})));
  }
  async playback(scope:Scope,id:string){
   if(!uuid(id))throw new DomainError(404,'RESOURCE_NOT_FOUND');
@@ -54,6 +183,5 @@ export class StorageService {
   if(!result)throw new DomainError(404,'RESOURCE_NOT_FOUND');
   return result;
  }
- async download(id:string,token:string,range?:string){if(!uuid(id)||!this.verifyCap(id,token))throw new DomainError(401,'PLAYBACK_TOKEN_INVALID');const r=await this.pool.query("SELECT * FROM resources WHERE resource_id=$1 AND status='ready'",[id]);if(!r.rows[0])throw new DomainError(404,'RESOURCE_NOT_FOUND');const x=r.rows[0],size=Number(x.size_bytes);let start=0,end=size-1;if(range){const m=/^bytes=(\d*)-(\d*)$/.exec(range);if(!m||(!m[1]&&!m[2]))throw Object.assign(new DomainError(416,'RANGE_INVALID'),{size});if(m[1])start=Number(m[1]);if(m[2])end=Number(m[2]);else if(m[1])end=size-1;if(!m[1]){const suffix=Number(m[2]);if(!suffix)throw Object.assign(new DomainError(416,'RANGE_INVALID'),{size});start=Math.max(0,size-suffix);end=size-1;}if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||start>=size||start>end){throw Object.assign(new DomainError(416,'RANGE_INVALID'),{size});}end=Math.min(end,size-1);}return {stream:await this.storage.read(x.object_key,{start,end},x.object_version),mime:x.mime_type,size,start,end,fileName:x.file_name};}
  async remove(scope:Scope,workspaceId:string,id:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return idempotent(tx,this.config.appTokenSecret!,scope.userId,'media.delete',key,{workspaceId,id},async()=>{const r=await tx.query("SELECT * FROM resources WHERE resource_id=$1 AND user_id=$2 AND workspace_id=$3 FOR UPDATE",[id,scope.userId,workspaceId]);if(!r.rows[0])throw new DomainError(404,'RESOURCE_NOT_FOUND');if(['deleting','deleted'].includes(r.rows[0].status))return {resourceId:id,workspaceId,status:r.rows[0].status==='deleted'?'deleted':'delete_pending'};if((await tx.query('SELECT 1 FROM resource_refs WHERE resource_id=$1 LIMIT 1',[id])).rowCount)throw new DomainError(409,'RESOURCE_REFERENCED');await tx.query("UPDATE resources SET status='deleting' WHERE resource_id=$1",[id]);await storageJob(tx,scope.userId,workspaceId,'delete',id);return {resourceId:id,workspaceId,status:'delete_pending'};});});}
 }

@@ -86,7 +86,7 @@ export function registerAdminRoutes(
   response:{200:Envelope(NodeSchema),...errors},
  }},async req=>{const b=req.body as {revision:number;node:ProcessingNode};if(b.node.id!==(req.params as {nodeId:string}).nodeId)throw new DomainError(400,'PROCESSING_NODE_INVALID');return success(await configuration.nodes.update(b.node,b.revision,scope(req),req.id),req.id);});
  app.post('/admin/api/v1/processing-nodes/:nodeId/start',{preHandler:[auth,csrf],schema:{params:Type.Object({nodeId:Id},Strict),response:{202:Envelope(Type.Object({taskId:Id,state:Type.String()})),...errors,503:ErrorSchema}}},async(req,reply)=>{
-  reply.code(202);return success(await configuration.nodeJobs.start((req.params as {nodeId:string}).nodeId,scope(req),req.id),req.id);
+  reply.code(202);return success(await configuration.settings.run(()=>configuration.nodeJobs.start((req.params as {nodeId:string}).nodeId,scope(req),req.id)),req.id);
  });
  const nodeStatus=async(nodeId:string)=>{
   const [observed,startup]=await Promise.all([configuration.nodes.observe(nodeId),configuration.nodeJobs.status(nodeId)]);
@@ -104,18 +104,10 @@ export function registerAdminRoutes(
  });
  const trials=configuration.trials;
  const trialAuth=async(req:FastifyRequest)=>{await auth(req);await trials.authorize(scope(req));};
- const trialErrors={...errors,413:ErrorSchema,503:ErrorSchema};
+ const trialErrors={...errors,503:ErrorSchema};
  const trialResponse={200:Envelope(Type.Unknown()),202:Envelope(Type.Unknown()),...trialErrors};
  app.get('/admin/api/v1/document-trials/capabilities',{preHandler:trialAuth,schema:{response:trialResponse}},async req=>success(await trials.capabilities(),req.id));
  app.post('/admin/api/v1/document-trials',{preHandler:[trialAuth,csrf],schema:{body:Type.Object({fileUrl:Text(8192)},Strict),response:trialResponse}},async(req,reply)=>{reply.code(202);return success(await trials.start(scope(req),{url:(req.body as {fileUrl:string}).fileUrl}),req.id);});
- void app.register(async uploads=>{
-  uploads.removeAllContentTypeParsers();uploads.addContentTypeParser('application/octet-stream',(_req,payload,done)=>done(null,payload));
-  uploads.post('/admin/api/v1/document-trials/upload',{preHandler:[trialAuth,csrf],bodyLimit:32*1024*1024,schema:{querystring:Type.Object({fileName:Text(255),mimeType:Text(128)},Strict),response:trialResponse}},async(req,reply)=>{
-   const metadata=req.query as {fileName:string;mimeType:string};const {maxBytes}=await trials.capabilities();const parts:Buffer[]=[];let bytes=0;
-   for await(const part of req.body as NodeJS.ReadableStream){const chunk=Buffer.from(part);bytes+=chunk.length;if(bytes>maxBytes)throw new DomainError(413,'ADMIN_TRIAL_FILE_TOO_LARGE');parts.push(chunk);}
-   reply.code(202);return success(await trials.start(scope(req),{file:{bytes:Buffer.concat(parts),fileName:metadata.fileName,contentType:metadata.mimeType,finalUrl:''}}),req.id);
-  });
- });
  const trialParams=Type.Object({trialId:Id},Strict);
  app.get('/admin/api/v1/document-trials/:trialId',{preHandler:trialAuth,schema:{params:trialParams,response:trialResponse}},async req=>success(trials.status(scope(req),(req.params as {trialId:string}).trialId),req.id));
  app.get('/admin/api/v1/document-trials/:trialId/events',{preHandler:trialAuth,schema:{params:trialParams}},async(req,reply)=>{

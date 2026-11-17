@@ -12,6 +12,10 @@ const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE
 const root=poolFor(loadConfig('migrate',{...env,DATABASE_URL:migrationUrl}));
 const pool=poolFor(cfg);const billing=new BillingService(pool,cfg);
 async function fixture(){return insertFixtureUser(root);}
+async function storageCounters(userId:string){
+ const row=(await root.query<{storage_used_bytes:string;storage_reserved_bytes:string}>('SELECT storage_used_bytes,storage_reserved_bytes FROM users WHERE id=$1',[userId])).rows[0]!;
+ return {used:BigInt(row.storage_used_bytes),reserved:BigInt(row.storage_reserved_bytes)};
+}
 describe('P04 billing ledger',()=>{
  beforeAll(async()=>{await migrate(loadConfig('migrate',{...env,DATABASE_URL:migrationUrl}));});
  afterAll(async()=>{await Promise.all([root.end(),pool.end()]);});
@@ -56,7 +60,7 @@ describe('P04 billing ledger',()=>{
  it('requires owned task and reservation references at billing write boundaries',async()=>{
   const userId=await fixture(),otherUserId=await fixture(),workspaceId=randomUUID(),taskId=randomUUID();
   await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'billing-reference-fixture',true,$3)",[workspaceId,userId,randomUUID()]);
-  await root.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state) VALUES($1,$2,$3,'demo.digest','content','queued')",[taskId,userId,workspaceId]);
+  await root.query("INSERT INTO tasks(trace_id,id,user_id,workspace_id,kind,queue,state) VALUES(gen_random_uuid()::text,$1,$2,$3,'demo.digest','content','queued')",[taskId,userId,workspaceId]);
   await expect(billing.reserveCredits({userId:otherUserId,taskId,reservationKey:randomUUID(),requestedCredits:1n})).rejects.toMatchObject({code:'TASK_NOT_FOUND'});
   await expect(billing.reserveCredits({userId,taskId:randomUUID(),reservationKey:randomUUID(),requestedCredits:1n})).rejects.toMatchObject({code:'TASK_NOT_FOUND'});
   const runId=randomUUID(),reservation=await billing.reserveCredits({userId,taskId,runId,reservationKey:randomUUID(),requestedCredits:1n});
@@ -82,5 +86,52 @@ describe('P04 billing ledger',()=>{
   expect(usage.accountedCredits).toBe(2);expect(usage.measurements.map(x=>x.usageKind)).toEqual(['owned']);
   expect((await root.query('SELECT user_id FROM run_usage WHERE run_id=$1',[runId])).rows[0].user_id).toBe(userId);
  });
- it('storage reservation confirms or releases without charging unknown bytes',async()=>{const user=await fixture();const r=await billing.reserveStorage({userId:user,resourceKey:`file:${randomUUID()}`,requestedBytes:100n});expect(r.status).toBe('reserved');expect((await billing.confirmStorage(r.reservationId,60n)).confirmedBytes).toBe(60);const s=await billing.reserveStorage({userId:user,resourceKey:`file:${randomUUID()}`,requestedBytes:20n});expect((await billing.releaseStorage(s.reservationId)).status).toBe('released');});
+ it('storage confirmation converts only actual bytes to usage and releases the remaining reservation',async()=>{
+  const user=await fixture();
+  const r=await billing.reserveStorage({userId:user,resourceKey:`file:${randomUUID()}`,requestedBytes:100n});
+  expect(r.status).toBe('reserved');expect(await storageCounters(user)).toEqual({used:0n,reserved:100n});
+  expect((await billing.confirmStorage(r.reservationId,60n)).confirmedBytes).toBe(60);
+  expect(await storageCounters(user)).toEqual({used:60n,reserved:0n});
+  const s=await billing.reserveStorage({userId:user,resourceKey:`file:${randomUUID()}`,requestedBytes:20n});
+  expect(await storageCounters(user)).toEqual({used:60n,reserved:20n});
+  expect((await billing.releaseStorage(s.reservationId)).status).toBe('released');
+  expect(await storageCounters(user)).toEqual({used:60n,reserved:0n});
+  await expect(billing.releaseStorage(r.reservationId)).rejects.toMatchObject({code:'STORAGE_RESERVATION_NOT_ACTIVE'});
+  expect(await storageCounters(user)).toEqual({used:60n,reserved:0n});
+ });
+ it('counts concurrent storage reservation/confirmation retries once and never charges released bytes',async()=>{
+  const user=await fixture(),input={userId:user,resourceKey:`file:${randomUUID()}`,requestedBytes:100n};
+  const reservations=await Promise.all(Array.from({length:6},()=>billing.reserveStorage(input)));
+  expect(new Set(reservations.map(x=>x.reservationId)).size).toBe(1);
+  expect(await storageCounters(user)).toEqual({used:0n,reserved:100n});
+  const id=reservations[0]!.reservationId;
+  const confirmations=await Promise.all(Array.from({length:6},()=>billing.confirmStorage(id,60n)));
+  expect(confirmations.every(x=>x.confirmedBytes===60)).toBe(true);
+  expect(await storageCounters(user)).toEqual({used:60n,reserved:0n});
+  expect((await billing.reserveStorage(input)).status).toBe('confirmed');
+  const next=await billing.reserveStorage({userId:user,resourceKey:`file:${randomUUID()}`,requestedBytes:40n});
+  await Promise.all(Array.from({length:6},()=>billing.releaseStorage(next.reservationId)));
+  expect(await storageCounters(user)).toEqual({used:60n,reserved:0n});
+ });
+ it('serializes competing confirm/release transitions without negative or duplicate counters',async()=>{
+  const user=await fixture(),r=await billing.reserveStorage({userId:user,resourceKey:`file:${randomUUID()}`,requestedBytes:100n});
+  const results=await Promise.allSettled([billing.confirmStorage(r.reservationId,60n),billing.releaseStorage(r.reservationId)]);
+  expect(results.filter(x=>x.status==='fulfilled')).toHaveLength(1);
+  expect(results.filter(x=>x.status==='rejected')).toEqual([expect.objectContaining({reason:expect.objectContaining({code:'STORAGE_RESERVATION_NOT_ACTIVE'})})]);
+  const row=(await root.query('SELECT status,confirmed_bytes FROM storage_reservations WHERE reservation_id=$1',[r.reservationId])).rows[0];
+  expect(await storageCounters(user)).toEqual({used:row.status==='confirmed'?60n:0n,reserved:0n});
+ });
+ it('rolls back counters and reservation rows together when admission or confirmation fails',async()=>{
+  const user=await fixture(),resourceKey=`file:${randomUUID()}`;
+  // Serialization rejects this otherwise valid bigint after both SQL writes.
+  await expect(billing.reserveStorage({userId:user,resourceKey,requestedBytes:BigInt(Number.MAX_SAFE_INTEGER)+1n})).rejects.toMatchObject({code:'BILLING_AMOUNT_TOO_LARGE'});
+  expect(await storageCounters(user)).toEqual({used:0n,reserved:0n});
+  expect((await root.query('SELECT 1 FROM storage_reservations WHERE user_id=$1 AND resource_key=$2',[user,resourceKey])).rowCount).toBe(0);
+  const r=await billing.reserveStorage({userId:user,resourceKey,requestedBytes:100n});
+  await expect(billing.confirmStorage(r.reservationId,101n)).rejects.toMatchObject({code:'STORAGE_RESERVATION_EXCEEDED'});
+  expect(await storageCounters(user)).toEqual({used:0n,reserved:100n});
+  expect((await root.query('SELECT status FROM storage_reservations WHERE reservation_id=$1',[r.reservationId])).rows[0].status).toBe('reserved');
+  await billing.releaseStorage(r.reservationId);
+  expect(await storageCounters(user)).toEqual({used:0n,reserved:0n});
+ });
 });

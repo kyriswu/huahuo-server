@@ -10,6 +10,8 @@ import { registerIdentityRoutes } from '../modules/identity/routes.js';
 import { BillingService } from '../modules/billing/service.js';
 import { registerBillingRoutes } from '../modules/billing/routes.js';
 import { StorageService } from '../modules/storage/service.js';
+import { RedisTemporaryUploads } from '../modules/storage/temporary-uploads.js';
+import { ResourceClaims } from '../modules/storage/resource-claims.js';
 import { registerAssetRoutes } from '../modules/assets/routes.js';
 import { AssetService } from '../modules/assets/service.js';
 import { registerStorageRoutes } from '../modules/storage/routes.js';
@@ -32,23 +34,26 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  app.addHook('onRequest',(req,_reply,done)=>{const path=req.routeOptions.url;if(path==='/internal/v1/rag/query'||path?.startsWith('/api/v1/')&&!path.startsWith('/api/v1/auth/')&&!path.startsWith('/api/v1/document-parser/callbacks/'))void settings.enter(done);else done();});
  const callbacks=new DocumentCallbacks(pool,options.config);registerDocumentCallbacks(app,callbacks);
  if(!dependencies.pool)app.addHook('onClose',async()=>{await pool.end();});
+ const uploads=new RedisTemporaryUploads(options.config);
+ const resourceClaims=new ResourceClaims(options.config,uploads);
+ app.addHook('onClose',async()=>{await uploads.close();});
  const identity=new IdentityService(pool,options.config,options);
- registerIdentityRoutes(app,identity,new WorkspaceService(pool,options.config.appTokenSecret!));
+ registerIdentityRoutes(app,identity,new WorkspaceService(pool,options.config.appTokenSecret!,resourceClaims));
  registerGatewayAuthRoute(app,identity);
  const billing=new BillingService(pool,options.config);
  if (options.config.billingMode !== 'disabled') registerBillingRoutes(app,billing);
- const storageService = new StorageService(pool,options.config);
+ const storageService = new StorageService(pool,options.config,undefined,uploads);
  registerStorageRoutes(app,storageService);
  registerIngestionRoutes(app,new NoteIndexService(pool,options.config));
- const textIngestion=new TextIngestionService(pool,options.config);
- registerTextIngestionRoutes(app,textIngestion);
+ const textIngestion=new TextIngestionService(pool,options.config,resourceClaims);
+ registerTextIngestionRoutes(app,textIngestion,storageService);
  const imageLinks=new RagImageLinks(pool,options.config,storageService);
  const ragQuery = new RagQueryService(pool,options.config,{
   ...options.ragQueryDependencies,
   resolveImages: (scope,images)=>imageLinks.resolve(scope,images),
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
- registerAssetRoutes(app,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery),storageService);
- registerRagRoutes(app,new RagIngestionRepository(pool,options.config),storageService.storage,ragQuery);
+ registerAssetRoutes(app,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService);
+ registerRagRoutes(app,new RagIngestionRepository(pool,options.config,resourceClaims),storageService.storage,ragQuery);
  registerTaskRoutes(app,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
 }

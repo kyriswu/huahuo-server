@@ -1,10 +1,11 @@
-/** Reranker contract and stable-key deduplication shared by RAG queries.
+/** Reranker contract shared by RAG queries.
  *
  * These helpers deliberately know nothing about PostgreSQL, Milvus, or the
  * document parser.  The query service is responsible for applying workspace,
  * active-index, and ready-state filters before passing candidates here.
  */
 
+import {traceHeaders} from '../../lib/trace.js';
 export interface RagSearchCandidate {
   chunkKey: string;
   documentKey: string;
@@ -21,20 +22,6 @@ export interface RagSearchCandidate {
   embeddingProfile?: string;
   indexBuildId?: string;
   metadata?: Record<string, unknown>;
-}
-
-function finiteScore(value: number | undefined): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-/** Remove duplicate logical chunks, preferring ready/active results upstream. */
-export function dedupeByChunkKey<T extends { chunkKey: string; rrfScore?: number; rerankScore?: number }>(rows: T[]): T[] {
-  const byKey = new Map<string, T>();
-  for (const row of rows) {
-    const current = byKey.get(row.chunkKey);
-    if (!current || finiteScore(row.rerankScore ?? row.rrfScore) > finiteScore(current.rerankScore ?? current.rrfScore)) byKey.set(row.chunkKey, row);
-  }
-  return [...byKey.values()];
 }
 
 export interface RerankAdapter {
@@ -98,10 +85,10 @@ export class HttpRerankAdapter implements RerankAdapter {
     try {
       const response = await (this.options.fetchImpl ?? fetch)(`${this.options.baseUrl.replace(/\/$/u, '')}/services/rerank/text-rerank/text-rerank`, {
         method: 'POST',
-        headers: {
+        headers: traceHeaders({
           'content-type': 'application/json',
           ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}),
-        },
+        }),
         body: JSON.stringify({ model: this.options.model, input: { query, documents: candidates.map((candidate) => candidate.content) }, parameters: { top_n: candidates.length } }),
         redirect: 'error',
         signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,

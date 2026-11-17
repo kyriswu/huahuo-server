@@ -31,7 +31,11 @@ export class DocumentCallbacks {
   }
   if(row.task_id!==input.taskId||row.fingerprint!==input.fingerprint||canonical(row.contexts)!==canonical(input.contexts))throw new DomainError(409,'DOCUMENT_CALLBACK_CONTEXT_CONFLICT');
   const token=unseal<string>(row.token_sealed,secret);
-  return {row,url:new URL(`api/v1/document-parser/callbacks/${row.id}/${token}`,baseUrl+'/').href};
+  const url=new URL(`api/v1/document-parser/callbacks/${row.id}/${token}`,baseUrl+'/');
+  const task=(await tx.query<{trace_id:string}>('SELECT trace_id FROM tasks WHERE id=$1',[row.task_id])).rows[0];
+  if(!task)throw new DomainError(409,'DOCUMENT_CALLBACK_CONTEXT_CONFLICT');
+  url.searchParams.set('traceId',task.trace_id);
+  return {row,url:url.href};
  }
  async forRequest(requestId:string){return (await this.pool.query<CallbackInbox>('SELECT * FROM document_parse_callbacks WHERE request_id=$1',[requestId])).rows[0];}
  async bindJob(tx:pg.PoolClient,requestId:string,jobId:string){

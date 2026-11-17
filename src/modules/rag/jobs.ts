@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { Readable } from 'node:stream';
-import { createHash } from 'node:crypto';
 import type { AppConfig } from '../../config/config.js';
+import { DOCUMENT_CANONICAL_MAX_BYTES } from '../../config/document-extraction.js';
 import type { Attempt } from '../tasks/engine.js';
 import type { StoragePort } from '../storage/port.js';
 import { transaction } from '../identity/store.js';
@@ -16,7 +16,7 @@ import { indexTocBytes, type CanonicalTocItem } from './canonical-toc.js';
 import { EmbeddingError } from './adapters/embedding.js';
 import { SearchIndexError } from '../../lib/search-index/types.js';
 import { RagIngestionRepository, type RagVersionRow } from './repository.js';
-import { DocumentPreparationError, downloadSourceBytes, parseDownloadedText } from './document-preparation.js';
+import { DocumentPreparationError } from './document-preparation.js';
 import {ManagedDocumentExtractor,ManagedExtractionError,type SavedExtraction} from '../ingestion/document-extraction.js';
 import type {ExtractionDocument} from '../../integrations/document-extraction.js';
 import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
@@ -24,9 +24,13 @@ import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.j
 export class RagJobError extends Error {
   constructor(readonly code: string, message: string, readonly retryable = false, options?: { cause?: unknown }) { super(message, options); this.name = 'RagJobError'; }
 }
-function safeName(value: string): string { return value.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180) || 'document'; }
-function utf8(bytes: Uint8Array): string { try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch (error) { throw new RagJobError('RAG_TEXT_NOT_UTF8', 'Plain text source is not valid UTF-8', false, { cause: error }); } }
-async function readAll(stream: Readable): Promise<Uint8Array> { const parts: Buffer[] = []; for await (const chunk of stream) parts.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)); return new Uint8Array(Buffer.concat(parts)); }
+function utf8(bytes: Uint8Array): string { try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch (error) { throw new RagJobError('RAG_TEXT_NOT_UTF8', 'Saved canonical body is not valid UTF-8', false, { cause: error }); } }
+async function readCanonicalBytes(stream: Readable): Promise<Uint8Array> {
+  const parts: Buffer[] = [];let bytes=0;
+  try{for await(const chunk of stream){const buffer=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);bytes+=buffer.length;if(bytes>DOCUMENT_CANONICAL_MAX_BYTES)throw new RagJobError('RAG_CANONICAL_TOO_LARGE','Saved body exceeds the extraction limit');parts.push(buffer);}}
+  finally{stream.destroy();}
+  return Buffer.concat(parts);
+}
 
 export class RagIngestionJobs {
   private readonly versions: RagIngestionRepository;
@@ -47,7 +51,7 @@ export class RagIngestionJobs {
     if(attempt.task.kind==='rag.document-cleanup'){await this.cleanupDeleted(version,attempt);return {digest:version.content_hash??version.id,bytes:0};}
     if(version.deleted_at){
       const parser=(version.processing_snapshot as FileProcessingSnapshot|null)?.parser;
-      if(parser&&await this.extractor.pending(attempt))await this.extractor.parse(attempt,{bytes:new Uint8Array(),fileName:version.source_file_name,contentType:version.source_mime_type,finalUrl:version.source_url},parser,async()=>{throw new ManagedExtractionError('DOCUMENT_EXTRACTION_STALE_ATTEMPT');});
+      if(parser&&await this.extractor.pending(attempt))await this.extractor.parse(attempt,{url:version.source_url,fileName:version.source_file_name,mimeType:version.source_mime_type},parser,async()=>{throw new ManagedExtractionError('DOCUMENT_EXTRACTION_STALE_ATTEMPT');});
       await this.cleanupDeleted(version,attempt);return {digest:version.content_hash??version.id,bytes:0};
     }
     if(attempt.task.kind==='rag.toc-refresh'){
@@ -65,66 +69,23 @@ export class RagIngestionJobs {
       if(!snapshot || snapshot.version!=='file-processing' || snapshot.keyword?.mode!=='document-keyword')throw new RagJobError('RAG_PROFILE_UNAVAILABLE','Processing snapshot is unavailable');
       let canonical:string;
       let canonicalHash:string;
-      const ignoredHeadingRanges=version.processing_info?.ignoredHeadingRanges??[];
-      let storedBytes=Number(version.source_size??0);
+      const storedBytes=Number(version.source_size??0);
       if(version.canonical_content_uri&&version.content_hash){
         await this.extractor.acknowledgeCompleted(attempt);
         canonical=await this.loadCanonical(version.canonical_content_uri,version.content_hash);
         canonicalHash=version.content_hash;
-      }else if(version.mode==='structured_document'&&snapshot.parser&&await this.extractor.pending(attempt)){
+      }else{
+        if(!snapshot.parser)throw new RagJobError('DOCUMENT_EXTRACTION_SNAPSHOT_INVALID','Document parser snapshot is unavailable');
         await this.mark(version.id,'PARSING');
-        const saved=await this.extractor.parse(attempt,{bytes:new Uint8Array(),fileName:version.source_file_name,contentType:version.source_mime_type,finalUrl:version.source_url},snapshot.parser,
+        const saved=await this.extractor.parse(attempt,{url:version.source_url,fileName:version.source_file_name,mimeType:version.source_mime_type},snapshot.parser,
           async(tx,result)=>this.saveExtraction(tx,version,result));
         canonical=saved.content;canonicalHash=saved.contentHash;await this.mark(version.id,'PARSED');
-      }else{
-      if (version.mode !== 'plain_text'&&!snapshot.parser) throw new RagJobError('RAG_FILE_TYPE_UNSUPPORTED', 'Document parser is unavailable');
-      await this.mark(version.id,'DOWNLOADING');
-      const source = await this.loadSource(version);
-      const sourceHash = createHash('sha256').update(source).digest('hex');
-      if (version.source_object_key && version.source_sha256 && version.source_sha256 !== sourceHash) throw new RagJobError('RAG_SOURCE_CHANGED', 'Source bytes changed after the first successful download', false);
-      const sourceUrl=new URL(version.source_url);
-      const ownOss=this.config.storageDriver==='aliyun-oss'&&this.config.storageAliyunOss&&sourceUrl.hostname===`${this.config.storageAliyunOss.bucket}.${new URL(this.config.storageAliyunOss.endpoint).hostname}`;
-      const prefix=this.config.storageAliyunOss?.keyPrefix?.replace(/\/+$/,'');
-      const originalKey=decodeURIComponent(sourceUrl.pathname.replace(/^\//,''));
-      const reusableKey=prefix?(originalKey.startsWith(prefix+'/')?originalKey.slice(prefix.length+1):null):originalKey;
-      const sourceKey=version.source_object_key??(ownOss?reusableKey:`rag/${version.id}/source/${safeName(version.source_file_name)}`);
-      const stored=ownOss?{bytes:source.byteLength}:version.source_object_key&&version.source_sha256===sourceHash?await this.storage.stat(sourceKey!,version.source_mime_type):await this.storage.put(sourceKey!,Readable.from([Buffer.from(source)]),version.source_mime_type,this.config.rag.maxSourceBytes);
-      await this.update(version.id, { source_sha256: sourceHash, source_size: stored.bytes, source_object_key: sourceKey });
-
-      storedBytes=stored.bytes;
-      await this.mark(version.id, 'PARSING');
-      if(version.mode==='structured_document'){
-        if(!snapshot.parser)throw new RagJobError('DOCUMENT_EXTRACTION_SNAPSHOT_INVALID','Document parser snapshot is unavailable');
-        const parsed=await this.extractor.parse(attempt,{bytes:source,fileName:version.source_file_name,contentType:version.source_mime_type,finalUrl:version.source_url,cachedObjectKey:sourceKey??undefined},snapshot.parser,
-          async(tx,saved)=>this.saveExtraction(tx,version,saved));
-        canonical=parsed.content;canonicalHash=parsed.contentHash;
-      }else{
-      const parsed = await parseDownloadedText({ bytes: source, fileName: version.source_file_name, contentType: version.source_mime_type }, this.config.rag.plainTextMaxChars);
-      canonical = parsed.content;
-      canonicalHash = sha256(canonical);
-      const canonicalKey = `rag/${version.id}/canonical/${canonicalHash}.md`;
-      const savedCanonical = await this.putStable(canonicalKey, Readable.from([Buffer.from(canonical)]), parsed.format === 'markdown' ? 'text/markdown' : 'text/plain', Math.max(this.config.rag.maxSourceBytes, Buffer.byteLength(canonical)));
-      if (savedCanonical.sha256 !== canonicalHash) throw new RagJobError('RAG_CANONICAL_CHANGED', 'Saved body changed');
-      await this.update(version.id, {
-        canonical_content_uri: canonicalKey,
-        content_hash: canonicalHash,
-        toc: null,
-        toc_status: 'pending',
-        toc_error: null,
-        processing_info: JSON.stringify({ ignoredHeadingRanges }),
-        parser_provider: 'server-text',
-        parser_version: parsed.format === 'markdown' ? 'markdown-text' : 'plain-text',
-        parser_config_hash: sha256(JSON.stringify({ provider: 'server-text', format: parsed.format })),
-      });
-      }
-      await this.mark(version.id, 'PARSED');
-
       }
       await this.mark(version.id,'SEGMENTING');
       const latest=await this.versions.byId(this.pool,version.id);
       let structure: DocumentStructure | undefined;
       if(latest?.toc_status!=='ready'){
-        try{structure=await (this.dependencies.analyze??analyzeDocumentStructure)(canonical,{format:snapshot.format,ignoreHeadingRanges:ignoredHeadingRanges});await this.saveToc(version.id,canonicalHash,indexTocBytes(canonical,readingToc(canonical,structure.toc)));}
+        try{structure=await (this.dependencies.analyze??analyzeDocumentStructure)(canonical,{format:snapshot.format});await this.saveToc(version.id,canonicalHash,indexTocBytes(canonical,readingToc(canonical,structure.toc)));}
         catch{await this.failToc(version.id,canonicalHash,'STRUCTURE_OR_TOC_FAILED');}
       }
       await new KnowledgeIndexJobs(this.pool,this.config,this.dependencies.kb).indexSource({type:'file',id:version.id,revision:canonicalHash,userId:version.user_id,workspaceId:version.workspace_id,content:canonical,format:snapshot.format},attempt,snapshot.keyword);
@@ -182,7 +143,7 @@ export class RagIngestionJobs {
   }
 
   private async loadCanonical(key: string, hash: string): Promise<string> {
-    const content = utf8(await readAll(await this.storage.read(key)));
+    const content = utf8(await readCanonicalBytes(await this.storage.read(key)));
     if (sha256(content) !== hash) throw new RagJobError('RAG_CANONICAL_CHANGED', 'Saved body changed');
     return content;
   }
@@ -192,7 +153,7 @@ export class RagIngestionJobs {
     try {
       const content = await this.loadCanonical(version.canonical_content_uri, version.content_hash);
       const structure = await (this.dependencies.analyze ?? analyzeDocumentStructure)(content, {
-        format: snapshot.format, ignoreHeadingRanges: version.processing_info?.ignoredHeadingRanges ?? [],
+        format: snapshot.format,
       });
       await this.saveToc(version.id, version.content_hash, indexTocBytes(content, readingToc(content, structure.toc)));
     } catch (error) {
@@ -210,21 +171,6 @@ export class RagIngestionJobs {
       WHERE id=$1 AND content_hash=$2 AND deleted_at IS NULL AND toc_status<>'ready'`, [id, contentHash, errorCode]);
   }
 
-  private async loadSource(version: RagVersionRow): Promise<Uint8Array> {
-    if (version.source_object_key) { try { return await readAll(await this.storage.read(version.source_object_key)); } catch { /* fall through to source URL */ } }
-    return this.download(version.source_url);
-  }
-  private async download(sourceUrl: string): Promise<Uint8Array> {
-    try { return (await downloadSourceBytes(sourceUrl, this.config)).bytes; }
-    catch (error) {
-      if (error instanceof DocumentPreparationError) throw new RagJobError(error.code, error.message, error.retryable);
-      throw error;
-    }
-  }
-  private async putStable(key: string, input: Readable, mimeType: string, maxBytes: number) {
-    try { return await this.storage.stat(key, mimeType); }
-    catch { return this.storage.put(key, input, mimeType, maxBytes); }
-  }
   private async mark(id: string, status: import('./types.js').RagStage, fields: Record<string, unknown> = {}): Promise<void> { await this.update(id, { status, current_stage: status, ...fields }); }
   private async update(id: string, fields: Record<string, unknown>): Promise<void> { const entries = Object.entries(fields).filter(([, value]) => value !== undefined); if (!entries.length) return; const values: unknown[] = [id]; const sets = entries.map(([key, value], index) => { values.push(value); return `${key}=$${index + 2}`; }); await this.pool.query(`UPDATE rag_ingestion_versions SET ${sets.join(',')},updated_at=now() WHERE id=$1`, values); }
 }

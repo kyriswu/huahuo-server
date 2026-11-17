@@ -1,9 +1,11 @@
 import type pg from 'pg';
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { config } from '../helpers.js';
 import { BillingService } from '../../src/modules/billing/service.js';
 import { WorkspaceService } from '../../src/modules/workspaces/service.js';
 import { StorageService } from '../../src/modules/storage/service.js';
+import { mockOssUploadConfig } from '../support/oss-upload.js';
 
 const scope = { userId: '11111111-1111-4111-8111-111111111111', sessionId: 'session', traceId: 'trace' };
 const workspaceId = '22222222-2222-4222-8222-222222222222';
@@ -12,12 +14,11 @@ function database(activeUser: boolean) {
     // A session can have been checked before an account changes status. The
     // direct business admission lock must still reject a missing active user.
     if (sql.includes('FROM user_sessions')) return { rows: [{ id: scope.sessionId }], rowCount: 1 };
-    if (sql.includes('FROM users')) { const found=activeUser&&params[0]===scope.userId;return { rows: found ? [{ displayName: 'User', updatedAt: new Date('2026-11-05T00:00:00Z'), avatarResourceId: null }] : [], rowCount: found ? 1 : 0 }; }
+    if (sql.includes('FROM users')) { const found=activeUser&&params[0]===scope.userId;return { rows: found ? [sql.includes('storage_used_bytes') ? { storage_used_bytes: '0', storage_reserved_bytes: '0' } : { displayName: 'User', updatedAt: new Date('2026-11-05T00:00:00Z'), avatarResourceId: null }] : [], rowCount: found ? 1 : 0 }; }
     if (sql.includes('FROM workspaces')) return { rows: [{ id: workspaceId }], rowCount: 1 };
-    if (sql.includes('sum(requested_bytes)')) return { rows: [{ n: '0' }], rowCount: 1 };
     return { rows: [], rowCount: 0 };
   });
-  const client = { query, release: vi.fn() };
+  const client = Object.assign(new EventEmitter(), { query, release: vi.fn() });
   return { query, client: client as unknown as pg.PoolClient, pool: { connect: async () => client } as unknown as pg.Pool };
 }
 
@@ -43,9 +44,13 @@ describe('business admission uses the active canonical user', () => {
     const unavailable = database(false);
     await expect(new WorkspaceService(unavailable.pool, 'test-secret').getProfile(scope)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
   });
-  it('rejects upload admission before reserving quota when the active account lock is unavailable', async () => {
-    const db = database(false), service = new StorageService(db.pool, config());
-    await expect(service.createUpload(scope, { workspaceId, sourceScene: 'note_import', fileName: 'source.txt', mimeType: 'text/plain', sizeBytes: 13n, durationSeconds: 0 }, 'key')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
-    expect(db.query.mock.calls.some(([sql]) => sql.startsWith('INSERT INTO storage_reservations') || sql.startsWith('INSERT INTO upload_sessions'))).toBe(false);
+  it('rejects upload admission before initializing OSS when the active account is unavailable', async () => {
+    const db = database(false), storage = { put: vi.fn(), stat: vi.fn(), read: vi.fn(), remove: vi.fn(), head: vi.fn(),
+      beginUpload: vi.fn(), signUploadPart: vi.fn(), inspectUploadPart: vi.fn(), completeUpload: vi.fn(), abortUpload: vi.fn() };
+    const service = new StorageService(db.pool, mockOssUploadConfig(config()), storage);
+    await expect(service.createUpload(scope, { workspaceId, fileName: 'source.txt', mimeType: 'text/plain', sizeBytes: 13n }, 'key')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(db.query.mock.calls.some(([sql]) => sql.startsWith('INSERT INTO storage_reservations') || sql.startsWith('INSERT INTO resources'))).toBe(false);
+    expect(storage.beginUpload).not.toHaveBeenCalled();
+    expect(storage.signUploadPart).not.toHaveBeenCalled();
   });
 });

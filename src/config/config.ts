@@ -35,7 +35,7 @@ export interface AppConfig {
   storageQuotaBytes:number;
   tagExtractorProvider: 'deterministic' | 'disabled' | 'llm' | 'dify';
   storageS3?: { endpoint:string; region:string; bucket:string; accessKeyId:string; secretAccessKey:string; maxBytes:number };
-  storageAliyunOss?: { endpoint:string; region:string; bucket:string; accessKeyId:string; accessKeySecret:string; secure:boolean; timeoutMs:number; keyPrefix?:string; maxBytes:number };
+  storageAliyunOss?: { endpoint:string; publicEndpoint?:string; region:string; bucket:string; accessKeyId:string; accessKeySecret:string; secure:boolean; timeoutMs:number; keyPrefix?:string; maxBytes:number };
   milvus: MilvusConfig;
   rag: RagConfig;
   kb: { noteEnabled: boolean; noteCollection: string; documentCollection: string };
@@ -56,9 +56,7 @@ export interface MilvusConfig {
 export interface RagConfig {
   enabled: boolean;
   sourceAllowedHosts: string[];
-  maxSourceBytes: number;
   plainTextMaxChars: number;
-  downloadTimeoutMs: number;
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
   embeddingModel: string;
@@ -160,9 +158,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   const rag: RagConfig = {
     enabled: true,
     sourceAllowedHosts: csv('RAG_SOURCE_ALLOWED_HOSTS'),
-    maxSourceBytes: 200*1024*1024,
     plainTextMaxChars: 50_000,
-    downloadTimeoutMs: 120_000,
     ...(env.RAG_EMBEDDING_BASE_URL?.trim() ? { embeddingBaseUrl: env.RAG_EMBEDDING_BASE_URL.trim() } : {}),
     ...(env.RAG_EMBEDDING_API_KEY?.trim() ? { embeddingApiKey: env.RAG_EMBEDDING_API_KEY.trim() } : {}),
     embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || NOTE_EMBEDDING_MODEL,
@@ -202,7 +198,11 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   let storageS3:AppConfig['storageS3'];
   if(storageDriver==='s3'&&['api-server','worker'].includes(role))storageS3={endpoint:url('STORAGE_S3_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_S3_REGION??'us-east-1',bucket:required('STORAGE_S3_BUCKET'),accessKeyId:required('STORAGE_S3_ACCESS_KEY_ID'),secretAccessKey:required('STORAGE_S3_SECRET_ACCESS_KEY'),maxBytes:uploadHardMaxBytes};
   let storageAliyunOss:AppConfig['storageAliyunOss'];
-  if(storageDriver==='aliyun-oss'&&['api-server','worker'].includes(role))storageAliyunOss={endpoint:url('STORAGE_ALIYUN_OSS_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),region:env.STORAGE_ALIYUN_OSS_REGION??'cn-beijing',bucket:required('STORAGE_ALIYUN_OSS_BUCKET'),accessKeyId:required('ALIYUN_RAM_ACCESS_KEY_ID'),accessKeySecret:required('ALIYUN_RAM_ACCESS_KEY_SECRET'),secure:env.STORAGE_ALIYUN_OSS_SECURE!=='false',timeoutMs:integer('STORAGE_ALIYUN_OSS_TIMEOUT_MS',120000,1000,600000),...(env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim()?{keyPrefix:env.STORAGE_ALIYUN_OSS_KEY_PREFIX.trim()}:{}),maxBytes:uploadHardMaxBytes};
+  if(storageDriver==='aliyun-oss'&&['api-server','worker'].includes(role))storageAliyunOss={endpoint:url('STORAGE_ALIYUN_OSS_ENDPOINT',appEnv==='production'?['https:']:['http:','https:']),...(env.STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT?.trim()?{publicEndpoint:url('STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT',['https:'])}:{}),region:env.STORAGE_ALIYUN_OSS_REGION??'cn-beijing',bucket:required('STORAGE_ALIYUN_OSS_BUCKET'),accessKeyId:required('ALIYUN_RAM_ACCESS_KEY_ID'),accessKeySecret:required('ALIYUN_RAM_ACCESS_KEY_SECRET'),secure:env.STORAGE_ALIYUN_OSS_SECURE!=='false',timeoutMs:integer('STORAGE_ALIYUN_OSS_TIMEOUT_MS',120000,1000,600000),...(env.STORAGE_ALIYUN_OSS_KEY_PREFIX?.trim()?{keyPrefix:env.STORAGE_ALIYUN_OSS_KEY_PREFIX.trim()}:{}),maxBytes:uploadHardMaxBytes};
+  if(storageAliyunOss){
+    const publicUrl=new URL(storageAliyunOss.publicEndpoint??storageAliyunOss.endpoint);
+    if(publicUrl.hostname.includes('-internal.'))fail('STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT');
+  }
   const logLevel = env.LOG_LEVEL ?? 'info';
   if (!['fatal','error','warn','info','debug','trace','silent'].includes(logLevel)) fail('LOG_LEVEL');
   const queuePrefix=env.REDIS_KEY_PREFIX??'huahuo-dev';

@@ -2,22 +2,19 @@ import type pg from 'pg';
 import type {AppConfig} from '../../config/config.js';
 import type {Attempt} from '../tasks/engine.js';
 import {transaction} from '../identity/store.js';
-import {downloadSourceBytes,parseDownloadedText,DocumentPreparationError,type DownloadedSource} from '../rag/document-preparation.js';
+import {DocumentPreparationError,sourceMetadataFromUrl} from '../rag/document-preparation.js';
 import type {FileProcessingSnapshot} from '../rag/processing-profile.js';
 import {KnowledgeIndexJobs,type KbDependencies} from '../kb/jobs.js';
-import {digest} from '../kb/split.js';
 import {TextIngestionSourceType} from './types.js';
 import {assertTextEncoding} from './policy.js';
 import {ManagedDocumentExtractor,ManagedExtractionError} from '../ingestion/document-extraction.js';
 import {storageFor} from '../storage/port.js';
 import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 export class TextIngestionError extends Error{constructor(readonly code:string,readonly retryable=false){super(code);}}
-export interface TextIngestionJobRow{id:string;workspace_id:string;created_by:string;source_type:TextIngestionSourceType;raw_content:string|null;origin_resource_uri:string|null;current_task_id:string;content_hash:string|null;artifact_uri:string|null;}
-export interface PreparedTextSource{content:string;format:'text'|'markdown';artifactUri?:string;}
-export interface TextIngestionDependencies extends KbDependencies{prepareSource?:(job:Readonly<TextIngestionJobRow>,snapshot:FileProcessingSnapshot)=>Promise<PreparedTextSource>;}
+interface TextIngestionJobRow{id:string;workspace_id:string;created_by:string;source_type:TextIngestionSourceType;raw_content:string|null;origin_resource_uri:string|null;current_task_id:string;content_hash:string|null;artifact_uri:string|null;}
 export class TextIngestionJobs {
  private readonly extractor:ManagedDocumentExtractor;
- constructor(readonly pool:pg.Pool,readonly config:AppConfig,readonly dependencies:TextIngestionDependencies={}){this.extractor=new ManagedDocumentExtractor(pool,config,storageFor(config));}
+ constructor(readonly pool:pg.Pool,readonly config:AppConfig,readonly dependencies:KbDependencies={}){this.extractor=new ManagedDocumentExtractor(pool,config,storageFor(config));}
  async close():Promise<void>{await this.extractor.close();}
  private async current(tx:pg.PoolClient,id:string,a:Attempt){
   const row=(await tx.query<TextIngestionJobRow>(`SELECT j.* FROM text_ingestion_jobs j JOIN workspaces w ON w.id=j.workspace_id AND w.user_id=j.created_by AND w.state='ready'
@@ -33,35 +30,19 @@ export class TextIngestionJobs {
    let job=await transaction(this.pool,tx=>this.current(tx,jobId,a));
    if(job.raw_content===null){
     await transaction(this.pool,async tx=>{await this.current(tx,jobId,a);await tx.query("UPDATE text_ingestion_jobs SET ingest_status='parsing' WHERE id=$1",[jobId]);});
-    if(job.source_type!==TextIngestionSourceType.FILE_UPLOAD&&!this.dependencies.prepareSource)throw new TextIngestionError('TEXT_SOURCE_ADAPTER_UNAVAILABLE');
-    let prepared:PreparedTextSource,structured=false;
-    const extract=async(source:DownloadedSource):Promise<PreparedTextSource>=>{
-      if(!snapshot.parser)throw new TextIngestionError('DOCUMENT_EXTRACTION_SNAPSHOT_INVALID');
-      const saved=await this.extractor.parse(a,source,snapshot.parser,async(tx,result)=>{
-        await this.current(tx,jobId,a);
-        await tx.query("UPDATE text_ingestion_jobs SET raw_content=$2,content_hash=$3,artifact_uri=$4,ingest_status='chunking' WHERE id=$1",[jobId,result.content,result.contentHash,result.canonicalUri]);
-      });
-      structured=true;return {content:saved.content,format:'markdown',artifactUri:saved.canonicalUri};
-    };
-    if(this.dependencies.prepareSource)prepared=await this.dependencies.prepareSource(job,snapshot);
-    else if(snapshot.parser&&await this.extractor.pending(a))prepared=await extract({bytes:new Uint8Array(),fileName:'document',contentType:null,finalUrl:job.origin_resource_uri!});
-    else{
-      const source=await downloadSourceBytes(job.origin_resource_uri!,this.config);
-      try{prepared=await parseDownloadedText(source,this.config.rag.plainTextMaxChars);}
-      catch(error){
-        if(!(error instanceof DocumentPreparationError&&error.code==='RAG_FILE_TYPE_UNSUPPORTED'&&snapshot.parser))throw error;
-        prepared=await extract(source);
-      }
-    }
-    assertTextEncoding(prepared.content);if(!prepared.content.trim())throw new TextIngestionError('TEXT_INGESTION_CONTENT_EMPTY');
-    if(!structured&&Array.from(prepared.content).length>this.config.rag.plainTextMaxChars)throw new TextIngestionError('TEXT_INGESTION_CONTENT_TOO_LARGE');
-    if(!structured)await transaction(this.pool,async tx=>{await this.current(tx,jobId,a);await tx.query("UPDATE text_ingestion_jobs SET raw_content=$2,content_hash=$3,artifact_uri=$4,ingest_status='chunking' WHERE id=$1",[jobId,prepared.content,digest(prepared.content),prepared.artifactUri??null]);});
+    if(job.source_type!==TextIngestionSourceType.FILE_UPLOAD)throw new TextIngestionError('TEXT_SOURCE_ADAPTER_UNAVAILABLE');
+    if(!snapshot.parser)throw new TextIngestionError('DOCUMENT_EXTRACTION_SNAPSHOT_INVALID');
+    const saved=await this.extractor.parse(a,sourceMetadataFromUrl(job.origin_resource_uri!),snapshot.parser,async(tx,result)=>{
+      await this.current(tx,jobId,a);
+      await tx.query("UPDATE text_ingestion_jobs SET raw_content=$2,content_hash=$3,artifact_uri=$4,ingest_status='chunking' WHERE id=$1",[jobId,result.content,result.contentHash,result.canonicalUri]);
+    });
+    assertTextEncoding(saved.content);if(!saved.content.trim())throw new TextIngestionError('TEXT_INGESTION_CONTENT_EMPTY');
     job=await transaction(this.pool,tx=>this.current(tx,jobId,a));
    }
    await this.extractor.acknowledgeCompleted(a);
    await transaction(this.pool,async tx=>{await this.current(tx,jobId,a);await tx.query("UPDATE text_ingestion_jobs SET ingest_status='chunking' WHERE id=$1",[jobId]);});
    const result=await new KnowledgeIndexJobs(this.pool,this.config,this.dependencies).indexSource({type:'text',id:job.id,revision:job.content_hash!,userId:job.created_by,workspaceId:job.workspace_id,content:job.raw_content!,format:snapshot.format},a,snapshot.keyword);
    await transaction(this.pool,async tx=>{await this.current(tx,jobId,a);await tx.query("UPDATE text_ingestion_jobs SET ingest_status='success',error_msg=NULL,updated_at=now() WHERE id=$1",[jobId]);});return result;
-  }catch(e){if(e instanceof ParserExecutionDeferred)throw e;await this.pool.query("UPDATE text_ingestion_jobs SET ingest_status='failed',error_msg=$3 WHERE id=$1 AND current_task_id=$2",[jobId,a.task.id,e instanceof TextIngestionError||e instanceof ManagedExtractionError?e.code:'TEXT_INGESTION_FAILED']);throw e;}
+  }catch(e){if(e instanceof ParserExecutionDeferred)throw e;await this.pool.query("UPDATE text_ingestion_jobs SET ingest_status='failed',error_msg=$3 WHERE id=$1 AND current_task_id=$2",[jobId,a.task.id,e instanceof TextIngestionError||e instanceof ManagedExtractionError||e instanceof DocumentPreparationError?e.code:'TEXT_INGESTION_FAILED']);throw e;}
  }
 }

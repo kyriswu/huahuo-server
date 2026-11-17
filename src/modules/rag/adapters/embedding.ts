@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NOTE_EMBEDDING_MAX_BATCH_SIZE, NOTE_EMBEDDING_MAX_INPUT_TOKENS } from '../model-profile.js';
+import {traceHeaders} from '../../../lib/trace.js';
 export class EmbeddingError extends Error {
   constructor(readonly code:string, message:string, readonly retryable=true, options?:{cause?:unknown}) { super(message,options); this.name='EmbeddingError'; }
 }
@@ -41,7 +42,7 @@ export class BailianEmbeddingClient implements EmbeddingClient {
       const timer=setTimeout(()=>controller.abort(),this.options.timeoutMs);
       const observation:EmbeddingAttempt={attempt,durationMs:0,succeeded:false};
       try{
-        const response=await this.fetchImpl(`${this.options.baseUrl.replace(/\/$/,'')}/services/embeddings/text-embedding/text-embedding`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.options.apiKey}`},body:JSON.stringify(body),redirect:'error',signal:requestOptions?.signal?AbortSignal.any([controller.signal,requestOptions.signal]):controller.signal});
+        const response=await this.fetchImpl(`${this.options.baseUrl.replace(/\/$/,'')}/services/embeddings/text-embedding/text-embedding`,{method:'POST',headers:traceHeaders({'content-type':'application/json',authorization:`Bearer ${this.options.apiKey}`}),body:JSON.stringify(body),redirect:'error',signal:requestOptions?.signal?AbortSignal.any([controller.signal,requestOptions.signal]):controller.signal});
         observation.status=response.status;observation.firstByteMs=performance.now()-started;
         if(!response.ok){await response.body?.cancel();throw new EmbeddingError('EMBEDDING_PROVIDER_UNAVAILABLE',`Embedding provider HTTP ${response.status}`,retryableStatus(response.status));}
         let payload:unknown;

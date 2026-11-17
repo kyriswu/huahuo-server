@@ -13,7 +13,7 @@ const rememberDrainSnapshot=(base:AppConfig,values:Values,revision:number)=>{
 };
 export const currentRuntimeConfig=()=>context.getStore();
 const dynamicKeys=new Set<PropertyKey>(['runtimeRevision','maxUploadBytes','storageQuotaBytes','billingPolicyVersion','tagExtractorProvider','taskPolicy']);
-const ragKeys=['enabled','maxSourceBytes','downloadTimeoutMs','plainTextMaxChars','embeddingBatchSize','indexingConcurrency','embeddingTimeoutMs','embeddingMaxRetries','rerankTimeoutMs','noteRerankBudgetMs'] as const;
+const ragKeys=['enabled','plainTextMaxChars','embeddingBatchSize','indexingConcurrency','embeddingTimeoutMs','embeddingMaxRetries','rerankTimeoutMs','noteRerankBudgetMs'] as const;
 const milvusKeys=['searchConcurrency','denseCandidates','bm25Candidates','hybridCandidates','rrfK'] as const;
 export const scopedConfig=(base:AppConfig):AppConfig=>{const proxy=new Proxy(base,{get(target,key){
  const active=context.getStore();

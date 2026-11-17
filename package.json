@@ -56,8 +56,7 @@
     "rag:consistency": "node --env-file=.env scripts/rag-consistency.mjs",
     "rag:verify-milvus": "pnpm build && node --env-file=.env scripts/verify-milvus.mjs",
     "admin:bootstrap": "node dist/entrypoints/admin-bootstrap.js",
-    "admin:revoke-sessions": "node dist/entrypoints/admin-revoke-sessions.js",
-    "release:review": "node dist/entrypoints/release-plan.js --review"
+    "admin:revoke-sessions": "node dist/entrypoints/admin-revoke-sessions.js"
   },
   "dependencies": {
     "@alicloud/dysmsapi20170525": "4.6.0",
@@ -68,23 +67,17 @@
     "@fastify/static": "10.1.10",
     "@fastify/swagger": "9.5.1",
     "@fastify/type-provider-typebox": "5.2.0",
-    "@huggingface/tokenizers": "0.2.0",
     "@prometheus-io/client": "0.16.1",
     "@sinclair/typebox": "0.34.41",
     "@zilliz/milvus2-sdk-node": "2.6.17",
     "ali-oss": "6.23.0",
     "bullmq": "6.3.12",
-    "diff": "9.0.0",
     "drizzle-orm": "0.44.5",
     "fastify": "5.12.5",
-    "file-type": "22.1.1",
     "ioredis": "5.6.1",
     "jose": "6.1.0",
-    "mammoth": "1.13.0",
     "markdown-it": "15.0.3",
     "mdast-util-from-markdown": "2.0.3",
-    "music-metadata": "12.1.0",
-    "pdf-parse": "1.1.1",
     "pg": "8.16.3"
   },
   "devDependencies": {

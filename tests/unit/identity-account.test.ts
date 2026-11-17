@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import type pg from 'pg';
 import { describe,expect,it } from 'vitest';
 import { IdentityService,type LoginInput } from '../../src/modules/identity/service.js';
@@ -14,7 +15,7 @@ function fixture(existing=false){
  const refreshes=new Map<string,{session_id:string;consumed_at:Date|null;valid:boolean}>();
  let otpHash='',session:SessionFixture|undefined;
  const result=(rows:unknown[]=[])=>({rows,rowCount:rows.length});
- const client={
+ const client=Object.assign(new EventEmitter(),{
   async query(sql:string,values:unknown[]=[]){
    calls.push({sql,values});
    if(/^(BEGIN|COMMIT|ROLLBACK|SELECT pg_advisory)/.test(sql))return result();
@@ -36,7 +37,7 @@ function fixture(existing=false){
    if(sql.startsWith('SELECT id,updated_at FROM workspaces'))return result([{id:'11111111-1111-4111-8111-111111111111',updated_at:new Date()}]);
    if(sql.startsWith('SELECT p.id,p.name'))return result();
    if(sql.startsWith('SELECT s.id FROM user_sessions'))return result(session&&state.status==='active'&&!state.deleted&&!session.revoked?[{id:session.id}]:[]);
-   if(sql.startsWith('UPDATE user_sessions s SET last_seen_at'))return result(session&&state.status==='active'&&!state.deleted&&!session.revoked&&session.accessJti===values[0]&&session.accessHash===values[2]?[session]:[]);
+   if(sql.startsWith('WITH admitted AS MATERIALIZED'))return result(session&&state.status==='active'&&!state.deleted&&!session.revoked&&session.accessJti===values[0]&&session.user_id===values[1]&&session.accessHash===values[2]?[session]:[]);
    if(sql.startsWith('SELECT session_id,consumed_at')){const item=refreshes.get(String(values[0]));return result(item?[item]:[]);}
    if(sql.startsWith('SELECT s.id,s.user_id'))return result(session&&state.status==='active'&&!state.deleted?[{...session,expires_at:state.sessionExpiresAt,valid:true,revoked_at:session.revoked?new Date():null}]:[]);
    if(sql.startsWith('UPDATE refresh_tokens')){const item=refreshes.get(String(values[0]));if(item)item.consumed_at=new Date();return result();}
@@ -44,7 +45,7 @@ function fixture(existing=false){
    if(sql.startsWith('UPDATE user_sessions SET revoked_at')){if(session)session.revoked=true;return result();}
    throw new Error(`Unexpected identity fixture query: ${sql}`);
   },release(){},
- };
+ });
  const pool={query:client.query,async connect(){return client;}} as unknown as pg.Pool;
  const service=new IdentityService(pool,cfg,{sms:transport.sms});
  async function signIn(clientType:LoginInput['clientType']='app'){
