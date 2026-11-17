@@ -9,7 +9,7 @@ async function main(){
  try{
   const items=[];
   for(const node of await nodes.list())items.push({...node,state:await (await nodes.runtime(node)).machine.state.status()??null});
-  process.stdout.write(JSON.stringify({enabled:config.processingNodes.enabled,nodes:items})+'\n');
+  process.stdout.write(JSON.stringify({nodes:items})+'\n');
  }finally{await nodes.close();await pool.end();}
 }
 main().catch(()=>{process.stderr.write('PROCESSING_NODE_STATUS_FAILED\n');process.exitCode=1;});

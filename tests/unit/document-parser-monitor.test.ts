@@ -26,6 +26,16 @@ function setup(overrides: Partial<MachineState> = {}) {
   return { state, subscriber, status, tick, monitor, onError, changed: () => subscriber.emit('message', 'test-events', 'changed') };
 }
 describe('event-driven document parser idle monitor (virtual time, mock subscriber)', () => {
+  it('shares initialization and never restarts a closed monitor', async () => {
+    const s = setup(), connect = vi.spyOn(s.subscriber, 'connect'), subscribe = vi.spyOn(s.subscriber, 'subscribe');
+    const first = s.monitor.start(), second = s.monitor.start();
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+    expect(connect).toHaveBeenCalledTimes(1); expect(subscribe).toHaveBeenCalledTimes(1);
+    await s.monitor.close();
+    await expect(s.monitor.start()).rejects.toThrow('DOCUMENT_PARSER_MONITOR_CLOSED');
+    expect(connect).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+  });
   it('uses one idle deadline and one-minute stop verification, then stops all fallback checks', async () => {
     const s = setup(); await s.monitor.start();
     const initialReads = s.status.mock.calls.length;
@@ -77,5 +87,15 @@ describe('event-driven document parser idle monitor (virtual time, mock subscrib
   it('closes its subscription and timers without subsequent cloud calls', async () => {
     const s = setup(); await s.monitor.start(); await s.monitor.close(); s.changed();
     await vi.advanceTimersByTimeAsync(120000); expect(s.tick).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+  });
+  it('does not begin a cloud check after closing while a deadline state read is pending', async () => {
+    const s = setup(); await s.monitor.start();
+    let resolve!: (state: MachineState) => void;
+    s.status.mockImplementationOnce(() => new Promise<MachineState>(done => { resolve = done; }));
+    await vi.advanceTimersByTimeAsync(60000);
+    const closing = s.monitor.close();
+    resolve({ ...s.state, redisTimeMs: Date.now() });
+    await closing;
+    expect(s.tick).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
   });
 });

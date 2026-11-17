@@ -12,6 +12,7 @@ import { registerLifecycle } from '../plugins/lifecycle.js';
 import { RuntimeSettings } from '../modules/runtime-settings/service.js';
 import { DEFAULT_DRAIN_TIMEOUT_MS } from '../modules/runtime-settings/registry.js';
 import { createErrorSerializer } from '../lib/error-log.js';
+import {withTraceId} from '../lib/trace.js';
 declare module 'fastify' { interface FastifyInstance {
   drainTimeoutSnapshotMs(): number;
   readDrainTimeoutMs(): Promise<number>;
@@ -24,7 +25,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
     ...(loggerStream ? { stream: loggerStream } : {}),
     redact: { paths: ['req.headers.authorization','req.headers.cookie','res.headers.set-cookie','password','token','secret'], censor: '[REDACTED]' },
     serializers: { req: req => ({ method: req.method, route: req.routeOptions?.url }), err: createErrorSerializer(config) },
-  }, genReqId: req => requestTrace(req.headers), logController: new LogController({ requestIdLogLabel: 'traceId' }),
+  }, genReqId: req => requestTrace(req.headers,req.url), logController: new LogController({ requestIdLogLabel: 'traceId' }),
   // Request timeout bounds receiving the request, not the handler's total work.
   requestTimeout: config.httpRequestTimeoutMs,
   connectionTimeout: config.httpConnectionTimeoutMs,
@@ -51,7 +52,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
     else jsonParser(req, typeof body === 'string' ? body : body.toString(), done);
   });
   await app.register(swagger, { openapi: { info: { title: `Huahuo ${config.role}`, version: '0.1.0' } } });
-  app.addHook('onRequest', async (req, reply) => { reply.header('X-Trace-Id', req.id).header('Cache-Control', 'no-store'); });
+  app.addHook('onRequest', (req, reply,done) => { reply.header('X-Trace-Id', req.id).header('Cache-Control', 'no-store');withTraceId(req.id,done); });
   app.addHook('preClose', async () => {
     // Retiring API streams keep their subscriptions and dependencies until their
     // response finishes, bounded by the process's existing DB drain deadline.

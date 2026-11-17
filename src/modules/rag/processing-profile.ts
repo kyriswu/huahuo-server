@@ -8,5 +8,5 @@ export interface FileProcessingSnapshot {
 }
 export function fileProcessingSnapshot(config:AppConfig,format:'text'|'markdown',context?:{sourceResourceId:string;parseRunId:string}):FileProcessingSnapshot{
  return {version:'file-processing',format,keyword:kbSnapshot(config,'document-keyword',format),
-  ...(context&&config.processingNodes.enabled?{parser:{...context}}:{})};
+  ...(context?{parser:{...context}}:{})};
 }

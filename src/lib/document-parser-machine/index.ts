@@ -7,6 +7,8 @@ import { AliyunEciGpuProvider } from '../../integrations/gpu-spot/aliyun-eci.js'
 import { DocumentParserEciFallback, type ParserEciProvider } from './eci-fallback.js';
 import { ParserMachineRedis, ParserMachineError, type MachinePhase } from './redis.js';
 import { ParserMachineIdleMonitor, type MonitorEvents } from './monitor.js';
+import {currentTraceId} from '../trace.js';
+import { ServiceHttpClient } from '../../integrations/http-client.js';
 
 export { ParserMachineError, ParserMachineRedis } from './redis.js';
 export type { MachineState, MachinePhase } from './redis.js';
@@ -64,14 +66,11 @@ export class DocumentParserMachine {
     if (config.mode === 'ecs' && config.eciFallback) this.eci = new DocumentParserEciFallback(state, config.eciFallback,
       eciProvider ?? new AliyunEciGpuProvider({ regionId: config.regionId, credentials: config.credentials,
         connectTimeoutMs: 1000, readTimeoutMs: 6000, workloadRamCredentials: true }));
+    const http=new ServiceHttpClient();
     this.healthy = healthCheck ?? (async ({ baseUrl, signal, headers }) => {
       if (!config.healthPath) return true;
       try {
-        const response = await fetch(new URL(config.healthPath, baseUrl), {
-          method: 'GET', headers, redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]),
-        });
-        await response.body?.cancel();
-        return response.status === 200;
+        return await http.request(new URL(config.healthPath, baseUrl), {method:'GET',headers,signal}, {timeoutMs:3000}, async response=>response.status===200);
       } catch { return false; }
     });
   }
@@ -143,6 +142,7 @@ export class DocumentParserMachine {
   }
   private async context(signal: AbortSignal): Promise<ParserContext> {
     const headers: Record<string, string> = this.config.apiToken ? { Authorization: `Bearer ${this.config.apiToken}` } : {};
+    const traceId=currentTraceId();if(traceId)headers['X-Trace-Id']=traceId;
     return { baseUrl: await this.eci?.baseUrl() ?? this.config.baseUrl, signal, headers: Object.freeze(headers) };
   }
 
@@ -312,6 +312,9 @@ export function createDocumentParserMachine(config: EnabledDocumentParserMachine
   const state = new ParserMachineRedis(redis, config, prefix);
   const machine = new DocumentParserMachine(state, config.mode === 'ecs' ? new AliyunEcsPower(config) : undefined, config);
   let monitor: ParserMachineIdleMonitor | undefined;
+  let monitorStart: Promise<void> | undefined;
+  let closed = false;
+  let closeTask: Promise<void> | undefined;
   let statusSubscriber:Redis|undefined,statusConnecting:Promise<void>|undefined;
   const statusListeners=new Set<()=>void>();
   const statusChanged=()=>{for(const changed of statusListeners)changed();};
@@ -325,15 +328,29 @@ export function createDocumentParserMachine(config: EnabledDocumentParserMachine
       try{await statusConnecting;}catch(error){statusListeners.delete(changed);if(!statusListeners.size){statusSubscriber?.disconnect();statusSubscriber=undefined;statusConnecting=undefined;}throw error;}
       return ()=>{statusListeners.delete(changed);if(!statusListeners.size){statusSubscriber?.disconnect();statusSubscriber=undefined;statusConnecting=undefined;}};
     },
-    async startIdleMonitor(events: MonitorEvents = {}) {
-      if (config.mode !== 'ecs') return;
-      if (!monitor) {
-        const subscriber = redis.duplicate({ lazyConnect: true });
-        subscriber.on('error', () => undefined);
-        monitor = new ParserMachineIdleMonitor(machine, subscriber, state.eventsChannel, config.idleMs, events);
-        await monitor.start();
-      }
+    startIdleMonitor(events: MonitorEvents = {}): Promise<void> {
+      if (closed || config.mode !== 'ecs') return Promise.resolve();
+      if (monitorStart) return monitorStart;
+      const subscriber = redis.duplicate({ lazyConnect: true });
+      subscriber.on('error', () => undefined);
+      const next = new ParserMachineIdleMonitor(machine, subscriber, state.eventsChannel, config.idleMs, events);
+      monitor = next;
+      monitorStart = next.start().catch(async error => {
+        await next.close();
+        monitor = undefined;
+        monitorStart = undefined;
+        throw error;
+      });
+      return monitorStart;
     },
-    async close() { statusListeners.clear();statusSubscriber?.disconnect();statusSubscriber=undefined;await statusConnecting?.catch(()=>undefined);await monitor?.close();redis.disconnect(); },
+    close(): Promise<void> {
+      closed = true;
+      return closeTask ??= (async () => {
+        statusListeners.clear(); statusSubscriber?.disconnect(); statusSubscriber = undefined;
+        const monitorClosed = monitor?.close();
+        await Promise.all([statusConnecting?.catch(() => undefined), monitorClosed, monitorStart?.catch(() => undefined)]);
+        redis.disconnect();
+      })();
+    },
   };
 }

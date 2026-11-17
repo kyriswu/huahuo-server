@@ -30,7 +30,7 @@ import {RagQueryService} from '../../src/modules/rag/query-service.js';
 
 const database=process.env.TEST_DATABASE_MIGRATION_URL,redisUrl=process.env.REDIS_QUEUE_URL;
 if(!database||!/^huahuo_test_/.test(new URL(database).pathname.slice(1))||!redisUrl||new URL(redisUrl).hostname!=='127.0.0.1'||Number(new URL(redisUrl).pathname.slice(1))<10)throw Error('ISOLATED_DEPENDENCIES_REQUIRED');
-const env={...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_PUBLIC_BASE_URL:'http://runtime-api.test',API_SERVICE_BASE_URL:'http://runtime-api.internal.test',ADMIN_PUBLIC_BASE_URL:'http://runtime-admin.test',APP_TOKEN_SECRET:'a'.repeat(48),ADMIN_SESSION_SECRET:'b'.repeat(48),REDIS_CACHE_URL:process.env.REDIS_CACHE_URL,REDIS_QUEUE_URL:redisUrl,REDIS_KEY_PREFIX:'runtime_'+randomUUID().replaceAll('-',''),PROCESSING_NODES_ENABLED:'true'};
+const env={...testJwtEnv,APP_ENV:'test',LOG_LEVEL:'silent',APP_PUBLIC_BASE_URL:'http://runtime-api.test',API_SERVICE_BASE_URL:'http://runtime-api.internal.test',ADMIN_PUBLIC_BASE_URL:'http://runtime-admin.test',APP_TOKEN_SECRET:'a'.repeat(48),ADMIN_SESSION_SECRET:'b'.repeat(48),REDIS_CACHE_URL:process.env.REDIS_CACHE_URL,REDIS_QUEUE_URL:redisUrl,REDIS_KEY_PREFIX:'runtime_'+randomUUID().replaceAll('-',''),RAG_SOURCE_ALLOWED_HOSTS:'files.test'};
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:database}));
 const adminConfig=loadConfig('admin',{...env,DATABASE_URL:process.env.TEST_DATABASE_ADMIN_URL});
 const workerConfig=loadConfig('worker',{...env,DATABASE_URL:process.env.TEST_DATABASE_WORKER_URL});
@@ -205,7 +205,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   const cfg=loadConfig('api-server',{...env,DATABASE_URL:process.env.TEST_DATABASE_API_URL}),api=await buildApiServer({config:cfg});
   const userId=await insertFixtureUser(root),sessionId=randomUUID(),bearer=await insertFixtureSession(root,userId,sessionId);
   try{
-   const r=await api.inject({method:'POST',url:'/api/v1/media/upload-token',headers:{...fixtureScopeHeaders(bearer),'x-idempotency-key':randomUUID()},payload:{sourceScene:'note_import',fileName:'large.txt',mimeType:'text/plain',sizeBytes:1001,durationSeconds:0}});
+   const r=await api.inject({method:'POST',url:'/api/v1/media/upload-token',headers:{...fixtureScopeHeaders(bearer),'x-idempotency-key':randomUUID()},payload:{fileName:'large.txt',mimeType:'text/plain',sizeBytes:1001}});
    expect(r.statusCode,r.body).toBe(400);expect(r.json().error.code).toBe('UPLOAD_METADATA_INVALID');
   }finally{await api.close();await save('storage',{'storage.maxUploadBytes':104857600});}
  });
@@ -308,11 +308,11 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
 
 
 describe('manual startup: durable tasks, event notifications and mock cloud only',()=>{
- it('starts from outside the parser VPC, completes at Running and never calls the private API',async()=>{
+ it('completes instance-only startup without a private API dependency and reports unreachable service health separately',async()=>{
   const node=baseNode({name:'Manual CPU node',mode:'ecs',capabilities:['document'],regionId:'cn-beijing',instanceId:'i-manual'+randomUUID().replaceAll('-','').slice(0,16),privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health'});
   node.tokenEnv='PROCESSING_NODE_TOKEN_DOCUMENT';await publishTestNode(node);
-  const externalAdmin={...adminConfig,processingNodes:{...adminConfig.processingNodes,enabled:false,cloudControlEnabled:true}};
-  const externalWorker={...workerConfig,processingNodes:{...workerConfig.processingNodes,enabled:false,cloudControlEnabled:true}};
+  const externalAdmin={...adminConfig,processingNodes:{...adminConfig.processingNodes,cloudControlEnabled:true}};
+  const externalWorker={...workerConfig,processingNodes:{...workerConfig.processingNodes,cloudControlEnabled:true}};
   const live=await buildAdminServer({config:externalAdmin,dependencies:{pool:adminPool,check:async()=>({postgres:true,schema:true,redisCache:true,redisQueue:true}),close:async()=>undefined}});
   const path=`/admin/api/v1/processing-nodes/${node.id}/start`;
   expect((await live.inject({method:'POST',url:path})).statusCode).toBe(401);
@@ -350,14 +350,13 @@ describe('manual startup: durable tasks, event notifications and mock cloud only
    expect((await root.query('SELECT state,lease_owner,external_state FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'waiting_external',lease_owner:null,external_state:'none'});
    expect(await run()).toBe(false);expect(cloud.start).toHaveBeenCalledTimes(1);
    instance.status='Running';expect(await run()).toBe(true);
-   await until('online');expect(body).toContain('"serviceStatus":"not_checked"');expect(workerHealth).not.toHaveBeenCalled();expect(privateRequest).not.toHaveBeenCalled();
-   const privateParse=vi.fn(async()=>undefined);await expect(controlled.withNode('document',request(),privateParse)).rejects.toMatchObject({code:'PROCESSING_NODES_DISABLED'});expect(privateParse).not.toHaveBeenCalled();
-   expect((await live.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:superCookie}})).json().data.structuredEnabled).toBe(false);
+   await until('online');expect(body).toContain('"serviceStatus":"unreachable"');expect(workerHealth).not.toHaveBeenCalled();expect(privateRequest).toHaveBeenCalled();
+   expect((await live.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:superCookie}})).json().data.parserEnabled).toBe(true);
    expect((await root.query('SELECT state,attempt_no,resume_count FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'succeeded',attempt_no:3,resume_count:2});
    expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',['manual:'+taskId])).rows[0].settled).toBe(true);
    expect((await root.query("SELECT config->'enabled' AS enabled FROM processing_nodes WHERE id=$1",[node.id])).rows[0].enabled).toBe(true);
    expect(cloud.start).toHaveBeenCalledTimes(1);expect(cloud.stopEconomically).not.toHaveBeenCalled();
-   // Manual boots are monitored even with private API calls and automatic admission disabled.
+   // Manual boots are monitored independently of private API reachability.
    await controlled.startMonitors(error=>monitorErrors.push(error));
    const runtime=await controlled.runtime(node,false),started=await runtime.machine.state.status();
    expect(started).toMatchObject({phase:'ready',active:0,queued:0,uncertain:0});
@@ -372,12 +371,12 @@ describe('manual startup: durable tasks, event notifications and mock cloud only
    instance.status='Stopped';expect(await runtime.machine.tick()).toBe('stop_confirmed');
    expect((await runtime.machine.state.status())?.economicallyStopped).toBe(true);
    await until('offline');expect(body).toContain('"canStart":true');await reader.cancel();
-   expect(monitorErrors).toEqual([]);expect(workerHealth).not.toHaveBeenCalled();expect(privateRequest).not.toHaveBeenCalled();
+   expect(monitorErrors).toEqual([]);expect(workerHealth).toHaveBeenCalled();expect(privateRequest).toHaveBeenCalled();
   }finally{streamAbort.abort();await live.close();await jobs.close();describe.mockRestore();health.mockRestore();}
  });
- it('keeps the deployment switch authoritative and does not queue a paid action while disabled',async()=>{
+ it('keeps cloud power control authoritative and does not queue a paid action when explicitly denied',async()=>{
   const scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]);
-  const disabled=new ProcessingNodeJobs(adminPool,{...adminConfig,processingNodes:{...adminConfig.processingNodes,enabled:false,cloudControlEnabled:false}});
+  const disabled=new ProcessingNodeJobs(adminPool,{...adminConfig,processingNodes:{...adminConfig.processingNodes,cloudControlEnabled:false}});
   const before=Number((await root.query("SELECT count(*) AS n FROM tasks WHERE kind='processing.node-start'")).rows[0].n);
   try{await expect(disabled.start(randomUUID(),scope,randomUUID())).rejects.toMatchObject({code:'PROCESSING_NODE_CLOUD_CONTROL_DISABLED'});expect(Number((await root.query("SELECT count(*) AS n FROM tasks WHERE kind='processing.node-start'")).rows[0].n)).toBe(before);}finally{await disabled.close();}
  });
@@ -390,30 +389,27 @@ describe('Admin-only document trial, no business ingestion',()=>{
   expect((await app.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:operatorCookie}})).statusCode).toBe(403);
   expect((await app.inject({method:'POST',url:'/admin/api/v1/document-trials',headers:{cookie:superCookie,origin:env.ADMIN_PUBLIC_BASE_URL},payload:{fileUrl:'https://example.test/a.pdf'}})).statusCode).toBe(403);
  });
- it('extracts native Markdown through the business parser without writing documents or indexes',async()=>{
-  const before=await counts(),content='# 管理员试用\n\nNATIVE_NO_STORE_2718\n';
-  const created=await app.inject({method:'POST',url:'/admin/api/v1/document-trials/upload?fileName=trial.md&mimeType=text%2Fmarkdown',headers:{...headers(),'content-type':'application/octet-stream'},payload:Buffer.from(content)});
-  expect(created.statusCode,created.body).toBe(202);const id=created.json().data.id;
-  await vi.waitFor(async()=>{const r=await app.inject({url:'/admin/api/v1/document-trials/'+id,headers:{cookie:superCookie}});expect(r.json().data.state).toBe('completed');});
-  const result=await app.inject({url:'/admin/api/v1/document-trials/'+id+'/result',headers:{cookie:superCookie}});expect(result.statusCode,result.body).toBe(200);expect(result.json().data.result.content).toContain('NATIVE_NO_STORE_2718');
-  expect(await counts()).toEqual(before);
-  expect((await root.query("SELECT count(*)::int AS n FROM admin_audit_events WHERE action='document-trial.start' AND target_id=$1",[id])).rows[0].n).toBe(0);
+ it('removes direct file upload and exposes only parser availability',async()=>{
+  const removed=await app.inject({method:'POST',url:'/admin/api/v1/document-trials/upload?fileName=trial.md&mimeType=text%2Fmarkdown',headers:headers(),payload:{}});
+  expect(removed.statusCode,removed.body).toBe(404);
+  const capabilities=await app.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:superCookie}});
+  expect(capabilities.statusCode,capabilities.body).toBe(200);expect(capabilities.json().data).not.toHaveProperty('maxBytes');
  });
- it('rejects unsupported names, unconfigured PDF and unsafe download links',async()=>{
+ it('rejects unsupported names, missing parsers for every format and unsafe OSS links',async()=>{
   await root.query('DELETE FROM processing_nodes');
-  for(const[fileName,expected]of [['../a.txt',400],['a.exe',400],['a.pdf',503]] as const){
-   const r=await app.inject({method:'POST',url:'/admin/api/v1/document-trials/upload?'+new URLSearchParams({fileName,mimeType:'application/octet-stream'}),headers:{...headers(),'content-type':'application/octet-stream'},payload:Buffer.from('sample')});expect(r.statusCode,r.body).toBe(expected);
+  for(const[fileUrl,expected]of [['https://files.test/a.exe',400],['https://files.test/a.pdf',503],['https://files.test/a.md',503],['https://files.test/a.txt',503],['https://files.test/a.csv',503],['http://169.254.169.254/latest/meta-data/',400]] as const){
+   const response=await app.inject({method:'POST',url:'/admin/api/v1/document-trials',headers:headers(),payload:{fileUrl}});expect(response.statusCode,response.body).toBe(expected);
   }
-  const url=await app.inject({method:'POST',url:'/admin/api/v1/document-trials',headers:headers(),payload:{fileUrl:'http://169.254.169.254/latest/meta-data/'}});expect(url.statusCode,url.body).toBe(400);
  });
- it('probes the configured parser API with in-memory results and zero trial database writes',async()=>{
+ it.each([['pdf','application/pdf'],['md','text/markdown'],['txt','text/plain'],['csv','text/csv']])('passes a %s OSS URL directly to the parser with no source download or database writes',async(extension,mimeType)=>{
   await root.query('DELETE FROM processing_nodes');const node=baseNode({capabilities:['document']});await publishTestNode(node);
-  let context:FileContext;const jobId=randomUUID();
+  let context:FileContext;const jobId=randomUUID(),sourceUrl=`https://files.test/trial.${extension}?fixture=preserved`;
   const fetchDouble=vi.fn<typeof fetch>(async(url,options)=>{
    if(options?.method==='POST'){
-    expect(String(url)).toBe(node.baseUrl+'/extract-async');const form=options.body as FormData;
-    expect(form.has('config')).toBe(false);expect(form.has('callback_url')).toBe(false);
-    context=(JSON.parse(String(form.get('file_contexts'))) as FileContext[])[0]!;
+    expect(String(url)).toBe(node.baseUrl+'/extract-async');expect(new Headers(options.headers).get('content-type')).toBe('application/json');
+    const body=JSON.parse(String(options.body));expect(body.inputs).toEqual([{kind:'uri',uri:sourceUrl,mime_type:mimeType}]);
+    expect(body).not.toHaveProperty('config');expect(body).not.toHaveProperty('callback_url');
+    context=(body.file_contexts as FileContext[])[0]!;
     return new Response(JSON.stringify({job_id:jobId}),{status:202});
    }
    if(String(url).endsWith('/result'))return new Response(JSON.stringify({job_id:jobId,state:'completed',result:sampleExtraction(context)}));
@@ -422,20 +418,22 @@ describe('Admin-only document trial, no business ingestion',()=>{
   const service=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble),scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]);
   const before=await counts();
   try{
-   const job=await service.start(scope,{file:{bytes:Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF'),fileName:'trial.pdf',contentType:'application/pdf',finalUrl:''}});
+   const job=await service.start(scope,{url:sourceUrl});
    await vi.waitFor(()=>expect(service.status(scope,job.id).state).toBe('completed'));
-   expect(fetchDouble).toHaveBeenCalledTimes(3);expect(service.result(scope,job.id).result).toMatchObject({summary:{errors:0}});
+   expect(fetchDouble).toHaveBeenCalledTimes(3);expect(fetchDouble.mock.calls.every(([url])=>String(url).startsWith(node.baseUrl+'/'))).toBe(true);
+   expect(service.status(scope,job.id)).not.toHaveProperty('bytes');expect(service.status(scope,job.id).metrics).not.toHaveProperty('downloadMs');
+   expect(service.result(scope,job.id).result).toMatchObject({summary:{errors:0}});
    expect(()=>service.status({...scope,adminId:randomUUID()},job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');expect(await counts()).toEqual(before);
    await expect(adminPool.query('SELECT 1 FROM document_parse_callbacks LIMIT 1')).rejects.toMatchObject({code:'42501'});
    await service.close();expect(()=>service.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');
   }finally{await service.close();await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');await root.query('DELETE FROM processing_nodes');}
  });
- it('checks configured health before upload and reports service unready without submitting a PDF',async()=>{
+ it('checks configured health before sending the OSS URL and reports service unready',async()=>{
   await root.query('DELETE FROM processing_nodes');const node=baseNode({capabilities:['document'],healthPath:'/health'});await publishTestNode(node);
   const fetchDouble=vi.fn<typeof fetch>(async()=>new Response('{}',{status:503}));
   const service=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble),scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]);
   try{
-   const job=await service.start(scope,{file:{bytes:Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF'),fileName:'unready.pdf',contentType:'application/pdf',finalUrl:''}});
+   const job=await service.start(scope,{url:'https://files.test/unready.pdf'});
    await vi.waitFor(()=>expect(service.status(scope,job.id)).toMatchObject({state:'failed',error:'ADMIN_TRIAL_SERVICE_UNREACHABLE'}));
    expect(fetchDouble).toHaveBeenCalledTimes(1);expect(fetchDouble.mock.calls[0]![1]?.method).toBe('GET');expect(service.status(scope,job.id).remoteJobId).toBeUndefined();
   }finally{await service.close();await root.query('DELETE FROM processing_nodes');}
@@ -448,7 +446,7 @@ describe('Admin-only document trial, no business ingestion',()=>{
   const service=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble),replacement=new AdminDocumentTrials(adminPool,adminConfig,fetchDouble);
   const scope=await new AdminService(adminPool,adminConfig.adminSessionSecret!).authenticate(superCookie.split('=')[1]),before=await counts();
   try{
-   const job=await service.start(scope,{file:{bytes:Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF'),fileName:'interrupt.pdf',contentType:'application/pdf',finalUrl:''}});
+   const job=await service.start(scope,{url:'https://files.test/interrupt.pdf'});
    await vi.waitFor(()=>expect(fetchDouble).toHaveBeenCalledTimes(1));await service.close();
    expect(()=>service.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');expect(()=>replacement.status(scope,job.id)).toThrow('ADMIN_TRIAL_NOT_FOUND');
    await new Promise(resolve=>setTimeout(resolve,20));expect(fetchDouble).toHaveBeenCalledTimes(1);expect(await counts()).toEqual(before);
@@ -463,7 +461,7 @@ describe('Admin-only document trial, no business ingestion',()=>{
   const context={source_resource_id:randomUUID(),parse_run_id:randomUUID()},input={requestId:randomUUID(),fingerprint:'a'.repeat(64),taskId:randomUUID(),contexts:[context],timeoutMs:30000,maxResponseBytes:67108864};
   const userId=await insertFixtureUser(root),workspaceId=randomUUID();
   await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'callback fixture',true,$3)",[workspaceId,userId,randomUUID()]);
-  await root.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state) VALUES($1,$2,$3,'rag.document-ingest','content','queued')",[input.taskId,userId,workspaceId]);
+  await root.query("INSERT INTO tasks(trace_id,id,user_id,workspace_id,kind,queue,state) VALUES(gen_random_uuid()::text,$1,$2,$3,'rag.document-ingest','content','queued')",[input.taskId,userId,workspaceId]);
   try{
    expect(apiAddress).not.toBe(adminAddress);
    const adminResponse=await fetch(adminAddress+'/admin/api/v1/me',{headers:{cookie:superCookie}});expect(adminResponse.status).toBe(200);await adminResponse.text();

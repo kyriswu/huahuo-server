@@ -53,7 +53,7 @@ it('soft deletion preserves revisions, labels and explicit relationships for res
  const tags=await assets.addNoteTag(u.scope,u.workspaceId,source.noteId,'retained',`"tags-${source.noteId}-0"`,randomUUID());
  const relation=await assets.createRelation(u.scope,u.workspaceId,source.noteId,{targetNoteId:target.noteId,relationType:'references',rationale:'retain'},randomUUID());
  await assets.deleteNote(u.scope,u.workspaceId,source.noteId,source.etag,randomUUID());
- expect((await root.query('SELECT count(*)::int n FROM note_part_revisions WHERE note_id=$1',[source.noteId])).rows[0].n).toBe(3);
+ expect((await root.query('SELECT count(*)::int n FROM note_parts WHERE note_id=$1',[source.noteId])).rows[0].n).toBe(3);
  expect((await root.query('SELECT count(*)::int n FROM note_tags WHERE note_id=$1 AND tag_id=$2',[source.noteId,tags.tags[0]!.tagId])).rows[0].n).toBe(1);
  expect((await root.query('SELECT count(*)::int n FROM note_relations WHERE relation_id=$1',[relation.relationId])).rows[0].n).toBe(1);
  const deleted=await assets.getNote(u.scope,u.workspaceId,source.noteId);
@@ -62,8 +62,53 @@ it('soft deletion preserves revisions, labels and explicit relationships for res
  expect((await assets.noteTags(u.scope,u.workspaceId,source.noteId)).tags).toHaveLength(1);
 });
 it('folders enforce scope, duplicate names, cycles and ETags',async()=>{const u=await fixture();const f=await assets.createFolder(u.scope,u.workspaceId,{displayName:'资料'},randomUUID());await expect(assets.createFolder(u.scope,u.workspaceId,{displayName:'资料'},randomUUID())).rejects.toMatchObject({code:'FOLDER_NAME_CONFLICT'});const child=await assets.createFolder(u.scope,u.workspaceId,{displayName:'子',parentFolderId:f.folderId},randomUUID());await expect(assets.moveFolder(u.scope,u.workspaceId,f.folderId,child.folderId,f.etag,randomUUID())).rejects.toMatchObject({code:'FOLDER_CYCLE'});await expect(assets.updateFolder(u.scope,u.workspaceId,f.folderId,'x','bad-etag',randomUUID())).rejects.toMatchObject({statusCode:412});});
+it('overwrites the current part with ETag protection without storing previous bodies',async()=>{
+ const u=await fixture(),note=await makeNote(u),key=randomUUID();
+ const updated=await assets.putNotePart(u.scope,u.workspaceId,note.noteId,'raw','next',note.etag,key);
+ expect(updated.parts.raw!.contentMarkdown).toBe('next');
+ expect(await assets.putNotePart(u.scope,u.workspaceId,note.noteId,'raw','next',note.etag,key)).toEqual(updated);
+ await expect(assets.putNotePart(u.scope,u.workspaceId,note.noteId,'raw','overwritten',note.etag,randomUUID())).rejects.toMatchObject({code:'NOTE_REVISION_MISMATCH'});
+ expect((await assets.notePart(u.scope,u.workspaceId,note.noteId,'raw')).contentMarkdown).toBe('next');
+ expect((await root.query('SELECT part,revision,content_markdown FROM note_parts WHERE note_id=$1 ORDER BY part',[note.noteId])).rows).toEqual([
+  {part:'germination',revision:1,content_markdown:''},{part:'outline',revision:1,content_markdown:''},{part:'raw',revision:2,content_markdown:'next'},
+ ]);
+});
 it('keeps original text on tag task failure/stale revision and returns extracted tags for current revision',async()=>{const u=await fixture();const n=await assets.createNote(u.scope,u.workspaceId,{title:'中文项目 Alpha',parts:{raw:'这是一个中文项目笔记 with mixed English',outline:'',germination:''}},randomUUID());const changed=await assets.updateNote(u.scope,u.workspaceId,n.noteId,{parts:{raw:'最新内容 beta'}},n.etag,randomUUID());const task=(await root.query("SELECT task_id FROM content_jobs WHERE note_id=$1 AND note_revision_id=$2",[n.noteId,n.noteRevisionId])).rows[0];const stale=await vi.waitFor(async()=>{const attempt=await engine.claim(task.task_id,randomUUID());expect(attempt).not.toBeNull();return attempt!;},{timeout:3000,interval:20});await engine.execute(stale!);const tags=(await root.query('SELECT count(*)::int n FROM note_tags WHERE note_id=$1',[n.noteId])).rows[0].n;expect(tags).toBe(0);const task2=(await root.query("SELECT task_id FROM content_jobs WHERE note_id=$1 AND note_revision_id=$2",[n.noteId,changed.noteRevisionId])).rows[0];const current=await vi.waitFor(async()=>{const attempt=await engine.claim(task2.task_id,randomUUID());expect(attempt).not.toBeNull();return attempt!;},{timeout:3000,interval:20});await engine.execute(current);expect((await root.query('SELECT count(*)::int n FROM note_tags WHERE note_id=$1',[n.noteId])).rows[0].n).toBeGreaterThan(0);expect((await assets.getNote(u.scope,u.workspaceId,n.noteId)).parts.raw!.contentMarkdown).toBe('最新内容 beta');});
-it('imports text/markdown and fails closed for unsupported document payloads',async()=>{const u=await fixture();const ready=await assets.importNote(u.scope,u.workspaceId,{title:'导入',mimeType:'text/markdown',content:'# 标题\n正文'},randomUUID());expect(ready.status).toBe('ready');const pending=await assets.importNote(u.scope,u.workspaceId,{title:'扫描件',mimeType:'application/pdf',},randomUUID());expect(pending.status).toBe('needs-processing');});
+it('imports only extracted text and rejects binary formats without creating placeholder notes',async()=>{
+ const u=await fixture(),content='  已提取正文 😀\n\n第二段\n';
+ for(const mimeType of ['text/plain','text/markdown']){
+  const ready=await assets.importNote(u.scope,u.workspaceId,{title:'导入',mimeType,content},randomUUID());
+  expect(ready.status).toBe('ready');expect(ready.note.parts.raw!.contentMarkdown).toBe(content);
+ }
+ for(const mimeType of ['application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document','text/x-markdown'])
+  await expect(assets.importNote(u.scope,u.workspaceId,{title:'不支持',mimeType,content},randomUUID())).rejects.toMatchObject({code:'IMPORT_CONTENT_TYPE_UNSUPPORTED'});
+ for(const invalid of ['', ' \n\t '])
+  await expect(assets.importNote(u.scope,u.workspaceId,{title:'空正文',mimeType:'text/plain',content:invalid},randomUUID())).rejects.toMatchObject({code:'IMPORT_CONTENT_INVALID'});
+ await expect(assets.importNote(u.scope,u.workspaceId,{title:'超限规范正文',mimeType:'text/plain',content:'x'.repeat(500001)},randomUUID())).rejects.toMatchObject({code:'NOTE_CONTENT_TOO_LARGE'});
+ expect((await root.query('SELECT count(*)::int n FROM notes WHERE workspace_id=$1',[u.workspaceId])).rows[0].n).toBe(2);
+});
+it('HTTP text imports reject file payloads, preserve replay and enforce workspace ownership',async()=>{
+ const u=await fixture(),other=await fixture(),app=await buildApiServer({config:cfg});
+ const url=`/api/v1/workspaces/${u.workspaceId}/note-imports`,headers={...fixtureScopeHeaders(u.bearer),'x-idempotency-key':randomUUID()};
+ const payload={title:'提取结果',mimeType:'text/markdown',content:'# 外部提取结果\n\n正文 😀\n',sourceUrl:'https://fixture.test/original.pdf'};
+ try{
+  for(const invalid of [
+   {...payload,contentBase64:'UEsDBAoAAAAAAA=='},
+   {...payload,mimeType:'application/pdf'},
+   {...payload,mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'},
+   {title:payload.title,mimeType:payload.mimeType,sourceUrl:payload.sourceUrl},
+   {...payload,content:' \n\t '},
+  ]){
+   const rejected=await app.inject({method:'POST',url,headers,payload:invalid});expect(rejected.statusCode,rejected.body).toBe(400);
+  }
+  expect((await root.query('SELECT count(*)::int n FROM notes WHERE workspace_id=$1',[u.workspaceId])).rows[0].n).toBe(0);
+  const first=await app.inject({method:'POST',url,headers,payload});expect(first.statusCode,first.body).toBe(200);
+  expect(first.json().data).toMatchObject({status:'ready',note:{parts:{raw:{contentMarkdown:payload.content}}}});
+  const replay=await app.inject({method:'POST',url,headers,payload});expect(replay.statusCode,replay.body).toBe(200);expect(replay.json().data.note.noteId).toBe(first.json().data.note.noteId);
+  expect((await root.query('SELECT count(*)::int n FROM notes WHERE workspace_id=$1',[u.workspaceId])).rows[0].n).toBe(1);
+  const foreign=await app.inject({method:'POST',url,headers:{...fixtureScopeHeaders(other.bearer),'x-idempotency-key':randomUUID()},payload});expect(foreign.statusCode,foreign.body).toBe(404);
+ }finally{await app.close();}
+});
 it('content navigation and explicit relations expose evidence-based graph edges',async()=>{const u=await fixture();const a=await assets.createNote(u.scope,u.workspaceId,{title:'A',parts:{raw:'alpha',outline:'',germination:''}},randomUUID());const b=await assets.createNote(u.scope,u.workspaceId,{title:'B',parts:{raw:'beta',outline:'',germination:''}},randomUUID());const rel=await assets.createRelation(u.scope,u.workspaceId,a.noteId,{targetNoteId:b.noteId,relationType:'references',rationale:'explicit source'},randomUUID());expect(rel.origin).toBe('explicit');expect((await assets.noteRelations(u.scope,u.workspaceId,a.noteId)).items).toHaveLength(1);expect((await assets.navigation(u.scope,u.workspaceId,'graph')).nodes.length).toBeGreaterThanOrEqual(2);});
 it('uses only effective tags for graph edges and keeps other notes unchanged after removal',async()=>{const u=await fixture();const a=await assets.createNote(u.scope,u.workspaceId,{title:'A',parts:{raw:'alpha',outline:'',germination:''}},randomUUID());const b=await assets.createNote(u.scope,u.workspaceId,{title:'B',parts:{raw:'beta',outline:'',germination:''}},randomUUID());const c=await assets.createNote(u.scope,u.workspaceId,{title:'C',parts:{raw:'gamma',outline:'',germination:''}},randomUUID());const at=await assets.replaceNoteTags(u.scope,u.workspaceId,a.noteId,['AI','内容创作'],`"tags-${a.noteId}-0"`,randomUUID());const bt=await assets.replaceNoteTags(u.scope,u.workspaceId,b.noteId,['内容创作','短视频'],`"tags-${b.noteId}-0"`,randomUUID());await assets.replaceNoteTags(u.scope,u.workspaceId,c.noteId,['旅行'],`"tags-${c.noteId}-0"`,randomUUID());let graph=await assets.navigation(u.scope,u.workspaceId,'graph',{maxNodes:20,maxEdges:20});const shared=edgeList(graph).find(edge=>edge.relationType==='co_tagged'&&edge.evidence?.sharedTags?.some(tag=>tag.tagName==='内容创作'));expect(shared).toBeTruthy();expect(edgeList(graph).some(edge=>edge.relationType==='co_tagged'&&(edge.source===a.noteId&&edge.target===c.noteId||edge.source===c.noteId&&edge.target===a.noteId))).toBe(false);const sharedTag=at.tags.find(x=>x.displayName==='内容创作')!;const after=await assets.removeNoteTag(u.scope,u.workspaceId,a.noteId,sharedTag.tagId,at.tagEtag,randomUUID());expect(after.tags.map(x=>x.displayName)).toEqual(['AI']);graph=await assets.navigation(u.scope,u.workspaceId,'graph',{maxNodes:20,maxEdges:20});expect(edgeList(graph).some(edge=>edge.relationType==='co_tagged'&&edge.evidence?.sharedTags?.some(tag=>tag.tagName==='内容创作'))).toBe(false);expect((await assets.noteTags(u.scope,u.workspaceId,b.noteId)).tags.map(x=>x.displayName)).toEqual(['内容创作','短视频']);expect(bt.tagSetVersion).toBe(1);});
 it('manual tag changes fence old extraction and keep suggestions separate',async()=>{const u=await fixture();const n=await assets.createNote(u.scope,u.workspaceId,{title:'标签素材',parts:{raw:'原始内容 alpha',outline:'',germination:''}},randomUUID());const manual=await assets.replaceNoteTags(u.scope,u.workspaceId,n.noteId,['用户标签'],`"tags-${n.noteId}-0"`,randomUUID());const task=(await root.query("SELECT task_id FROM content_jobs WHERE note_id=$1 AND note_revision_id=$2",[n.noteId,n.noteRevisionId])).rows[0];const attempt=await engine.claim(task.task_id,randomUUID());expect(attempt).not.toBeNull();await engine.execute(attempt!);const tags=await assets.noteTags(u.scope,u.workspaceId,n.noteId);expect(tags.tags.map(x=>x.displayName)).toEqual(['用户标签']);expect(tags.suggestions.length).toBe(0);expect(tags.tagSetVersion).toBe(manual.tagSetVersion);const changed=await assets.updateNote(u.scope,u.workspaceId,n.noteId,{parts:{raw:'新正文 beta'}},n.etag,randomUUID());const task2=(await root.query("SELECT task_id FROM content_jobs WHERE note_id=$1 AND note_revision_id=$2",[n.noteId,changed.noteRevisionId])).rows[0];const attempt2=await engine.claim(task2.task_id,randomUUID());await engine.execute(attempt2!);expect((await assets.noteTags(u.scope,u.workspaceId,n.noteId)).tags.map(x=>x.displayName)).toEqual(['用户标签']);expect((await assets.getNote(u.scope,u.workspaceId,n.noteId)).parts.raw!.contentMarkdown).toBe('新正文 beta');});
@@ -120,7 +165,7 @@ it.each(['manual','revision','delete','folder'] as const)('rejects %s changes ma
  }};
  const e=new TaskEngine(worker,15000,undefined,undefined,provider),job=await jobFor(n.noteId);const a=await e.claim(job,randomUUID());await e.execute(a!);
  expect((await assets.noteTags(u.scope,u.workspaceId,n.noteId)).tags).toHaveLength(0);expect((await root.query('SELECT outcome FROM content_jobs WHERE task_id=$1',[job])).rows[0].outcome).toBe('stale');
- expect((await root.query('SELECT count(*)::int n FROM note_part_revisions WHERE note_id=$1',[n.noteId])).rows[0].n).toBeGreaterThanOrEqual(3);
+ expect((await root.query('SELECT count(*)::int n FROM note_parts WHERE note_id=$1',[n.noteId])).rows[0].n).toBeGreaterThanOrEqual(3);
 });
 it('expired attempt cannot write tags/results; disabled, malformed and failed providers preserve original text',async()=>{
  const u=await fixture();

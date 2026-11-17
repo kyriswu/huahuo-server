@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { transaction, assertScope, audit, DomainError, type Scope } from '../identity/store.js';
 import { idempotent } from '../../lib/idempotency.js';
 import type { AdminScope } from '../admin/service.js';
-import { type TaskRow, event, enqueueIntent, taskDto, terminal } from './model.js';
+import { type TaskRow, event, enqueueIntent, newTaskMaxAttempts, taskDto, terminal } from './model.js';
 import type { BillingService } from '../billing/service.js';
+import { finalizeUnsuccessfulTaskTx } from './reservations.js';
+import {resolveTraceId} from '../../lib/trace.js';
 export class TaskService {
  constructor(readonly pool:pg.Pool, private readonly secret:string, readonly billing?:BillingService){if(!secret||secret.length<32)throw new Error('IDEMPOTENCY_SECRET_REQUIRED');}
  async authorized(tx:pg.PoolClient,scope:Scope,id:string,locking=false) {
@@ -19,7 +21,7 @@ export class TaskService {
    return idempotent(tx,this.secret,`${scope.userId}:${input.workspaceId}`,'demo.create',key,input,async()=>{
     const id=randomUUID(),ref=randomUUID();
     await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[ref,scope.userId,input.workspaceId,input.text]);
-    const r=await tx.query<TaskRow>("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state) VALUES($1,$2,$3,'demo.digest','content',$4,'queued') RETURNING *",[id,scope.userId,input.workspaceId,ref]);
+    const r=await tx.query<TaskRow>("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,$3,'demo.digest','content',$4,'queued',$5,$6) RETURNING *",[id,scope.userId,input.workspaceId,ref,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
     if (this.billing) { await this.billing.assertCanRun(scope.userId,1n); const reservation=await this.billing.reserveCreditsTx(tx,{userId:scope.userId,reservationKey:`task:${id}`,requestedCredits:1n,taskId:id}); await tx.query('UPDATE tasks SET reservation_id=$2 WHERE id=$1',[id,reservation.reservationId]); }
     await enqueueIntent(tx,id);await event(tx,id);await audit(tx,scope,'task.create',id);return {task:taskDto(r.rows[0]!)};
    });
@@ -40,14 +42,23 @@ export class TaskService {
  async change(tx:pg.PoolClient,t:TaskRow,action:'cancel'|'retry') {
   if(action==='retry'){
    if(t.state!=='failed'||!t.retryable||t.external_state!=='none'||t.kind!=='demo.digest')throw new DomainError(409,'TASK_RETRY_NOT_ALLOWED');
+   if(t.attempt_no>=9)throw new DomainError(409,'TASK_ATTEMPT_LIMIT');
+   // A terminal failure releases the old reservation. A new execution must
+   // reserve the same amount again, within this task mutation's transaction.
+   if(t.reservation_id){
+    if(!this.billing)throw new DomainError(503,'BILLING_NOT_CONFIGURED');
+    if(!t.user_id)throw new DomainError(409,'TASK_RESERVATION_MISMATCH');
+    const renewed=await this.billing.reserveTaskRetryTx(tx,{userId:t.user_id,taskId:t.id,reservationId:t.reservation_id,reservationKey:`task:${t.id}:retry:${t.version}`});
+    await tx.query('UPDATE tasks SET reservation_id=$2 WHERE id=$1',[t.id,renewed.reservationId]);
+   }
    await tx.query("UPDATE tasks SET state='queued',version=version+1,max_attempts=LEAST(attempt_no+3,9),error_code=NULL,retryable=false,available_at=now() WHERE id=$1 AND attempt_no<9",[t.id]);
    // A bounded lifetime attempt budget prevents unlimited automated/admin retries.
-   if(t.attempt_no>=9)throw new DomainError(409,'TASK_ATTEMPT_LIMIT');
    await enqueueIntent(tx,t.id);
   } else {
    if(terminal(t.state))return;
    const managedWaiting=t.state==='waiting_external'&&['rag.document-ingest','text.ingest'].includes(t.kind);
    const next=t.external_state!=='none'||t.state==='running'||managedWaiting?'cancel_requested':'cancelled';
+   if(next==='cancelled'){await finalizeUnsuccessfulTaskTx(tx,t,{state:'cancelled'});return;}
    await tx.query('UPDATE tasks SET state=$2,cancel_requested_at=now(),version=version+1,retryable=false WHERE id=$1',[t.id,next]);
    if(managedWaiting){await tx.query('UPDATE tasks SET available_at=now() WHERE id=$1',[t.id]);await enqueueIntent(tx,t.id);}
   }

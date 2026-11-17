@@ -1,98 +1,44 @@
 import type pg from 'pg';
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config/config.js';
 import { env } from '../helpers.js';
-import { downloadSourceBytes, prepareFileText, validateSourceUri } from '../../src/modules/rag/document-preparation.js';
+import { sourceFromUrl, sourceMetadataFromUrl, validateSourceUri } from '../../src/modules/rag/document-preparation.js';
 import { RagIngestionRepository } from '../../src/modules/rag/repository.js';
+import { ProcessingNodes } from '../../src/modules/processing-nodes/service.js';
+import { TextIngestionService } from '../../src/modules/text-ingestion/service.js';
 
-const configuration = () => loadConfig('worker', { ...env, ALLOW_MOCK_PROVIDERS: 'true', RAG_PROVIDER_MODE: 'mock', RAG_SOURCE_ALLOWED_HOSTS: 'files.example' });
-const fetched = (content: string, mime: string) => vi.fn<typeof fetch>(async () => new Response(content, { headers: { 'content-type': mime } }));
+const configuration = () => {
+  const config = loadConfig('worker', { ...env, RAG_PROVIDER_MODE: 'disabled', RAG_SOURCE_ALLOWED_HOSTS: 'files.example' });
+  config.rag.enabled = true;
+  return config;
+};
+const scope = { userId: 'user', sessionId: 'session', traceId: 'trace' };
+const files = [
+  ['source.txt', 'text/plain'], ['source.md', 'text/markdown'], ['source.csv', 'text/csv'],
+  ['source.pdf', 'application/pdf'], ['source.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+] as const;
 
-describe('native file text preparation', () => {
-  it('retains exact Markdown text and only downloads the original source', async () => {
-    const raw = '  # 标题\r\n\r\n原文😀  \r\n';
-    const fetchImpl = fetched(raw, 'text/markdown');
-    const result = await prepareFileText(configuration(), { id: 'fixture', uri: 'https://files.example/source.md' }, { fetchImpl });
-    expect(result).toEqual({ content: raw, format: 'markdown' });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://files.example/source.md');
+describe('external file URL metadata', () => {
+  it.each(files)('passes %s metadata without fetching or parsing source bytes', (fileName, mimeType) => {
+    const fetchImpl = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('SOURCE_FETCH_FORBIDDEN'));
+    try {
+      const url = `https://files.example/${fileName}?signature=opaque`;
+      expect(sourceFromUrl(url, configuration())).toEqual({ url, fileName, mimeType });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally { fetchImpl.mockRestore(); }
   });
 
-  it.each([['source.txt', 'text/plain'], ['source.csv', 'text/csv']])('keeps UTF-8 %s input unchanged', async (fileName, mime) => {
-    const raw = '中文,emoji😀\r\n原文';
-    await expect(prepareFileText(configuration(), { id: 'fixture', uri: `https://files.example/${fileName}` }, { fetchImpl: fetched(raw, mime) })).resolves.toEqual({ content: raw, format: 'text' });
+  it('decodes the filename and leaves unknown format detection to the external parser', () => {
+    expect(sourceFromUrl('https://files.example/%E8%B5%84%E6%96%99.MD', configuration())).toMatchObject({ fileName: '资料.MD', mimeType: 'text/markdown' });
+    expect(sourceFromUrl('https://files.example/opaque-object?signature=fixture', configuration())).toMatchObject({ fileName: 'opaque-object', mimeType: 'application/octet-stream' });
   });
 
-  it('rejects a PDF without submitting an external parse request', async () => {
-    const fetchImpl = fetched('%PDF-1.7\n%%EOF', 'application/pdf');
-    await expect(prepareFileText(configuration(), { id: 'fixture', uri: 'https://files.example/source.pdf' }, { fetchImpl })).rejects.toMatchObject({ code: 'RAG_FILE_TYPE_UNSUPPORTED', retryable: false });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  it.each(['bad%escape.txt', 'folder%2Ffile.md', 'bad%00name.txt'])('rejects invalid decoded filename %s', name => {
+    expect(() => sourceFromUrl(`https://files.example/${name}`, configuration())).toThrow('RAG_FILE_NAME_INVALID');
   });
 
-  it('rejects file declarations that conflict with the actual bytes', async () => {
-    await expect(prepareFileText(configuration(), { id: 'fixture', uri: 'https://files.example/source.txt' }, { fetchImpl: fetched('%PDF-1.7\n%%EOF', 'text/plain') })).rejects.toMatchObject({ code: 'RAG_FILE_TYPE_MISMATCH' });
-    await expect(prepareFileText(configuration(), { id: 'fixture', uri: 'https://files.example/source.pdf' }, { fetchImpl: fetched('not a PDF', 'application/pdf') })).rejects.toMatchObject({ code: 'RAG_FILE_TYPE_MISMATCH' });
-  });
-
-  it('rejects binary or invalid UTF-8 text without inventing body content', async () => {
-    await expect(prepareFileText(configuration(), { id: 'fixture', uri: 'https://files.example/source.txt' }, { fetchImpl: fetched('\0binary', 'text/plain') })).rejects.toMatchObject({ code: 'RAG_FILE_TYPE_MISMATCH' });
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(new Uint8Array([255]).buffer, { headers: { 'content-type': 'text/plain' } }));
-    await expect(prepareFileText(configuration(), { id: 'fixture', uri: 'https://files.example/source.txt' }, { fetchImpl })).rejects.toMatchObject({ code: 'RAG_SOURCE_INVALID_TEXT' });
-  });
-
-  it('rejects Office input even when its signed object path has no extension', async () => {
-    const bytes = new Uint8Array(64); bytes.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(bytes.buffer, { headers: { 'content-type': 'application/msword' } }));
-    await expect(prepareFileText(configuration(), { id: 'office', uri: 'https://files.example/object' }, { fetchImpl })).rejects.toMatchObject({ code: 'RAG_FILE_TYPE_UNSUPPORTED' });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it('enforces the full plaintext limit without truncating', async () => {
-    const config = configuration(); config.rag.plainTextMaxChars = 5;
-    await expect(prepareFileText(config, { id: 'fixture', uri: 'https://files.example/source.txt' }, { fetchImpl: fetched('123456', 'text/plain') })).rejects.toMatchObject({ code: 'RAG_PLAIN_TEXT_TOO_LARGE' });
-  });
-
-  it('prepares native text with all model providers disabled and no model credentials', async () => {
-    const config = loadConfig('worker', { ...env, RAG_PROVIDER_MODE: 'disabled', RAG_SOURCE_ALLOWED_HOSTS: 'files.example' });
-    const fetchImpl = fetched('纯文本原文', 'text/plain');
-    await expect(prepareFileText(config, { id: 'fixture', uri: 'https://files.example/source.txt' }, { fetchImpl })).resolves.toEqual({ content: '纯文本原文', format: 'text' });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([['source.pdf', 'application/pdf'], ['source.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'], ['source.ppt', 'application/vnd.ms-powerpoint'], ['source.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']])('rejects %s at admission before opening a database transaction', async (fileName, mimeType) => {
-    const config = configuration(); config.rag.enabled = true;
-    const connect = vi.fn();
-    const repository = new RagIngestionRepository({ connect } as unknown as pg.Pool,config);
-    await expect(repository.create({ userId: 'user', sessionId: 'session', traceId: 'trace' }, { fileName, mimeType, ossUrl: `https://files.example/${fileName}` })).rejects.toMatchObject({ statusCode: 400, code: 'RAG_FILE_TYPE_UNSUPPORTED' });
-    expect(connect).not.toHaveBeenCalled();
-  });
-});
-
-describe('bounded source downloading', () => {
-  it('checks redirected hosts before issuing the second request', async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/private' } }));
-    await expect(downloadSourceBytes('https://files.example/source.txt', configuration(), fetchImpl)).rejects.toMatchObject({ code: 'RAG_SOURCE_HOST_NOT_ALLOWED' });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it('stops a chunked body once the bound is crossed and cancels its stream', async () => {
-    const config = configuration(); config.rag.maxSourceBytes = 3;
-    const cancel = vi.fn();
-    const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.enqueue(new Uint8Array([3, 4])); }, cancel });
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(stream));
-    await expect(downloadSourceBytes('https://files.example/source.txt', config, fetchImpl)).rejects.toMatchObject({ code: 'RAG_SOURCE_TOO_LARGE' });
-    expect(cancel).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps the timeout active while receiving the body', async () => {
-    const config = configuration(); config.rag.downloadTimeoutMs = 10;
-    const cancel = vi.fn();
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(new ReadableStream<Uint8Array>({ cancel })));
-    await expect(downloadSourceBytes('https://files.example/source.txt', config, fetchImpl)).rejects.toMatchObject({ code: 'RAG_SOURCE_TIMEOUT', retryable: true });
-    expect(cancel).toHaveBeenCalledTimes(1);
-  });
-
-  it('understands signed TTL dates and rejects expired or malformed sources before fetch', async () => {
+  it('understands signed TTL dates and rejects expired or malformed sources before dispatch', () => {
     const config = configuration();
     const date = new Date().toISOString().replace(/[-:]/gu, '').replace(/\.\d{3}Z$/u, 'Z');
     expect(validateSourceUri(`https://files.example/a?X-Amz-Date=${date}&X-Amz-Expires=1800`, config).hostname).toBe('files.example');
@@ -100,21 +46,63 @@ describe('bounded source downloading', () => {
     expect(() => validateSourceUri('https://files.example/a?Expires=1', config)).toThrow('RAG_SOURCE_URL_EXPIRED');
     expect(() => validateSourceUri('https://person:password@files.example/a', config)).toThrow('RAG_SOURCE_URL_INVALID');
     expect(() => validateSourceUri('file:///private.txt', config)).toThrow('RAG_SOURCE_URL_INVALID');
+    expect(() => validateSourceUri('https://files.example.attacker.test/source.txt', config)).toThrow('RAG_SOURCE_HOST_NOT_ALLOWED');
   });
 
-  it('uses the same signed-URL policy at the existing file ingestion entrypoint', async () => {
-    const config = configuration(); config.rag.enabled = true;
-    const boundary = new Error('DB_BOUNDARY');
-    const connect = vi.fn(async () => { throw boundary; });
-    const pool = { connect } as unknown as pg.Pool;
-    const repository = new RagIngestionRepository(pool,config);
-    const scope = { userId: 'user', sessionId: 'session', traceId: 'trace' };
-    const input = { fileName: 'source.txt', mimeType: 'text/plain' };
-    await expect(repository.create(scope, { ...input, ossUrl: 'not-a-url' })).rejects.toMatchObject({ statusCode: 400, code: 'RAG_SOURCE_URL_INVALID' });
-    await expect(repository.create(scope, { ...input, ossUrl: 'https://files.example/a?X-Amz-Date=20000101T000000Z&X-Amz-Expires=1800' })).rejects.toMatchObject({ statusCode: 400, code: 'RAG_SOURCE_URL_EXPIRED' });
-    expect(connect).not.toHaveBeenCalled();
-    const date = new Date().toISOString().replace(/[-:]/gu, '').replace(/\.\d{3}Z$/u, 'Z');
-    await expect(repository.create(scope, { ...input, ossUrl: `https://files.example/a?X-Amz-Date=${date}&X-Amz-Expires=1800` })).rejects.toBe(boundary);
+  it('accepts valid OSS V4 URLs and rejects expired or incomplete signatures', () => {
+    const config = configuration(), date = new Date().toISOString().replace(/[-:]/gu, '').replace(/\.\d{3}Z$/u, 'Z');
+    const query = `x-oss-signature-version=OSS4-HMAC-SHA256&x-oss-date=${date}&x-oss-expires=1800`;
+    expect(validateSourceUri(`https://files.example/a?${query}`, config).hostname).toBe('files.example');
+    for (const parameters of [
+      'x-oss-date=20000101T000000Z&x-oss-expires=1800',
+      `x-oss-date=${date}&x-oss-expires=0`, `x-oss-date=${date}&x-oss-expires=invalid`,
+      `x-oss-date=${date}`, 'x-oss-expires=1800', 'x-oss-signature-version=OSS4-HMAC-SHA256',
+    ]) expect(() => validateSourceUri(`https://files.example/a?${parameters}`, config)).toThrow('RAG_SOURCE_URL_EXPIRED');
+  });
+
+  it('reads accepted source metadata independently of dispatch policy for remote-job recovery', () => {
+    const url = 'https://previous-host.example/source.md?Expires=1';
+    expect(sourceMetadataFromUrl(url)).toEqual({ url, fileName: 'source.md', mimeType: 'text/markdown' });
+    expect(() => sourceFromUrl(url, configuration())).toThrow('RAG_SOURCE_HOST_NOT_ALLOWED');
+  });
+});
+
+describe('external parser admission', () => {
+  it('reports an unavailable node before invoking a parser when the registered catalog is empty', async () => {
+    const query = vi.fn(async () => ({ rowCount: 0, rows: [] }));
+    const tx = Object.assign(new EventEmitter(), { query, release: vi.fn() });
+    const pool = { connect: vi.fn(async () => tx) } as unknown as pg.Pool;
+    const factory = vi.fn(), execute = vi.fn();
+    const nodes = new ProcessingNodes(pool, configuration(), factory);
+    await expect(nodes.withNode('document', { requestId: 'file-request', fingerprint: 'a'.repeat(64) }, execute))
+      .rejects.toMatchObject({ statusCode: 503, code: 'PROCESSING_NODE_UNAVAILABLE' });
+    expect(query).toHaveBeenCalledWith('ROLLBACK');
+    expect(factory).not.toHaveBeenCalled(); expect(execute).not.toHaveBeenCalled();
+    await nodes.close();
+  });
+
+  it('admits manual input without an external parser or model credentials', async () => {
+    const boundary = new Error('DB_BOUNDARY'), connect = vi.fn(async () => { throw boundary; });
+    const service = new TextIngestionService({ connect } as unknown as pg.Pool, configuration());
+    await expect(service.create(scope, { source_type: 'MANUAL_INPUT', raw_content: '手动原文' }, 'manual-key')).rejects.toBe(boundary);
     expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(files)('admits externally parsed %s without a local format parser or model credentials', async (fileName, mimeType) => {
+    const boundary = new Error('DB_BOUNDARY'), connect = vi.fn(async () => { throw boundary; });
+    const pool = { connect } as unknown as pg.Pool, config = configuration();
+    await expect(new RagIngestionRepository(pool, config).create(scope, { fileName, mimeType, ossUrl: `https://files.example/${fileName}` })).rejects.toBe(boundary);
+    await expect(new TextIngestionService(pool, config).create(scope, { source_type: 'FILE_UPLOAD', origin_resource_uri: `https://files.example/${fileName}` }, 'file-key')).rejects.toBe(boundary);
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies the same signed-URL policy to both file entrypoints', async () => {
+    const config = configuration(), boundary = new Error('DB_BOUNDARY');
+    const connect = vi.fn(async () => { throw boundary; }), pool = { connect } as unknown as pg.Pool;
+    const repository = new RagIngestionRepository(pool, config), service = new TextIngestionService(pool, config);
+    const expired = 'https://files.example/a?X-Amz-Date=20000101T000000Z&X-Amz-Expires=1800';
+    await expect(repository.create(scope, { fileName: 'source.txt', mimeType: 'text/plain', ossUrl: expired })).rejects.toMatchObject({ statusCode: 400, code: 'RAG_SOURCE_URL_EXPIRED' });
+    await expect(service.create(scope, { source_type: 'FILE_UPLOAD', origin_resource_uri: expired }, 'file-key')).rejects.toMatchObject({ statusCode: 400, code: 'RAG_SOURCE_URL_EXPIRED' });
+    expect(connect).not.toHaveBeenCalled();
   });
 });

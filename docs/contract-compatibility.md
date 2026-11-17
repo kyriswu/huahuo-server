@@ -1,3 +1,69 @@
+## 用户资源、文件复用与当前笔记（2026-11-17，本地候选）
+
+资源只按用户归属；`resources` 移除工作区、重复上传 ID、解析处理状态及软删除时间，新增 `reference_count`。文件不可覆盖、无业务版本；按用户最终决定不做内容去重，App 不计算 MD5/SHA，也无 content_md5 字段/索引。每次新上传分配新 UUID；业务直接引用同一 resourceId 时可跨自己的工作区，空间按 ID 只计一次，跨用户禁止。引用次数随实际业务关系同事务增减；最后一个引用解除时同事务提交现有删除任务，Worker 删除 OSS 后硬删资源行并释放空间，不留零引用保留期。原任务完成回执保障重试不重复扣减。
+
+`POST /api/v1/media/upload-token` 接收文件名/MIME/大小及可选工作区，JWT＋X-Idempotency-Key；同用户同键/同元数据只用于请求重试，不进行内容比较。新上传响应 `uploadRequired=true`；同次上传已完成且 Redis 回执仍在时，同键重试响应 `uploadRequired=false` 和原 ID，跳过重复 PUT/complete。签名绑定单片会话、长度与 MIME，不要求 Content-MD5；完成核对分片/HEAD 元信息而非文件内容。Redis 仍限首次起 24 小时，不落 PG、不占额度、不触发业务，业务成功后正式登记并清 Redis。`sha256` 可空备用，新上传不填写；完整协议见[资源说明](runbooks/user-storage-layout.md)。
+
+Note 只保存当前 `note_parts`，每个 note/part 一行；noteRevisionId/partRevisionId 仅作当前修订和异步防旧写标记。移除历史正文读取 query `partRevisionId` 和 PUT 字段 `basePartRevisionId`，更新仍强制整篇 Note 的 If-Match；GET part 只返回当前内容。旧参数不保留旁路，历史图片 pin 一并退役，当前引用和回收站语义保留。
+
+新增 0009–0011，冻结历史 SQL 不变，无物理外键；旧写入方必须排空后迁移，不支持新旧混跑，发布 API/database/tasks/configuration 兼容项维持 false。当前本地证据及未验边界见[验收](acceptance/user-resources-and-current-notes.md)，不代表已部署。
+
+## 内部 HTTP 协定与入口收敛（2026-11-17，本地实现）
+
+Server内部接口统一由src/http/internal-routes.ts注册到/internal/v1，RAG、gateway、解析回调按业务拆分；有限策略中间件集中处理可信身份头、网关会话与单次回调能力，禁止缓存并隐藏公开OpenAPI。内部RAG与公开入口复用严格Schema、业务handler和运行配置。Server当前没有主动调用Agent的业务；不新增无调用客户端、方向ServiceKey或JWT第二验证分支。
+
+解析回调从/api/v1/document-parser/callbacks迁到/internal/v1/document-parser/callbacks，Server生成URL与trace识别同步，旧路径404。现有Agent→Server RAG与gateway URL不变。出站手写HTTP共用ServiceHttpClient，统一trace、deadline、取消、重定向拒绝、受限JSON和响应释放，业务provider继续拥有协议与重试策略。详见[双方协定](runbooks/internal-services.md)及[本地验收](acceptance/internal-services.md)；Agent仓库未修改/联调，未部署。
+
+## 通用上传与业务认领分离（2026-11-17，本地候选，待发布）
+
+客户端可只配置一个 API Base URL，通过统一上传组件完成申请、OSS part PUT 和 complete；文件字节不经过 Server，临时 OSS 地址仍可在客户端网络层看到。本仓库只实现 Server 协议，没有修改 App 或声称客户端 SDK 已接线。当前 `upload-token` 接受 `fileName/mimeType/sizeBytes/workspaceId?`，移除 `sourceScene/durationSeconds/distillToDigitalTwin/sha256`，不保留旧参数兼容。新文件返回 `uploadId=resourceId=Object Key UUID`、短期签名 `expiresAt` 与 24 小时 `retentionExpiresAt`；同次上传请求的重试沿用其上传 ID，独立重传不合并，详见上项。
+
+上传阶段只在 Redis 登记临时归属、幂等和清理索引，不写 PG 上传／资源／容量记录，不计用户实际用量，也不读取额度汇总或判断剩余空间。本次不增加异常上传限流或临时上传数量／总量限制。Server 初始化 OSS multipart，仅签发 part 1 PUT，complete 核对分片、完成远端对象并 HEAD 校验大小、声明 MIME、上传身份和版本；不下载正文、不做内容嗅探／音频时长／SHA 实测，也不触发解析或收费。`sha256` 返回 null。Complete 成功后的远端 uploadId 失效，原 part 签名无法在删除后重新创建对象。
+
+只有后续业务 API 调用 `ResourceClaims`，才按既有正式额度规则在同一个业务事务里建立 `resources`、confirmed 占用和业务关系，提交后立即尽力移除 Redis 回执；该移除失败只留下临时回执，不重复计算用量，也不影响正式空间判定。临时认领有效期从首次申请起最多 24 小时，重试、续签和上传完成不延长，到期后不能再认领。它不是 Redis 自动 TTL 或精确物理删除时限，清理完成前保留必要元信息。Worker maintenance 约每 60 秒扫描最多 10 条，持同资源锁查统一 `resources`：已认领只清 Redis，未认领才取消／核对／删除 OSS 并清理回执。不新增临时清理 PG 任务、不复制对象、不引入 OSS 回调或新的计费模型。
+
+业务真正使用文件时，正式额度判断使用 `users.storage_used_bytes + storage_reserved_bytes + 本次新认领大小`，不计任何 Redis 临时记录，也不逐次 SUM 明细。业务认领条件递增 used，正式删除确认同事务递减 used；已有 storage reserve／confirm／release 同步维护 reserved／used，重复提交与重试不重复增减。已有 PG reserved 基础逻辑与临时上传无关，本次不扩展其业务规则。明细及普通索引继续用于细分统计与对账，不新增统计表、后台对账任务或 credits／扣费功能。`0008` 迁移新增两个汇总字段并以现有明细初始化；此调整不改变上传 HTTP DTO。
+
+playback 仍返回 15 分钟 OSS GET 签名；extraction/assets 保持含 `url/expiresAt/mimeType` 的 JSON，gzip 产物另含 `contentEncoding:gzip`。签名与 UUID 识别继续分离，KBIMAGE、解析产物和模型契约保持各自既有边界。临时完成但尚未认领的自有文件可在有效期内取得播放链接；正式资源已删除时不能通过旧临时回执恢复读取。
+
+新增 `0007_generic_direct_upload.sql` 退役 PG 上传表及资源业务字段，后续 `0008` 增加用户存储汇总字段，与旧二进制不兼容；发布前必须停止旧签名受理并处理在途远端写入，SQL guard 不能证明 OSS PUT 已停止。完整对象不能配置“24 小时 OSS 自动删除”，否则会删除已认领文件；未完成分片生命周期须实际检查。Redis 灾难性丢失需要 OSS 清单对账，不承诺零残留恢复。当前实现及本轮测试范围见[通用上传验收](acceptance/generic-uploads.md)；[旧 OSS 直读验收](acceptance/oss-direct-access.md)仅保留历史证据，不代表本次迁移已通过或已发布。
+
+## 笔记列表20条分页与摘要（2026-11-17，待发布）
+
+`GET /api/v1/workspaces/:workspaceId/notes`固定每页20条，以响应`nextCursor`继续读取；最后一页为null。列表项保留身份、归属、标题、状态、版本、来源和时间等元信息，新增纯文本`preview`（最多200个Unicode码点，允许为空），移除完整`parts/resourceRefs`。详情及part接口继续读取完整正文，列表不生成图片播放链接。排序为更新时间降序、ID升序，游标保留微秒并绑定工作区；无效游标400，跨请求并发编辑需刷新首屏。
+
+这是用户确认的列表/详情拆分，API兼容声明为false，不提供旧全文模式。当前App HEAD bf23c1b的首页读取本地SQLite，尚无远程笔记列表接线；旧P06文档所引用的其他App提交不代表当前消费契约。42项真实依赖与11项接口契约验证见[验收](acceptance/note-pagination.md)，未部署。
+
+## KBIMAGE 统一正文（2026-11-17，待发布）
+
+Note及MANUAL_INPUT在哈希/幂等/版本前，将Markdown、引用式图片与HTML img统一成已授权资源的KBIMAGE；底层不再混存图片语法，外部解析原有KBIMAGE属性与OCR保持。无法映射到已上传自有图片的地址返回NOTE_IMAGE_UPLOAD_REQUIRED，不读取外链。此项替代11月14日“asset:// Markdown及未知外链保留”的存储策略；入口多格式是当前输入适配，读取没有历史格式兼容路径。
+
+展示/检索共用轻量KBIMAGE扫描器。按用户明确要求，Note HTTP的contentMarkdown直接返回唯一可编辑标准Markdown，不再额外返回displayMarkdown/imageLinks；手动文本HTTP raw_content同样转换，内部存储与任务仍使用KBIMAGE。Note响应contentSha256计算实际返回Markdown，稳定版本使用ETag/partRevisionId，内部canonical哈希不受签名变化影响。
+
+图片URL的#kbimage节点指纹用于保存时恢复OCR/属性，不发往OSS；旧链接即使失效也按资源路径/Object Key查UUID，不请求图片。新图片必须先上传并完成元数据确认，首次保存到业务时由同一事务认领为正式资源。指纹必须匹配当前正文，同UUID多套OCR不盲选；原key重试在恢复元数据前完成幂等重放。局部写入运输上限8MiB/200万字符，canonical原业务上限保持。RAG机器证据content/evidence/hash/坐标契约保持，RAG displayMarkdown仅用于预览。KBIMAGE规范化本身没有新增SQL/环境变量；通用上传迁移见文首。真实App未接线，既存数据需发布前盘点，详见[实现、性能与验收](acceptance/kbimage-unification.md)。
+
+## 文件入口底层约定（2026-11-17，已实现，待发布）
+
+所有文件默认由客户端自行上传OSS，Server接收OSS链接和业务元信息；外部解析服务通过链接读取文件。上传到Server的能力必须由用户另行提出独立需求，不把下载再上传、multipart转发或旧中转作为默认路径或兼容兜底。该约定优先于早期规格中的Server接收上传设计。
+
+正式文档、FILE_UPLOAD 与 Admin 试用统一提交 URL JSON 给外部解析服务；TXT/Markdown/CSV/PDF/Office 都没有本地解析分支。删除 Server 二进制上传及 DOCX Base64 导入；媒体 upload-token 返回 OSS 单分片 PUT 签名，complete 只确认临时文件，正式资源由后续业务事务认领，完整下载检查已移除。Note imports 只接受已提取的 text/plain 或 text/markdown 正文。任务意图、回调、取消和租约保护继续生效，URL 与资源 ID 必须指向同一对象。协议与验证见[验收](acceptance/document-parser-url-contract.md)，未部署。
+
+## 任务基础能力加强、计费扩展暂缓（2026-11-17）
+
+任务载荷与公开HTTP结构不变；通用终态与数据库事务内业务适配分离。Scheduler恢复改为逐条提交并返回内部错误摘要，其他任务继续；Worker在取得锁后重新验证owner/version/attempt和数据库租约，拒绝过期续租及迟到外部提交。沿用此前预留释放修复，未新增计价或扣费模型。任务基础专项及此前323项隔离依赖结果见[验收](acceptance/task-reservation-recovery.md)；当前trace严格Schema的升级边界以本页trace章节为准，不声明历史二进制兼容。
+
+## 简单traceId贯通（2026-11-17）
+
+统一X-Trace-Id/Envelope traceId，删除X-Request-Id别名；所有任务创建时写入必填trace，Worker只读取，队列仍只传taskId。回调始终使用任务trace；token鉴权与幂等协议不变。0005无默认值且不支持旧二进制省略字段，清单database=false；后续按严格新Schema统一更新四角色，不保留旧写入路径。两仓分别发布，不修改宿主入口，见[验收](acceptance/trace-id.md)。
+
+## 发布顺序与按角色清单（2026-11-17）
+
+services控制实际更新的1–4个运行角色，未选角色保留成功镜像和ENV；配置生效使用方不得漏选，新增SQL仍全角色。成功记录增加逐角色镜像身份，用于混合版本下的同SHA幂等复核；固定云命令SHA输入及原version/stage/status/code终态协议不变，没有新增App API、鉴权入口或自动回滚参数。267项发布专项及真实宿主原地验证分别留证，见[验收](acceptance/release-order-and-services.md)。
+
+## 任务终态与预留事务修复（2026-11-17）
+
+公开Task请求/响应、队列载荷与事件结构不变。失败/取消与预留释放同事务，自动重试保留预留；用户手动重试重新预留，余额不足不改变任务，幂等重放无额外预留。Admin无预留重试不变，有预留任务从财务只读入口返回BILLING_NOT_CONFIGURED，防止绕过准入。真实App当前未找到通用Task消费者；新增权限迁移、真实PG回归及未验边界见[验收](acceptance/task-reservation-recovery.md)。
+
 ## 原生认证子请求与配套Agent（2026-11-16）
 
 业务路径/载荷和可信身份头保持：公开Server为/api/v1，Agent公开前缀/agent，内部API仍为/api。Server认证子请求不再直接返回302，而以401和登录提示头交给入口处理；Cookie刷新/清理采用独立响应头。Agent删除重复注销和匿名跳转，保留原生用户隔离。内部Server地址必须为稳定origin。首次切换仍与旧线上鉴权不兼容，需两端和宿主入口一起切换；见[契约](runbooks/gateway-auth.md)和[验收](acceptance/ingress-auth.md)。
@@ -254,20 +320,21 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 
 开发政策明确写入 `BILLING_MODE=development`，不接真实支付，也不把 10,000,000 视为正式商业套餐。生产默认 billing disabled，未配置 live policy 时稳定返回 `BILLING_NOT_CONFIGURED`/`BILLING_POLICY_UNAVAILABLE`。
 
-## P05：媒体资源与文件传输
+## P05：通用上传当前契约
 
-App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本地工作树无变化。核对 `upload_client.dart`、`media_resource_client.dart`、`endpoint_catalog.dart`、聊天下载/相册/头像调用。
+早期 P05 曾参照 App commit `20f61b78887f9288d1fd3227f326e6374d516f27` 的媒体客户端；该历史参照不能作为当前 App 消费新协议的证明。当前 Server 契约如下，App 只读核对与未接线边界见[通用上传验收](acceptance/generic-uploads.md)。本轮不修改 App、不运行 Flutter。
 
-| API | App 实际契约 | 后端状态 |
+| API | 请求／响应约定 | 后端状态 |
 |---|---|---|
-| `POST /api/v1/media/upload-token` | Bearer + `X-Idempotency-Key`；sourceScene/fileName/mimeType/sizeBytes/durationSeconds/sha256?/workspaceId?；返回 uploadId/resourceId、绝对 uploadUrl、method、headers | CODE；不要求 App 私有 URI；返回短期 `X-Upload-Capability`，对象 PUT 不带 Bearer |
-| `PUT /api/v1/media/uploads/{uploadId}/object` | 按 token method/headers 流式上传真实字节 | CODE；大小、哈希、MIME/音频时长服务端核验，临时落盘后不可覆盖发布 |
-| `POST /api/v1/media/uploads/{uploadId}/complete` | Bearer + 幂等；body 可含 workspaceId；丢响应可重试 | CODE；初始化即分配稳定 resourceId，重复 complete 不重复资源/计量 |
-| `GET /api/v1/media/resources/{resourceId}/playback` | Bearer；返回可直接 GET 的短期 URL 与 mime/fileName/expiresAt | CODE；跨用户 404，URL 为持有者 capability |
-| `GET .../object` | App 直接 GET signed URL，图片/音频支持 Range | CODE；206/full/suffix/open range，416 返回 `Content-Range: bytes */size` |
+| `POST /api/v1/media/upload-token` | Bearer + `X-Idempotency-Key`；`fileName/mimeType/sizeBytes/workspaceId?`；返回 uploadId/resourceId、绝对 uploadUrl、method、headers、expiresAt、retentionExpiresAt | 本地候选；Redis 幂等受理，不检查剩余空间或预留容量；只签发 OSS part 1 PUT；不写 PG 资源 |
+| `POST /api/v1/media/uploads/{uploadId}/complete` | Bearer + 幂等键；body 可含 workspaceId；响应丢失可用同 uploadId 重试 | 本地候选；校验单分片和 HEAD 元数据，保存 Redis completed；返回 `resourceId/fileName/mimeType/sizeBytes/sha256:null`，不触发后续业务 |
+| `GET /api/v1/media/uploads/{uploadId}` | Bearer；返回状态、大小与临时有效期 | 本地候选；Redis 临时状态；业务已认领则从 PG 返回 `claimed` 与 `expiresAt:null` |
+| `POST /api/v1/media/uploads/{uploadId}/cancel` | Bearer + 幂等键；空 body；返回 `cancel_pending` | 本地候选；取消与业务认领互斥；已认领资源不能当临时上传取消 |
+| `GET /api/v1/media/resources/{resourceId}/playback` | Bearer；返回可直接 GET 的短期 URL 与 mime/fileName/expiresAt | 正式或仍有效的 completed 临时自有资源；跨用户拒绝；实际 GET／Range 由 OSS 承接 |
+| 旧 `PUT /api/v1/media/uploads/{uploadId}/object`、`GET /api/v1/media/resources/{resourceId}/object` | 旧 Server 字节代理路径 | 已删除，不提供代理回退或兼容模式 |
 | `DELETE /api/v1/workspaces/{workspaceId}/media/resources/{resourceId}` | Bearer + 幂等；解析 `resourceId/workspaceId/status`，status 接受 `deleted` 或 `delete_pending` | CODE；引用检查后返回 `delete_pending`，Worker 异步删除，不在 API 同步删文件 |
 
-头像现在通过资源引用校验后写入 profile；消息/笔记等引用使用同一 `resource_refs` 约束。上传完成只触发检查任务，不伪称 ASR/文本处理完成。App 未修改、未运行 Flutter。
+头像、笔记、手动文本图片及自有文档入口首次使用临时上传时，在各自业务事务中调用 `ResourceClaims`，统一建立资源和归属；后续业务需通过同一入口接入，已有引用继续使用 `resource_refs`。上传完成不触发检查、解析、ASR 或文本任务。Redis 24 小时到期回收以 PG `resources` 是否存在为判定，不查看各业务表，不为每条临时上传生成数据库任务。
 
 ## P06：个人资产、笔记、文件夹、检索与图谱
 
@@ -276,8 +343,8 @@ App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本阶段核对 `
 | API | App 解析/行为 | 后端状态 |
 |---|---|---|
 | `GET/POST/PATCH/DELETE /workspaces/{workspaceId}/folders` | Folder ID、parentFolderId、normalizedName、state、currentRevisionId、etag、contentCursor；If-Match + 幂等 | CODE；同级重名冲突、循环移动拒绝、软删除/恢复、作用域隔离 |
-| `GET/POST/PATCH/DELETE /workspaces/{workspaceId}/notes` | HNote 的 raw/outline/germination parts、noteRevisionId、etag、resourceRefs、sourceRef | CODE；原文 revision 不可变，旧 ETag 返回 412，删除保留 tombstone |
-| `GET/PUT .../notes/{noteId}/parts/{part}` | `contentMarkdown`、`basePartRevisionId`、partRevisionId、contentSha256 | CODE；每次写入追加 revision，原文不被标签任务覆盖 |
+| `GET/POST/PATCH/DELETE /workspaces/{workspaceId}/notes` | HNote 的 raw/outline/germination parts、noteRevisionId、etag、resourceRefs、sourceRef | CODE；只保存当前正文，修订 ID 为并发/异步标记；旧 ETag 返回 412，删除保留 tombstone |
+| `GET/PUT .../notes/{noteId}/parts/{part}` | `contentMarkdown`、partRevisionId、contentSha256；PUT 用 If-Match | CODE；读取与替换当前部分，不提供历史正文；basePartRevisionId 已移除，原文不被标签任务覆盖 |
 | `POST /workspaces/{workspaceId}/notes/batch-move` | 局部结果逐项返回 | CODE；单项冲突不会覆盖其他项 |
 | `POST /workspaces/{workspaceId}/search` | keyword/semantic mode、中文与英文 query、owner/folder/date filters；结果带 ownerRef、part、revisionId、path、matchMode | CODE；Note keyword 使用笔记集合 BM25，semantic/hybrid 使用同集合 Dense/BM25 原生 RRF；返回 `part=raw` 和整篇 Note 修订，保留授权及业务筛选 |
 | `GET /workspaces/{workspaceId}/content-navigation/{map}` | 局部节点/标签聚合 | CODE；只返回有据的 Note/Tag 节点与计数，限制 100 节点 |
@@ -295,7 +362,7 @@ App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本阶段核对 `
 
 解析器和图文绑定不变。Note 保存 raw 后异步走笔记混合模式，资料保留文件/导入身份并走纯 BM25。索引使用四张元数据表、两个 Collection；详见 [知识库手册](runbooks/milvus.md)。
 
-- 用户入口仍用 JWT；Agent 的 `/internal/v1/rag/query` 仍同时要求用户 JWT 和方向 Service Key。
+- 用户入口由 Server 网关验证 JWT；Agent 的 `/internal/v1/rag/query` 传递可信用户/会话身份头，不使用服务间 Secret Key。现行约定见[内部身份](runbooks/internal-auth.md)。
 - Agent 现有 Tool 只发送 query/mode/topK，不发版本和归属 ID；Server 默认 Note 混合业务。资料业务显式指定 sourceType=file/text 或使用 `/api/v1/kb/documents/query`，实际仅执行 keyword。
 - App 搜索请求/响应保持既有路径和 Envelope。桌面端 `_openWorkspaceSearchResult` 要求 part，并将 revisionId 交给整篇 Note 的精确读取；因此搜索返回 `part=raw` 和整篇 Note 修订，不能用 raw part 修订代替。
 - RAG 详情另返回 sourceRevision/partRevisionId 及 UTF-16 命中范围。整篇 GET 的 revisionId 与 part GET 的 partRevisionId 分别校验，错误版本不能静默读取当前内容。
@@ -314,7 +381,7 @@ App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本阶段核对 `
 | 层次 | Note线路 | File线路 |
 | --- | --- | --- |
 | 接入 | Note创建/更新raw；note-imports最终创建Note | rag/ingestions接收文件URL；text-ingestions接收手工文本或FILE_UPLOAD链接 |
-| 原始正文 | notes + note_part_revisions的raw版本 | rag_ingestion_versions指向canonical对象；text_ingestion_jobs保存raw_content/产物引用 |
+| 原始正文 | notes + note_parts 的当前 raw；修订字段仅作标记 | rag_ingestion_versions指向canonical对象；text_ingestion_jobs保存raw_content/产物引用 |
 | 任务 | kb.note-index / kb.note-cleanup | rag.document-ingest / rag.document-cleanup；text.ingest用于另一种接入来源 |
 | 编排 | NoteIndexService → NoteIndexJobs → KnowledgeIndexJobs | RagIngestionJobs或TextIngestionJobs准备正文 → 同一个KnowledgeIndexJobs |
 | 索引模式 | note-hybrid | document-keyword（file和text来源都使用它） |

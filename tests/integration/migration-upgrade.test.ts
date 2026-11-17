@@ -36,6 +36,25 @@ beforeAll(() => migrate(config), 20000);
 afterAll(() => pool.end());
 
 describe('append-only upgrades with real isolated PostgreSQL', () => {
+  it('initializes the required task trace once and rejects missing or invalid traces on new rows',async()=>{
+    const table=probe(),client=await pool.connect(),migration=packaged.find(file=>file.name==='0005_task_trace_id.sql');
+    if(!migration)throw Error('TRACE_MIGRATION_MISSING');
+    await client.query('BEGIN');
+    try{
+      await client.query(`CREATE TABLE public.${table}(id uuid PRIMARY KEY); INSERT INTO public.${table} VALUES(gen_random_uuid()),(gen_random_uuid());`);
+      await client.query(migration.sql.replaceAll('public.tasks',`public.${table}`));
+      const rows=(await client.query(`SELECT trace_id FROM public.${table}`)).rows;
+      expect(rows).toHaveLength(2);expect(new Set(rows.map(row=>row.trace_id)).size).toBe(2);
+      for(const row of rows)expect(row.trace_id).toMatch(/^[a-f0-9-]{36}$/);
+      await client.query('SAVEPOINT required_trace');
+      await expect(client.query(`INSERT INTO public.${table}(id) VALUES(gen_random_uuid())`)).rejects.toMatchObject({code:'23502'});
+      await client.query('ROLLBACK TO SAVEPOINT required_trace');
+      await expect(client.query(`INSERT INTO public.${table}(id,trace_id) VALUES(gen_random_uuid(),'bad')`)).rejects.toMatchObject({code:'23514'});
+      await client.query('ROLLBACK TO SAVEPOINT required_trace');
+      await client.query(`INSERT INTO public.${table}(id,trace_id) VALUES(gen_random_uuid(),'current-trace')`);
+      expect(Number((await client.query(`SELECT count(*) AS n FROM public.${table}`)).rows[0].n)).toBe(3);
+    }finally{await client.query('ROLLBACK');client.release();}
+  });
   it('preflights pending SQL with a SELECT-only migration-history role without applying any change', async () => {
     const table = probe(), directory = await fixture([`CREATE TABLE ${table}(id int PRIMARY KEY);`]);
     const before = await history();

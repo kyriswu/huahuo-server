@@ -110,7 +110,22 @@ export class IdentityService {
     let claims;
     try { claims=await verifyAccessToken(await this.jwtKeys,this.jwtSettings,access); }
     catch { throw new DomainError(401,'AUTH_TOKEN_INVALID'); }
-    const r=await this.pool.query<{id:string;user_id:string}>("UPDATE user_sessions s SET last_seen_at=now() FROM users u WHERE u.id=s.user_id AND u.status='active' AND u.deleted_at IS NULL AND s.access_jti=$1 AND s.user_id=$2 AND s.access_hash=$3 AND s.revoked_at IS NULL AND s.access_expires_at>now() AND s.expires_at>now() RETURNING s.id,s.user_id",[claims.jti,claims.sub,digest(access)]);
+    // Admission is always a fresh read. Activity is approximate metadata: update
+    // at most once a minute, and never wait for a business transaction's row lock.
+    // A data-modifying CTE runs even when its RETURNING rows are not consumed.
+    const r=await this.pool.query<{id:string;user_id:string}>(`WITH admitted AS MATERIALIZED (
+      SELECT s.id,s.user_id FROM user_sessions s JOIN users u ON u.id=s.user_id
+      WHERE u.status='active' AND u.deleted_at IS NULL AND s.access_jti=$1 AND s.user_id=$2 AND s.access_hash=$3
+        AND s.revoked_at IS NULL AND s.access_expires_at>statement_timestamp() AND s.expires_at>statement_timestamp()
+    ), activity AS (
+      UPDATE user_sessions s SET last_seen_at=statement_timestamp()
+      WHERE s.last_seen_at<=statement_timestamp()-interval '60 seconds' AND s.id IN (
+        SELECT candidate.id FROM user_sessions candidate JOIN admitted a ON a.id=candidate.id
+        WHERE candidate.last_seen_at<=statement_timestamp()-interval '60 seconds'
+        FOR NO KEY UPDATE OF candidate SKIP LOCKED
+      )
+      RETURNING s.id
+    ) SELECT id,user_id FROM admitted`,[claims.jti,claims.sub,digest(access)]);
     if(!r.rows[0])throw new DomainError(401,'AUTH_SESSION_EXPIRED');
     return Object.freeze({userId:r.rows[0].user_id,sessionId:r.rows[0].id,traceId});
   }

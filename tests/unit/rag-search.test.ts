@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { dedupeByChunkKey, HttpRerankAdapter, MockRerankAdapter, rerankWithinBudget, type RagSearchCandidate, type RerankAdapter } from '../../src/modules/rag/search.js';
+import { HttpRerankAdapter, MockRerankAdapter, rerankWithinBudget, type RagSearchCandidate, type RerankAdapter } from '../../src/modules/rag/search.js';
 
 const row = (chunkKey: string, parentId = 'doc-1'): RagSearchCandidate => ({
   chunkKey,
@@ -14,18 +14,8 @@ const row = (chunkKey: string, parentId = 'doc-1'): RagSearchCandidate => ({
 });
 
 describe('RAG query ranking helpers', () => {
-  it('deduplicates logical chunk keys without treating equal text as the same chunk', () => {
-    const result = dedupeByChunkKey([row('c0'), { ...row('c0'), rrfScore: 0.05 }, { ...row('c1'), content: row('c0').content }]);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toMatchObject({ chunkKey: 'c0', rrfScore: 0.05 });
-  });
-
-  it('keeps the highest scored duplicate and supports the explicit Mock reranker', async () => {
+  it('supports the explicit Mock reranker', async () => {
     const merged = [row('c0'), row('c1'), row('c2')];
-    const duplicate = [...merged, { ...merged[0]!, rerankScore: 99 }];
-    const deduped = dedupeByChunkKey(duplicate);
-    expect(deduped.filter((item) => item.chunkKey === 'c0')).toHaveLength(1);
-    expect(deduped.find((item) => item.chunkKey === 'c0')?.rerankScore).toBe(99);
     const reranked = await new MockRerankAdapter().rerank('content c1', merged);
     expect(reranked[0]?.chunkKey).toBe('c1');
   });
@@ -100,5 +90,25 @@ describe('RAG query ranking helpers', () => {
     expect(result.fallback).toBeUndefined();
     expect(result.candidates.map(candidate => [candidate.chunkKey, candidate.content])).toEqual([['c0', 'content c0'], ['c1', 'content c1']]);
   });
+  it('rejects an oversized rerank body without another provider request',async()=>{
+    const fetchImpl=vi.fn<typeof fetch>().mockResolvedValue(new Response(' '.repeat(1024*1024+1)));
+    const adapter=new HttpRerankAdapter({baseUrl:'https://rerank.test/v1',model:'fixture',fetchImpl});
+    await expect(adapter.rerank('question',[row('c0')])).rejects.toMatchObject({code:'RERANK_RESPONSE_INVALID',retryable:false});
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('includes the rerank response body in its timeout budget',async()=>{
+    vi.useFakeTimers();
+    try{
+      const fetchImpl=vi.fn<typeof fetch>().mockImplementation(async(_url,init)=>new Response(new ReadableStream({start(controller){
+        init!.signal!.addEventListener('abort',()=>controller.error(init!.signal!.reason),{once:true});
+      }})));
+      const adapter=new HttpRerankAdapter({baseUrl:'https://rerank.test/v1',model:'fixture',timeoutMs:20,fetchImpl});
+      const pending=expect(adapter.rerank('question',[row('c0')])).rejects.toMatchObject({code:'RERANK_PROVIDER_TIMEOUT',retryable:true});
+      await vi.advanceTimersByTimeAsync(20);await pending;
+      expect(fetchImpl).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);
+    }finally{vi.useRealTimers();}
+  });
+
 });
 

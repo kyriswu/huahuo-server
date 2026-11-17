@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { GatewaySession, studioAuthCookieHeaders, studioCookies } from '../../src/modules/gateway/studio-session.js';
+import { registerInternalApi } from '../../src/http/internal-api.js';
 import { registerGatewayAuthRoute } from '../../src/modules/gateway/routes.js';
 import { readTrustedScope } from '../../src/modules/identity/trusted-scope.js';
 import { DomainError } from '../../src/modules/identity/store.js';
@@ -46,12 +47,23 @@ describe('trusted business identity', () => {
 describe('gateway admission and Studio refresh', () => {
   it('outputs the authenticated scope rather than forged incoming identity headers', async () => {
     const id = identity(), app = Fastify();
-    registerGatewayAuthRoute(app, id as unknown as IdentityService);
+    registerInternalApi(app, internal => registerGatewayAuthRoute(internal, id as unknown as IdentityService));
     try {
       const result = await app.inject({ url: '/internal/v1/gateway/auth', headers: { authorization: `Bearer ${access}`, 'x-huahuo-user-id': randomUUID() } });
       expect(result.statusCode).toBe(204);
       expect(result.headers).toMatchObject({ 'x-huahuo-user-id': userId, 'x-huahuo-session-id': sessionId, 'x-huahuo-auth-method': 'bearer', 'cache-control': 'no-store' });
       expect(id.authenticate).toHaveBeenCalledOnce();
+    } finally { await app.close(); }
+  });
+  it('rejects malformed gateway requests before refreshing or revoking sessions', async () => {
+    const id = identity(), app = Fastify({ajv:{customOptions:{removeAdditional:false}}});
+    registerInternalApi(app, internal => registerGatewayAuthRoute(internal, id as unknown as IdentityService));
+    try {
+      const auth = await app.inject({url:'/internal/v1/gateway/auth?unexpected=true',headers:{...forwarded,cookie:`huahuo-studio-access=${expired}; huahuo-studio-refresh=refresh_old`}});
+      expect(auth.statusCode).toBe(400);expect(auth.headers['set-cookie']).toBeUndefined();
+      const logout = await app.inject({method:'POST',url:'/internal/v1/gateway/logout',headers:{origin:studio.origin,cookie:`huahuo-studio-access=${access}`,'content-type':'application/json'},payload:'{malformed'});
+      expect(logout.statusCode).toBe(400);expect(logout.headers['set-cookie']).toBeUndefined();
+      expect(id.authenticate).not.toHaveBeenCalled();expect(id.refresh).not.toHaveBeenCalled();expect(id.logout).not.toHaveBeenCalled();
     } finally { await app.close(); }
   });
   it('keeps Bearer priority and does not refresh a bad Bearer using browser cookies', async () => {
@@ -110,7 +122,7 @@ describe('gateway admission and Studio refresh', () => {
   it('returns a denied subrequest with a redirect hint only for unauthenticated Studio navigation', async () => {
     const id = identity(), app = Fastify();
     app.setErrorHandler((error, request, reply) => reply.code(error instanceof DomainError ? error.statusCode : 500).send(failure(error instanceof DomainError ? error.code : 'INTERNAL_ERROR', 'Authentication failed', request.id)));
-    registerGatewayAuthRoute(app, id as unknown as IdentityService);
+    registerInternalApi(app, internal => registerGatewayAuthRoute(internal, id as unknown as IdentityService));
     try {
       const headers = { ...forwarded, 'x-forwarded-uri': '/agent/agents/huox', accept: 'text/html' };
       const page = await app.inject({ url: '/internal/v1/gateway/auth', headers });
@@ -135,7 +147,7 @@ describe('gateway admission and Studio refresh', () => {
   });
   it('returns every refreshed cookie as a separate opaque auth header without exposing tokens to business requests', async () => {
     const id = identity(), app = Fastify();
-    registerGatewayAuthRoute(app, id as unknown as IdentityService);
+    registerInternalApi(app, internal => registerGatewayAuthRoute(internal, id as unknown as IdentityService));
     try {
       const result = await app.inject({ url: '/internal/v1/gateway/auth', headers: {
         ...forwarded, cookie: `huahuo-studio-access=${expired}; huahuo-studio-refresh=refresh_old`,
@@ -158,7 +170,7 @@ describe('gateway admission and Studio refresh', () => {
   it('clears expired browser cookies at logout and revokes valid sessions', async () => {
     const id = identity(), app = Fastify();
     app.setErrorHandler((error, request, reply) => reply.code(error instanceof DomainError ? error.statusCode : 500).send(failure(error instanceof DomainError ? error.code : 'INTERNAL_ERROR', 'Authentication failed', request.id)));
-    registerGatewayAuthRoute(app, id as unknown as IdentityService);
+    registerInternalApi(app, internal => registerGatewayAuthRoute(internal, id as unknown as IdentityService));
     try {
       const valid = await app.inject({ method: 'POST', url: '/internal/v1/gateway/logout', headers: { origin: studio.origin, cookie: `huahuo-studio-access=${access}` } });
       expect(valid.statusCode).toBe(200); expect(valid.json()).toEqual({ signedOut: true });

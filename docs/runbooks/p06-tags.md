@@ -4,6 +4,8 @@
 
 ## HTTP 接口
 
+笔记列表当前约定（2026-11-17）：`GET /api/v1/workspaces/:workspaceId/notes`固定每页20条，下一页原样传回`nextCursor`，返回null时结束。列表仅返回元信息与最多200字的纯文本`preview`，正文及资源引用通过独立笔记详情读取；`preview`可能为空。更新时间降序、ID升序；翻页期间编辑或新增的笔记通过刷新首屏读取，无跨请求快照。详情和part接口保持完整正文，见[分页验收](../acceptance/note-pagination.md)。此列表页大小不改变下方图谱预算。
+
 基础路径 `/api/v1/workspaces/:workspaceId/notes/:noteId`，Bearer 对应的工作区所有者才能访问。所有写请求带 `Idempotency-Key` 或兼容的 `X-Idempotency-Key`；标签改写额外带最新 `If-Match: <tagEtag>`，不可用 noteEtag 替代。
 
 | 方法/相对路径 | 输入 | 语义 |

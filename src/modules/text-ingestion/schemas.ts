@@ -1,8 +1,9 @@
 import { Type } from '@sinclair/typebox';
 import { Id, Strict } from '../identity/schemas.js';
-import { TEXT_INGESTION_MAX_CHARS, TEXT_INGESTION_MAX_URI_LENGTH, TextIngestionSourceType } from './types.js';
+import { TEXT_INGESTION_MAX_URI_LENGTH, TextIngestionSourceType } from './types.js';
+import { EDITABLE_MARKDOWN_MAX_CHARS } from '../../lib/kb-image-markdown.js';
 
-const rawContent = Type.String({ minLength: 1, maxLength: TEXT_INGESTION_MAX_CHARS, pattern: '\\S' });
+const rawContent = Type.String({ minLength: 1, maxLength: EDITABLE_MARKDOWN_MAX_CHARS, pattern: '\\S' });
 const originUri = Type.String({ minLength: 1, maxLength: TEXT_INGESTION_MAX_URI_LENGTH, pattern: '^https?://\\S+$' });
 const nullableString = Type.Union([Type.String(), Type.Null()]);
 
@@ -14,7 +15,7 @@ export const TextIngestionStatusSchema = Type.Union([
 export const TextIngestionJobSchema = Type.Object({
   id: Id,
   source_type: TextIngestionSourceTypeSchema,
-  raw_content: nullableString,
+  raw_content: Type.Union([Type.String(), Type.Null()], { description: 'MANUAL_INPUT returns editable standard Markdown. Preserve image URL fragments when saving. Null until external extraction completes.' }),
   origin_resource_uri: nullableString,
   ingest_status: TextIngestionStatusSchema,
   error_msg: nullableString,

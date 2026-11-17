@@ -9,7 +9,8 @@ describe('Embedding attempt observations', () => {
     const fetchImpl=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({output:{embeddings:[{text_index:1,embedding:[3,4]},{text_index:0,embedding:[1,2]}]}})));
     const client=new BailianEmbeddingClient({...options,fetchImpl});
     expect(await client.embed(['one','two'],{textType:'query'})).toEqual([[1,2],[3,4]]);
-    expect(fetchImpl).toHaveBeenCalledWith('https://embedding.test/v1/services/embeddings/text-embedding/text-embedding',expect.objectContaining({redirect:'error',headers:{'content-type':'application/json',authorization:'Bearer test-only-not-a-real-key'}}));
+    expect(fetchImpl).toHaveBeenCalledWith('https://embedding.test/v1/services/embeddings/text-embedding/text-embedding',expect.objectContaining({redirect:'error'}));
+    expect(Object.fromEntries(new Headers(fetchImpl.mock.calls[0]![1]?.headers))).toEqual({'content-type':'application/json',authorization:'Bearer test-only-not-a-real-key'});
     expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]!.body))).toEqual({model:'test',input:{texts:['one','two']},parameters:{text_type:'query'}});
   });
   it('splits oversized logical batches at the provider limit of 20 without losing order',async()=>{
@@ -71,4 +72,23 @@ describe('Embedding attempt observations', () => {
     await expect(client.embed(['text'], { signal: controller.signal })).rejects.toMatchObject({ code: 'EMBEDDING_PROVIDER_TIMEOUT' });
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
+  it('rejects an oversized provider body without retrying it',async()=>{
+    const fetchImpl=vi.fn<typeof fetch>().mockResolvedValue(new Response(' '.repeat(8*1024*1024+1)));
+    await expect(new BailianEmbeddingClient({...options,fetchImpl}).embed(['text'])).rejects.toMatchObject({code:'EMBEDDING_RESPONSE_INVALID',retryable:false});
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('classifies a body read deadline as a provider timeout',async()=>{
+    vi.useFakeTimers();
+    try{
+      const fetchImpl=vi.fn<typeof fetch>().mockImplementation(async(_url,init)=>new Response(new ReadableStream({start(controller){
+        init!.signal!.addEventListener('abort',()=>controller.error(init!.signal!.reason),{once:true});
+      }})));
+      const pending=new BailianEmbeddingClient({...options,timeoutMs:20,maxRetries:0,fetchImpl}).embed(['text']);
+      const checked=expect(pending).rejects.toMatchObject({code:'EMBEDDING_PROVIDER_TIMEOUT',retryable:true});
+      await vi.advanceTimersByTimeAsync(20);await checked;
+      expect(fetchImpl).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);
+    }finally{vi.useRealTimers();}
+  });
+
 });

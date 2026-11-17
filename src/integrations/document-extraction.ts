@@ -2,11 +2,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { EnabledDocumentExtractionConfig } from '../config/document-extraction.js';
 import { assertCompleteExtractionConfig } from '../config/document-extraction.js';
 import type { ParserContext } from '../lib/document-parser-machine/index.js';
+import { ServiceHttpClient, ServiceHttpError, readJsonResponse } from './http-client.js';
 import { ParserExecutionError,ParserExecutionDeferred } from '../lib/document-parser-machine/index.js';
-import MarkdownIt from 'markdown-it';
+import {inputImages} from '../lib/markdown-images.js';
 
 export interface FileContext { source_resource_id: string; parse_run_id: string }
-export interface ExtractionFile { bytes: Uint8Array; fileName: string; mimeType: string;source_resource_id?:string;parse_run_id?:string; }
+export interface ExtractionFile { url: string; fileName: string; mimeType: string;source_resource_id?:string;parse_run_id?:string; }
 export interface UploadedResource extends FileContext {
   resource_id: string; uuid: string; bucket: string; object_key: string; sha256: string; bytes: number;
   mime_type: string; etag: string; [key: string]: unknown;
@@ -26,14 +27,12 @@ export class DocumentExtractionError extends ParserExecutionError {
 }
 export const validUuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-const markdown=new MarkdownIt({html:true});
 function imageReferences(content:string):string[]{
-  const ids:string[]=[];
-  const visit=(tokens:ReturnType<typeof markdown.parse>)=>{for(const token of tokens){
-    if(token.type==='html_block'||token.type==='html_inline')for(const m of token.content.matchAll(/<KBIMAGE\b[^>]*\buuid=(?:"([^"]+)"|'([^']+)')/g))ids.push(m[1]??m[2]!);
-    if(token.children)visit(token.children);
-  }};
-  visit(markdown.parse(content,{}));return ids;
+  try{
+    const images=inputImages(content);
+    if(images.some(image=>image.kind!=='kbimage'))protocol();
+    return images.map(image=>image.url.slice('asset://'.length));
+  }catch{protocol();}
 }
 function protocol():never { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_INVALID', 'settled'); }
 export function validateExtractionResponse(value: unknown, contexts: readonly (FileContext|null)[]): ExtractionResponse {
@@ -83,56 +82,61 @@ export function validateExtractionResponse(value: unknown, contexts: readonly (F
 }
 
 export class DocumentExtractionClient {
-  constructor(readonly config: EnabledDocumentExtractionConfig, private readonly fetchImpl: typeof fetch = fetch,private readonly maxInputBytes=200*1024*1024) {
+  private readonly http:ServiceHttpClient;
+  constructor(readonly config: EnabledDocumentExtractionConfig, fetchImpl: typeof fetch = fetch) {
+    this.http=new ServiceHttpClient({fetchImpl});
     if(config.parameters!==null)assertCompleteExtractionConfig(config.parameters);
-    if(!Number.isSafeInteger(maxInputBytes)||maxInputBytes<1||maxInputBytes>2*1024*1024*1024)throw new Error('INVALID_CONFIG:DOCUMENT_EXTRACTION_INPUT_LIMIT');
   }
   private url(baseUrl: string, path: string): URL { return new URL(baseUrl.replace(/\/$/, '') + path); }
   private async request(url: URL, init: RequestInit, signal: AbortSignal, submitting: boolean, allowPending = false): Promise<{status:number;body:unknown}> {
-    let response: Response;
-    try { response = await this.fetchImpl(url, { ...init, signal, redirect: 'error' }); }
-    catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN', 'unknown', true); }
-    if (response.status !== 200 && !((submitting && this.config.mode==='async' || allowPending) && response.status === 202)) {
-      await response.body?.cancel();
-      const settled = submitting && response.status >= 400 && response.status < 500 && response.status !== 408;
-      throw new DocumentExtractionError('DOCUMENT_EXTRACTION_HTTP_FAILED', settled ? 'settled' : 'unknown', response.status >= 500 || response.status === 429,response.status);
-    }
-    const reader = response.body?.getReader(); let size = 0; const parts: Uint8Array[] = [];
-    if (!reader) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_EMPTY_RESPONSE', submitting ? 'unknown' : 'unknown');
+    let headersReceived=false;
     try {
-      while (true) {
-        const chunk = await reader.read(); if (chunk.done) break;
-        size += chunk.value.byteLength;
-        if (size > this.config.maxResponseBytes) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_TOO_LARGE', 'unknown');
-        parts.push(chunk.value);
-      }
-      return {status:response.status,body:JSON.parse(Buffer.concat(parts).toString('utf8')) as unknown};
-    } catch (error) {
-      if (error instanceof DocumentExtractionError) throw error;
-      throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE', 'unknown');
-    } finally { void reader.cancel().catch(() => undefined); }
+      return await this.http.request(url,{...init,signal},{timeoutMs:this.config.timeoutMs},async response=>{
+        headersReceived=true;
+        if (response.status !== 200 && !((submitting && this.config.mode==='async' || allowPending) && response.status === 202)) {
+          const settled = submitting && response.status >= 400 && response.status < 500 && response.status !== 408;
+          throw new DocumentExtractionError('DOCUMENT_EXTRACTION_HTTP_FAILED', settled ? 'settled' : 'unknown', response.status >= 500 || response.status === 429,response.status);
+        }
+        try { return {status:response.status,body:await readJsonResponse(response,this.config.maxResponseBytes)}; }
+        catch(error) {
+          if(error instanceof ServiceHttpError&&error.code==='HTTP_RESPONSE_TOO_LARGE')throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_TOO_LARGE','unknown');
+          if(error instanceof ServiceHttpError&&error.code==='HTTP_RESPONSE_EMPTY')throw new DocumentExtractionError('DOCUMENT_EXTRACTION_EMPTY_RESPONSE','unknown');
+          throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE','unknown');
+        }
+      });
+    } catch(error) {
+      if(error instanceof DocumentExtractionError)throw error;
+      throw new DocumentExtractionError(headersReceived?'DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE':'DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN','unknown',!headersReceived);
+    }
   }
+
   async extract(files: readonly ExtractionFile[], context: ParserContext, hooks: { beforeSubmit: () => Promise<void>; submitted: (jobId: string) => Promise<void>;cancellation?:()=>Promise<'send'|'wait'|false>;callbackUrl?:string;singleStep?:boolean;received?:(jobId:string,response:ExtractionResponse)=>Promise<void> }, resumeJobId?: string): Promise<ExtractionResponse> {
     if (!files.length || files.length > 16) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_INVALID', 'settled');
-    let total = 0;
     const contexts:Array<FileContext|null>=[];
     for (const file of files) {
       const independent=file.mimeType.startsWith('image/')&&file.source_resource_id===undefined&&file.parse_run_id===undefined;
-      if ((!independent&&(!validUuid(file.source_resource_id)||!validUuid(file.parse_run_id))) || !file.fileName || file.fileName.length > 255 || /[\0\r\n/\\]/.test(file.fileName) || (!resumeJobId&&!file.bytes.byteLength)) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_INVALID', 'settled');
-      total += file.bytes.byteLength;
+      if ((!independent&&(!validUuid(file.source_resource_id)||!validUuid(file.parse_run_id))) || !file.fileName || file.fileName.length > 255 || /[\0\r\n/\\]/.test(file.fileName)) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_INVALID', 'settled');
+      if (!resumeJobId) {
+        let source: URL;
+        try { source = new URL(file.url); } catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_INVALID', 'settled'); }
+        if (!['https:', 'http:'].includes(source.protocol) || source.username || source.password || source.hash || file.url.length > 4096)
+          throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_INVALID', 'settled');
+      }
       contexts.push(independent?null:{source_resource_id:file.source_resource_id!.toLowerCase(),parse_run_id:file.parse_run_id!.toLowerCase()});
     }
-    if (total > this.maxInputBytes) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_TOO_LARGE', 'settled');
     const signal = AbortSignal.any([context.signal, AbortSignal.timeout(this.config.timeoutMs)]);
     let jobId = resumeJobId;
     if (!jobId) {
-      const form = new FormData();
-      for (const file of files) form.append('files', new Blob([new Uint8Array(file.bytes)], { type: file.mimeType }), file.fileName);
-      if(this.config.parameters!==null)form.append('config', JSON.stringify(this.config.parameters));
-      form.append('file_contexts', JSON.stringify(contexts));
-      if(hooks.callbackUrl)form.append('callback_url',hooks.callbackUrl);
+      const payload = {
+        inputs: files.map(file => ({ kind: 'uri', uri: file.url, mime_type: file.mimeType })),
+        file_contexts: contexts,
+        ...(this.config.parameters === null ? {} : { config: this.config.parameters }),
+        ...(hooks.callbackUrl ? { callback_url: hooks.callbackUrl } : {}),
+      };
+      const headers = new Headers(context.headers);
+      headers.set('Content-Type', 'application/json');
       try{await hooks.beforeSubmit();}catch(error){if(error instanceof DocumentExtractionError)throw error;throw new DocumentExtractionError('DOCUMENT_EXTRACTION_PRE_SUBMISSION_FAILED','settled',true);}
-      const response = await this.request(this.url(context.baseUrl, this.config.mode === 'sync' ? '/extract' : '/extract-async'), { method: 'POST', headers: context.headers, body: form }, signal, true);
+      const response = await this.request(this.url(context.baseUrl, this.config.mode === 'sync' ? '/extract' : '/extract-async'), { method: 'POST', headers, body: JSON.stringify(payload) }, signal, true);
       if (this.config.mode === 'sync') return validateExtractionResponse(response.body, contexts);
       const id = object(response.body).job_id;
       if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_ID_UNKNOWN', 'unknown');
@@ -179,11 +183,6 @@ export class DocumentExtractionClient {
       try { await sleep(this.config.pollMs, undefined, { signal }); }
       catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN', 'unknown', true); }
     }
-  }
-  async resources(parseRunId:string,sourceResourceId:string|undefined,context:ParserContext):Promise<unknown>{
-    if(!validUuid(parseRunId)||(sourceResourceId!==undefined&&!validUuid(sourceResourceId)))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_CONTEXT_INVALID','settled');
-    const url=this.url(context.baseUrl,`/parse-runs/${parseRunId}/resources`);if(sourceResourceId)url.searchParams.set('source_resource_id',sourceResourceId);
-    return (await this.request(url,{method:'GET',headers:context.headers},AbortSignal.any([context.signal,AbortSignal.timeout(10000)]),false)).body;
   }
   async cancel(jobId:string,context:ParserContext):Promise<unknown>{
     if(!/^[a-zA-Z0-9_-]{1,128}$/.test(jobId))throw new DocumentExtractionError('DOCUMENT_EXTRACTION_JOB_ID_INVALID','unknown');

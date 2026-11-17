@@ -35,16 +35,4 @@ describe('standalone document structure', () => {
     const result = await analyzeDocumentStructure('# Same\n\n# Same\n\n# Same-2\n\n# Same');
     expect(result.toc.map(item => item.anchor)).toEqual(['same', 'same-2', 'same-2-2', 'same-3']);
   });
-  it('uses parser-provided OCR ranges without promoting OCR hash lines into TOC or losing their body', async () => {
-    const ordinary = '# Chapter\n\nBody\n\n';
-    const content = ordinary + '<!-- source-ocr -->\n\n图片文字：poster text\n\n# screenshot title\n\n## OCR subheading\n\nbody OCR';
-    const result = await analyzeDocumentStructure(content, { ignoreHeadingRanges: [{ sourceStart: ordinary.length, sourceEnd: content.length }] });
-    expect(result.toc.map(item => item.title)).toEqual(['Chapter']);
-    expect(result.ranges.map(range => content.slice(range.sourceStart, range.sourceEnd)).join('')).toBe(content);
-  });
-  it('rejects ignored heading ranges from another or invalid source', async () => {
-    await expect(analyzeDocumentStructure('# heading', { ignoreHeadingRanges: [{ sourceStart: -1, sourceEnd: 4 }] })).rejects.toMatchObject({ code: 'STRUCTURE_OPTIONS_INVALID' });
-    await expect(analyzeDocumentStructure('# heading', { ignoreHeadingRanges: [{ sourceStart: 0, sourceEnd: 100 }] })).rejects.toMatchObject({ code: 'STRUCTURE_OPTIONS_INVALID' });
-    await expect(analyzeDocumentStructure('# 😀 heading', { ignoreHeadingRanges: [{ sourceStart: 3, sourceEnd: 4 }] })).rejects.toMatchObject({ code: 'STRUCTURE_OPTIONS_INVALID' });
-  });
 });

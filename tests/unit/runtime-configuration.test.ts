@@ -39,6 +39,18 @@ describe('typed runtime registry (no database/cloud)',()=>{
   expect(()=>validateValues({'tasks.futureOptional':false},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
   expect(()=>validateValues({[RUNTIME_CONFIGURATION_SCHEMA_KEY]:1},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
  });
+ it('removes source downloading controls from runtime values and rejects new writes to retired keys',()=>{
+  const base=config(),stored={'tasks.downloadTimeoutMs':300000,'storage.maxSourceBytes':209715200,'rag.plainTextMaxChars':43210};
+  const values=validateStoredValues(stored,base),applied=applyValues(base,values,18);
+  for(const key of ['tasks.downloadTimeoutMs','storage.maxSourceBytes']){
+   expect(Object.hasOwn(defaults(),key)).toBe(false);expect(Object.hasOwn(values,key)).toBe(false);
+   expect(()=>validateValues({[key]:1000},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
+  }
+  expect(applied.rag.plainTextMaxChars).toBe(43210);
+  expect(base.rag).not.toHaveProperty('downloadTimeoutMs');expect(base.rag).not.toHaveProperty('maxSourceBytes');
+  expect(applied.rag).not.toHaveProperty('downloadTimeoutMs');expect(applied.rag).not.toHaveProperty('maxSourceBytes');
+  expect(stored).toEqual({'tasks.downloadTimeoutMs':300000,'storage.maxSourceBytes':209715200,'rag.plainTextMaxChars':43210});
+ });
  it('treats absent schema metadata as v1 and refuses unsupported or malformed versions',()=>{
   const base=config();expect(validateStoredValues({},base)).toEqual(defaults());
   for(const version of [0,2,1.5,'1',null,true,undefined]){

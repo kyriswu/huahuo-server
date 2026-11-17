@@ -4,33 +4,35 @@ import { pipeline } from 'node:stream/promises';
 import { Transform, Readable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { fileTypeFromFile } from 'file-type';
-import { parseFile } from 'music-metadata';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import type { AppConfig } from '../../config/config.js';
 import { AliyunOssStorageAdapter } from '../../integrations/object-storage/aliyun-oss.js';
-export interface StoredObject { bytes:number; sha256:string; contentType:string; durationSeconds:number; version:string; }
+export interface StoredObject { bytes:number; sha256:string; contentType:string; version:string; }
+export interface ObjectMetadata { bytes:number; contentType:string; version:string; etag?:string; uploadSessionId?:string; }
+export interface UploadedPart { bytes:number; etag:string; }
+export interface SignedUpload { url:string; headers:Record<string,string>; }
+export interface SignedObjectOptions { contentType?:string; contentDisposition?:string; contentEncoding?:string; version?:string; }
 export interface StoragePort {
  put(key:string,input:Readable,contentType:string,maxBytes:number):Promise<StoredObject>;
  stat(key:string,contentType:string):Promise<StoredObject>;
+ head?(key:string):Promise<ObjectMetadata>;
  read(key:string,range?:{start:number;end:number},version?:string):Promise<Readable>;
  remove(key:string,version?:string):Promise<void>;
  removeMany?(keys:string[]):Promise<void>;
-  signUrl?(key:string, expiresSeconds?:number):Promise<string> | string;
+ signUrl?(key:string, expiresSeconds?:number, options?:SignedObjectOptions):Promise<string> | string;
+ beginUpload?(key:string,contentType:string,uploadSessionId:string):Promise<string>;
+ signUploadPart?(key:string,remoteUploadId:string,contentType:string,bytes:number,expiresSeconds:number):Promise<SignedUpload>;
+ inspectUploadPart?(key:string,remoteUploadId:string):Promise<UploadedPart>;
+ completeUpload?(key:string,remoteUploadId:string,etag:string):Promise<void>;
+ abortUpload?(key:string,remoteUploadId:string):Promise<'aborted'|'missing'>;
 }
 function safe(key:string){if(!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/.test(key)||key.includes('..')||key.includes('//')||key.startsWith('/')||key.endsWith('/'))throw new Error('STORAGE_KEY_INVALID');return key;}
-async function inspect(path:string,mime:string):Promise<StoredObject>{
+async function hashFile(path:string):Promise<{bytes:number;sha256:string}>{
  const handle=await fs.open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
- try{const st=await handle.stat();if(!st.isFile())throw new Error('STORAGE_NOT_FILE');const hash=createHash('sha256');let bytes=0;
- const buffer=Buffer.allocUnsafe(1024*1024);let position=0;while(true){const read=await handle.read(buffer,0,buffer.length,position);if(!read.bytesRead)break;hash.update(buffer.subarray(0,read.bytesRead));bytes+=read.bytesRead;position+=read.bytesRead;}
- const detected=await fileTypeFromFile(path);const aliases:Record<string,string>={'audio/x-wav':'audio/wav','audio/wave':'audio/wav','audio/mp3':'audio/mpeg','audio/x-m4a':'audio/mp4','video/mp4':'audio/mp4','audio/aac':'audio/aac'};
- let actual=detected?.mime??'';actual=aliases[actual]??actual;const expected=aliases[mime]??mime;
- if((expected.startsWith('text/')||expected==='application/json')&&!detected){const text=await fs.readFile(path);if(text.length>16*1024*1024||text.includes(0))throw new Error('UPLOAD_MIME_MISMATCH');new TextDecoder('utf-8',{fatal:true}).decode(text);actual=expected;}
- if(expected==='application/vnd.openxmlformats-officedocument.wordprocessingml.document'&&actual==='application/zip'){const probe=(await fs.readFile(path)).subarray(0,2*1024*1024).toString('latin1');if(probe.includes('[Content_Types].xml')&&probe.includes('word/'))actual=expected;}
- if(actual!==expected)throw new Error('UPLOAD_MIME_MISMATCH');
- let durationSeconds=0;
- if(expected.startsWith('audio/')){const metadata=await parseFile(path,{duration:true});durationSeconds=metadata.format.duration??0;if(!Number.isFinite(durationSeconds)||durationSeconds<=0||durationSeconds>4*3600)throw new Error('UPLOAD_DURATION_INVALID');}
- return {bytes,sha256:hash.digest('hex'),contentType:expected,durationSeconds,version:'immutable'};
+ try{const st=await handle.stat();if(!st.isFile())throw new Error('STORAGE_NOT_FILE');
+ const hash=createHash('sha256');let bytes=0,position=0;const buffer=Buffer.allocUnsafe(1024*1024);
+ while(true){const read=await handle.read(buffer,0,buffer.length,position);if(!read.bytesRead)break;hash.update(buffer.subarray(0,read.bytesRead));bytes+=read.bytesRead;position+=read.bytesRead;}
+ return {bytes,sha256:hash.digest('hex')};
  }finally{await handle.close();}
 }
 /** Flat, generated keys only; root is application-owned and never exposed as an input. */
@@ -39,16 +41,15 @@ export class LocalStorageAdapter implements StoragePort {
  constructor(root:string){this.root=resolve(root);}
  private async path(key:string){safe(key);await fs.mkdir(this.root,{recursive:true,mode:0o700});if((await fs.lstat(this.root)).isSymbolicLink())throw new Error('STORAGE_ROOT_SYMLINK');const target=`${this.root}/${key}`;await fs.mkdir(resolve(target,'..'),{recursive:true,mode:0o700});return target;}
  async put(key:string,input:Readable,contentType:string,maxBytes:number){
- const target=await this.path(key),temp=`${target}.${randomUUID()}.part`;let bytes=0;const file=await fs.open(temp,constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);
- try{await pipeline(input,new Transform({transform(chunk,_encoding,done){bytes+=chunk.length;done(bytes>maxBytes?new Error('UPLOAD_TOO_LARGE'):null,chunk);}}),file.createWriteStream({autoClose:true}),{signal:AbortSignal.timeout(120000)});
- await file.close().catch(()=>undefined);const sync=await fs.open(temp,constants.O_RDONLY);await sync.sync().catch(()=>undefined);await sync.close();const meta=await inspect(temp,contentType);
+ const target=await this.path(key),temp=`${target}.${randomUUID()}.part`,hash=createHash('sha256');let bytes=0;const file=await fs.open(temp,constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);
+ try{await pipeline(input,new Transform({transform(chunk,_encoding,done){bytes+=chunk.length;if(bytes>maxBytes){done(new Error('UPLOAD_TOO_LARGE'));return;}hash.update(chunk);done(null,chunk);}}),file.createWriteStream({autoClose:true}),{signal:AbortSignal.timeout(120000)});
+ await file.close().catch(()=>undefined);const sync=await fs.open(temp,constants.O_RDONLY|constants.O_NOFOLLOW);await sync.sync().catch(()=>undefined);await sync.close();
  // No overwrite is allowed. Hard-link publishes the completed inode atomically, then removes the temporary name.
- await fs.link(temp,target);await fs.unlink(temp);return {...meta,version:key};
+ await fs.link(temp,target);await fs.unlink(temp);return {bytes,sha256:hash.digest('hex'),contentType,version:key};
  }catch(e){await file.close().catch(()=>undefined);await fs.unlink(temp).catch(()=>undefined);throw e;}
  }
- async stat(key:string,mime:string){return {...await inspect(await this.path(key),mime),version:key};}
+ async stat(key:string,contentType:string){return {...await hashFile(await this.path(key)),contentType,version:key};}
  async read(key:string,range?:{start:number;end:number}){const file=await fs.open(await this.path(key),constants.O_RDONLY|constants.O_NOFOLLOW);if(!(await file.stat()).isFile()){await file.close();throw new Error('STORAGE_NOT_FILE');}return file.createReadStream(range?{start:range.start,end:range.end}:{});}
- async cleanup(key:string){await this.path(key);for(const name of await fs.readdir(this.root)){if(name.startsWith(`${key}.`)&&name.endsWith('.part'))await fs.unlink(`${this.root}/${name}`).catch(()=>undefined);}}
  async remove(key:string){await fs.unlink(await this.path(key)).catch(e=>{if(e.code!=='ENOENT')throw e;});}
  async removeMany(keys:string[]){for(const key of keys)await this.remove(key);}
 }

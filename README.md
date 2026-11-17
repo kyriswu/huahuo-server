@@ -156,20 +156,19 @@ Admin 页面为 `http://127.0.0.1:3001/admin`，没有默认管理员或公开�
 
 ## 配置放在哪里
 
-- **ENV / 部署配置**：连接、凭据、监听、公开/内部服务地址、部署总开关、固定模型规格和 tokenizer/集合绑定。
+- **ENV / 部署配置**：连接、凭据、监听、公开/内部服务地址、云控制开关、固定模型规格和集合绑定。
 - **Admin → 运行配置 / PostgreSQL**：业务功能、任务并发/重试、文件额度、RAG 预算及发布排空预算。修改业务参数不要再添加一条重复 ENV 覆盖路径。
 - **处理节点**：已有节点的运行参数在后台修改，新增节点通过受审查的代码清单/迁移发布；登记后默认接收匹配任务，无单独启用开关。凭据保留在运行环境，不写进节点 JSON。
 
 环境按部署用途区分：`development` 是本地开发，`test` 是线上测试，`production` 是线上生产。分支名、Docker 的 NODE_ENV 和服务器是否能访问内网都不能代替 APP_ENV。
 
-云端开停机与解析 API 调用是两个独立权限：`PROCESSING_NODES_CLOUD_CONTROL_ENABLED` 控制云操作，`PROCESSING_NODES_ENABLED` 控制私网解析调用。线上测试、线上生产的云控制默认开启；本地保留按完整 RAM 凭据或节点调用配置判断的原有规则，显式 false 始终优先。非本地部署使用各自配置，不能沿用开发环境的 APP_ENV：
+处理节点配置好后直接调用，不再设置部署级解析开关；未配置或连接失败按节点状态报告。`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`独立控制云端启停，测试/生产默认允许，本地开发在完整RAM凭据存在时默认允许，显式false优先。非本地部署使用各自配置，不能沿用开发环境的 APP_ENV：
 
 ```dotenv
 # 线上测试使用 test；线上生产使用 production。
 APP_ENV=test
 PROCESSING_NODES_CLOUD_CONTROL_ENABLED=true
 # ALIYUN_RAM_ACCESS_KEY_ID / ALIYUN_RAM_ACCESS_KEY_SECRET 沿用已授权的实际凭据。
-# PROCESSING_NODES_ENABLED 按既有内网解析配置保留，不随云控制一起修改。
 ```
 
 本期测试发布在写库前核对五角色的 APP_ENV，并核对四常驻角色的云控制开关和完整 RAM 凭据；migrate 不注入云凭据。旧 ENV 若显式为 false，需先按[测试配置片段](resources/processing-nodes/test-control.env.example)改为 true 并重新创建容器。此断言只验证本地配置，不调用云接口，RAM 实际权限和网络仍需验收；解析 API 是否可达不影响云端开机。详见 [运行配置](docs/runbooks/runtime-configuration.md) 和[本期验收边界](docs/acceptance/cloud-control-environments.md)。

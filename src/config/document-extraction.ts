@@ -1,5 +1,9 @@
 import { canonical, digest } from '../lib/crypto.js';
 
+// Fixed bounds for external parsing artifacts, independent of the original file size.
+export const DOCUMENT_CANONICAL_MAX_BYTES = 16 * 1024 * 1024;
+export const DOCUMENT_ASSET_MANIFEST_MAX_BYTES = 16 * 1024 * 1024;
+
 export type ExtractionParameters = Record<string, unknown>;
 export interface EnabledDocumentExtractionConfig {
   enabled: true; mode: 'sync' | 'async'; parameters: ExtractionParameters | null;

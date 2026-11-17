@@ -2,7 +2,7 @@ import {describe,expect,it} from 'vitest';
 import {decodeDocumentReference,encodeDocumentReference,type DocumentParseState} from '../../src/modules/ingestion/document-reference.js';
 
 describe('durable document submission identity',()=>{
- const intent:DocumentParseState={phase:'intent',requestId:'task:parse:1',fingerprint:'a'.repeat(64),sourceUri:'saved/source',fileName:'source.pdf',startedAt:123};
+ const intent:DocumentParseState={phase:'intent',requestId:'task:parse:1',fingerprint:'a'.repeat(64),startedAt:123};
  it('preserves the admission identity and source snapshot when a receipt binds the job',()=>{
   expect(decodeDocumentReference(encodeDocumentReference(intent))).toEqual(intent);
   const bound={...intent,phase:'job' as const,jobId:'remote-job_1'};

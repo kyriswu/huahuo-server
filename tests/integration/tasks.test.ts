@@ -1,4 +1,8 @@
-import { beforeAll,afterAll,it,expect } from 'vitest';
+import { beforeAll,afterAll,it,expect,vi } from 'vitest';
+import type {FastifyBaseLogger} from 'fastify';
+import {withTraceId,currentTraceId} from '../../src/lib/trace.js';
+import {enqueueIntent} from '../../src/modules/tasks/model.js';
+import {transaction} from '../../src/modules/identity/store.js';
 import { randomUUID } from 'node:crypto';
 import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
@@ -6,7 +10,8 @@ import { migrate } from '../../src/db/migrate.js';
 import { TaskService } from '../../src/modules/tasks/service.js';
 import { TaskEngine } from '../../src/modules/tasks/engine.js';
 import { TaskScheduler } from '../../src/modules/tasks/scheduler.js';
-import { QueuePublisher,TaskWorkers } from '../../src/modules/tasks/queue.js';
+import { QueuePublisher } from '../../src/modules/tasks/publisher.js';
+import { TaskWorkers } from '../../src/modules/tasks/queue.js';
 import { hash } from '../../src/modules/tasks/model.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
 import { buildAdminServer } from '../../src/apps/admin.js';
@@ -27,7 +32,7 @@ async function user(){const userId=randomUUID(),sessionId=randomUUID(),wid=rando
  await insertFixtureSession(root,userId,sessionId);
  await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'fixture',true,$3)",[wid,userId,randomUUID()]);return {scope:{userId,sessionId,traceId:randomUUID()},wid};
 }
-const create=async(text='private input')=>(await service.create(a,{workspaceId:wa,text},randomUUID())).task.taskId;
+const create=async(text='private input')=>(await service.create({...a,traceId:currentTraceId()??a.traceId},{workspaceId:wa,text},randomUUID())).task.taskId;
 async function expire(id:string){await root.query("UPDATE tasks SET lease_until=now()-interval '1 second' WHERE id=$1",[id]);}
 async function until(fn:()=>Promise<boolean>){for(let n=0;n<100;n++){if(await fn())return;await new Promise(r=>setTimeout(r,50));}throw new Error('TASK_TIMEOUT');}
 beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));const u=await user(),v=await user();a=u.scope;wa=u.wid;b=v.scope;wb=v.wid;},20000);
@@ -70,7 +75,7 @@ it('Admin retries use the shared encrypted store with separate caller scope and 
 });
 it('excludes a task whose workspace belongs to a different user without relying on a composite FK',async()=>{
  const id=randomUUID();
- await root.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state) VALUES($1,$2,$3,'demo.digest','content','queued')",[id,a.userId,wb]);
+ await root.query("INSERT INTO tasks(trace_id,id,user_id,workspace_id,kind,queue,state) VALUES(gen_random_uuid()::text,$1,$2,$3,'demo.digest','content','queued')",[id,a.userId,wb]);
  try{
   expect((await service.running(a)).items.some(task=>task.taskId===id)).toBe(false);
   await expect(service.detail(a,id)).rejects.toMatchObject({code:'TASK_NOT_FOUND'});
@@ -119,7 +124,9 @@ it('two scheduler instances create one persistent window; delivery outage retain
  expect((await root.query("SELECT count(*)::int n FROM task_outbox WHERE last_error='QUEUE_UNAVAILABLE' AND status='pending'")).rows[0].n).toBeGreaterThan(0);
 });
 it('enqueue before ack crash and lost Redis job recover from PG; only ID enters BullMQ',async()=>{
- const id=await create('private-not-in-redis');
+ const traceId='queue-original-'+randomUUID(),id=await withTraceId(traceId,()=>create('private-not-in-redis'));
+ await withTraceId('retry-different-trace',()=>transaction(workerPool,tx=>enqueueIntent(tx,id)));
+ expect((await root.query('SELECT trace_id FROM tasks WHERE id=$1',[id])).rows[0].trace_id).toBe(traceId);
  // Isolate this test delivery from earlier fixtures without deleting their durable records.
  await root.query("UPDATE task_outbox SET available_at=now()+interval '1 hour' WHERE task_id<>$1 AND status='pending'",[id]);
  const d=(await scheduler.claim())!;expect(d.task_id).toBe(id);await publisher.publish(d);
@@ -127,15 +134,19 @@ it('enqueue before ack crash and lost Redis job recover from PG; only ID enters 
  await root.query("UPDATE task_outbox SET lease_until=now()-interval '1 second' WHERE id=$1",[d.id]);
  const again=(await scheduler.claim())!;expect(again.id).toBe(d.id);await publisher.publish(again);await scheduler.acknowledge(again);
  await job!.remove();await root.query("UPDATE task_outbox SET sent_at=now()-interval '1 minute' WHERE id=$1",[d.id]);await scheduler.recover();await scheduler.dispatch();
- const workers=new TaskWorkers(workerPool,cfg('worker'));
- try{await until(async()=>(await service.detail(a,id)).task.state==='succeeded');expect((await root.query('SELECT count(*)::int n FROM task_results WHERE task_id=$1',[id])).rows[0].n).toBe(1);}finally{await workers.close();}
+ const bindings:unknown[]=[],logs:string[]=[],original=TaskEngine.prototype.execute;
+ const logger={child:(binding:unknown)=>{bindings.push(binding);return {info:(message:string)=>logs.push(message),error:()=>undefined};}} as unknown as FastifyBaseLogger;
+ const workers=new TaskWorkers(workerPool,cfg('worker'),undefined,logger);
+ const execute=vi.spyOn(TaskEngine.prototype,'execute').mockImplementation(function(this:TaskEngine,attempt){if(attempt.task.id===id)expect(currentTraceId()).toBe(traceId);return original.call(this,attempt);});
+ try{await until(async()=>(await service.detail(a,id)).task.state==='succeeded');expect((await root.query('SELECT count(*)::int n FROM task_results WHERE task_id=$1',[id])).rows[0].n).toBe(1);expect(bindings).toContainEqual({traceId});expect(logs).toContain('Task step completed');}finally{await workers.close();execute.mockRestore();}
 },15000);
 it('real API contract: task wrapper, auth, schema, result readiness and Admin CSRF/RBAC',async()=>{
  const api=await buildApiServer({config:cfg('api-server')}),admin=await buildAdminServer({config:cfg('admin')});
  const token=await fixtureAccessToken(a.userId,a.sessionId);await root.query('UPDATE user_sessions SET access_hash=$2 WHERE id=$1',[a.sessionId,hash(token)]);
- const headers={...fixtureScopeHeaders(token),'x-idempotency-key':randomUUID()};
+ const headers={...fixtureScopeHeaders(token),'x-idempotency-key':randomUUID(),'x-trace-id':'task-http-original'};
  try{
   const createResponse=await api.inject({method:'POST',url:'/api/v1/tasks/demo',headers,payload:{workspaceId:wa,text:'contract'}});expect(createResponse.statusCode).toBe(200);const id=createResponse.json().data.task.taskId;
+  expect(createResponse.headers['x-trace-id']).toBe('task-http-original');expect((await root.query('SELECT trace_id FROM tasks WHERE id=$1',[id])).rows[0].trace_id).toBe('task-http-original');
   const read=await api.inject({url:`/api/v1/tasks/${id}`,headers:fixtureScopeHeaders(token)});expect(read.json().data).toMatchObject({task:{taskType:'demo.digest',status:'queued'},retryActions:[{action:'runtime',allowed:false}]});
   expect((await api.inject(`/api/v1/tasks/${id}`)).statusCode).toBe(401);
   expect((await api.inject({url:`/api/v1/tasks/${id}/result`,headers:fixtureScopeHeaders(token)})).statusCode).toBe(409);

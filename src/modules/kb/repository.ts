@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { AppConfig } from '../../config/config.js';
+import { DOCUMENT_CANONICAL_MAX_BYTES } from '../../config/document-extraction.js';
 import { transaction, DomainError } from '../identity/store.js';
 import { tablesFor, type KbBuild, type KbSnapshot, type KbSource, type KbSourceType } from './types.js';
 import { digest } from './split.js';
@@ -23,7 +24,7 @@ export async function sourceState(tx:pg.PoolClient,build:Pick<KbBuild,'source_ty
  if(build.source_type==='note'){
   const row=(await tx.query(`SELECT n.state,n.processing_status,p.part_revision_id::text AS revision,p.content_markdown AS content
    FROM notes n JOIN workspaces w ON w.id=n.workspace_id AND w.user_id=$2 AND w.state='ready' JOIN users u ON u.id=w.user_id AND u.status='active' AND u.deleted_at IS NULL
-   LEFT JOIN LATERAL(SELECT part_revision_id,content_markdown FROM note_part_revisions WHERE note_id=n.note_id AND part='raw' ORDER BY revision DESC LIMIT 1)p ON true
+   LEFT JOIN note_parts p ON p.note_id=n.note_id AND p.part='raw'
    WHERE n.note_id=$1 AND n.workspace_id=$3 ${lock?'FOR UPDATE OF n':''}`,params)).rows[0];
   if(!row)throw new DomainError(404,'NOTE_NOT_FOUND');
   return {revision:row.revision??'',content:row.content??'',deleted:row.state!=='active'||row.processing_status!=='ready'||!String(row.content??'').trim(),format:'markdown'};
@@ -47,7 +48,7 @@ export async function sourceContent(pool:pg.Pool,config:AppConfig,build:KbBuild)
  let content=state.content;
  if(content===undefined&&state.uri){
   const parts:Buffer[]=[];const stream=await storageFor(config).read(state.uri);
-  let bytes=0;try{for await(const p of stream){const b=Buffer.from(p);bytes+=b.length;if(bytes>config.rag.maxSourceBytes*5)throw new Error('KB_BODY_TOO_LARGE');parts.push(b);}}finally{stream.destroy();}
+  let bytes=0;try{for await(const p of stream){const b=Buffer.isBuffer(p)?p:Buffer.from(p);bytes+=b.length;if(bytes>DOCUMENT_CANONICAL_MAX_BYTES)throw new Error('KB_BODY_TOO_LARGE');parts.push(b);}}finally{stream.destroy();}
   content=Buffer.concat(parts).toString('utf8');
  }
  if(content===undefined||digest(content)!==build.content_hash)throw new Error('KB_BODY_CHANGED');

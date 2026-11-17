@@ -66,6 +66,9 @@ function parsePlan(input: unknown): ReleasePlan {
   const migrations = uniqueStrings(database.migrations, 9999);
   if (migrations.some(name => !/^[0-9]{4}_[a-z0-9_]+\.sql$/.test(name))
     || new Set(migrations.map(name => name.slice(0, 4))).size !== migrations.length) fail();
+  // Start with explicit role selection for ordinary code/config releases.
+  // Schema upgrades keep the existing full-role handover until separately reviewed.
+  if (migrations.length && roles.length !== runtimeRoles.length) fail();
   if (database.verifySql !== null && database.verifySql !== `scripts/release/changes/${plan.id}/verify-db.sql`) fail();
   const dataChange = object(database.dataChange, ['mode', 'reason']);
   if (!['none', 'inline', 'separate'].includes(String(dataChange.mode)) || typeof dataChange.reason !== 'string'
@@ -83,6 +86,8 @@ function parsePlan(input: unknown): ReleasePlan {
     keys.add(change.key);
     const requiredRoles = uniqueStrings(change.roles, 5);
     if (!requiredRoles.length || requiredRoles.some(role => ![...runtimeRoles, 'migrate'].includes(role))) fail();
+    if ((change.operation !== 'remove' || change.required)
+      && requiredRoles.some(role => role !== 'migrate' && !roles.includes(role))) fail();
   }
   if (configuration.mode !== 'candidate' && configuration.changes.some(item =>
     !((item.operation === 'add' && item.hasDefault) || (item.operation === 'remove' && !item.required)))) fail();

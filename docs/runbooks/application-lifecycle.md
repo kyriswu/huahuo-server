@@ -43,6 +43,8 @@ API 的 `streamState` 状态流在 `preClose` 中保留订阅及依赖，等待�
 
 当前实际 `streamState` 业务使用者仍是 Admin；API 行为由真实 Fastify、回环 HTTP 和子进程信号测试验证，使用替身依赖，没有运行 Agent 或移动端聊天。这证明 API 底层排空行为，不代表 Agent 业务续传已验收。相关测试为 `tests/unit/lifecycle.test.ts` 与 `tests/unit/shutdown-budget.test.ts`。
 
+状态 SSE 在写缓冲满时暂停读取、序列化和心跳，恢复后读取最新状态；只合并状态快照，不适用于增量聊天 token。单事件加待发送缓冲上限为 1 MiB，等待 drain 上限为 30 秒，超限断开；这不是整个进程内存上限或客户端收妥保证。主动关闭会立即销毁堵塞连接，其他连接正常结束。解析节点闲置监控首次订阅失败会清理旧对象，由既有 30 秒扫描重试；关闭后不会重新建立监听。验证范围及并行工作区检查阻塞见[专项验收](../acceptance/state-stream-idle-monitor.md)。
+
 ## 运行配置兼容
 
 运行配置 JSON 的内部 `$schemaVersion` 当前支持整数 1。缺省永远解释为 v1；其他值拒绝读取，ready 返回 503，live 仍返回 200。该元字段不作为 Admin 可编辑字段，也不会在普通保存时自动补入已有记录。

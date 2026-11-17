@@ -1,3 +1,7 @@
+## 发布保护安装与原地复核（2026-11-17）
+
+只更新已确认测试机的Server发布执行器及小型策略文件，没有替换业务镜像、停止容器或更改ENV/入口配置。安装时成功业务版本为085de22，安装前后四容器ID与成功记录一致。真实同SHA调用返回OK，旧b729842调用在checkout被拒绝，两次均0业务重启，公开ready200。后续按services选择角色，成功记录逐角色保存镜像，不再要求未更新角色与全局SHA同镜像；未做真实单角色新业务发布演示，15组合替换范围来自替身。详见[验收](acceptance/release-order-and-services.md)。
+
 ## 入口调整候选（2026-11-16）
 
 应用Compose已移除代理及备用槽位，API恢复受限宿主端口，Admin保持独立。本轮未重启或删除原有业务容器，也没有切换本机入口；现有运行实例仍需在配套切换时退役，不能把候选Compose当作当前容器状态。所有本轮隔离Nginx/Agent/PG/Redis测试容器和网络均已清理，既有数据卷保留。见[验收](acceptance/ingress-auth.md)。
@@ -77,7 +81,7 @@ Compose 新增 API/Admin/Worker/Scheduler 专用指标映射 9464/9465/9466/9467
 
 用户随后明确要求不用隔离环境，启动当前项目。已核对原RDS基线与HEAD一致、新基线仅追加3张配置表，在事务内新增表/索引/授权并导入5项原非秘密业务配置，最后CAS更新基线校验；没有重跑整份0001、清库、修改原账号或重置凭据。用户、会话、工作区、笔记、资源及任务行数前后一致，物理外键仍为0。
 
-现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。CPU节点及PROCESSING_NODES_ENABLED保持关闭，未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
+现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。当时CPU节点及解析调用保持关闭（当前代码已移除部署级调用开关），未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
 
 
 ## 分类配置代码验收（2026-11-15）

@@ -16,7 +16,7 @@ export type TextIngestionStatus = 'pending' | 'parsing' | 'chunking' | 'success'
 export interface TextIngestionJob {
   id: string;
   source_type: TextIngestionSourceType;
-  /** Null until an external source has produced text. Otherwise exact source text. */
+  /** Null until extraction completes. Services keep canonical text; HTTP renders manual input as editable Markdown. */
   raw_content: string | null;
   origin_resource_uri: string | null;
   ingest_status: TextIngestionStatus;

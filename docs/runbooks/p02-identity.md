@@ -33,6 +33,12 @@ Server 在 `GET /.well-known/jwks.json` 发布 Ed25519 公钥。`APP_JWT_PRIVATE
 
 `POST /api/v1/auth/logout` 撤销当前客户端 session；`POST /api/v1/auth/logout-all` 撤销该用户全部 session。普通用户 Token 可以访问其 audience 声明的 Server 和 Agent，不能作为管理员凭证。
 
+## 会话活动记录（2026-11-17，待发布）
+
+每次网关鉴权仍验证JWT并读取当前已提交的用户/会话状态，不缓存授权结果。普通鉴权中的`last_seen_at`最多每60秒更新，行锁忙则跳过，由后续请求补记；登录与刷新仍沿用原活动记录。该字段是近似活跃时间，不参与当前token/session有效期或闲置自动过期。
+
+鉴权读取与可选更新在同一条主库SQL中完成，业务`assertScope FOR SHARE`不变。注销或封禁提交后的新鉴权拒绝；撤销尚未提交、鉴权快照已经开始的在途请求可能通过，不承诺撤回已放行请求。本项无新表、缓存或ENV；验证见[会话活动验收](../acceptance/session-activity.md)。
+
 ## 工作区和草稿
 
 用户修改请求必须有 X-Idempotency-Key 或 Idempotency-Key；两者同时给出不同值返回 400。同 key 不同请求返回 409，数据写入和响应记录同事务提交。工作区更新/切换/停用/恢复还需 If-Match 对应响应 etag；过期版本 412。默认空间不能直接停用，应先切换。没有共享成员或团队 API。

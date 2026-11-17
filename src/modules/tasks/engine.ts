@@ -6,11 +6,13 @@ import { transaction } from '../identity/store.js';
 import { type TaskRow, hash, event, enqueueIntent, retryDelay,parserRequestId } from './model.js';
 import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 import type {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
-import type { BillingService } from '../billing/service.js';
 import { UnavailableTagExtractor, extractBoundedTags, validateTagLabels, type TagExtractor } from '../assets/tag-extractor.js';
 import type { RagIngestionJobs } from '../rag/jobs.js';
 import type { NoteIndexJobs } from '../ingestion/jobs.js';
 import type { TaskMetrics, TaskResult } from '../../plugins/metrics.js';
+import { finalizeTaskTx, lockOwnedAttemptTx } from './lifecycle.js';
+import { finalizeUnsuccessfulTaskTx } from './reservations.js';
+import type { BillingService } from '../billing/service.js';
 export interface Attempt {task:TaskRow;owner:string;version:number;attempt:number;signal?:AbortSignal;}
 export class TaskEngine {
  constructor(readonly pool:pg.Pool,readonly leaseMs=15000,readonly billing?:BillingService,readonly storage?:StorageJobs,readonly tagExtractor:TagExtractor=new UnavailableTagExtractor('disabled'),readonly rag?:RagIngestionJobs,readonly noteIndex?:NoteIndexJobs,readonly textIngestion?:TextIngestionJobs,readonly nodeJobs?:ProcessingNodeJobs,readonly metrics?:TaskMetrics){}
@@ -22,39 +24,46 @@ export class TaskEngine {
     (kind='processing.node-start' AND external_reference LIKE 'node-start:%')))
   ) FOR UPDATE`,[id]);const t=r.rows[0];if(!t)return null;
   const continuation=Boolean(parserRequestId((t as TaskRow&{external_reference:string}).external_reference))||t.kind==='processing.node-start'&&t.attempt_no>0;
-  if(!continuation&&t.attempt_no-t.resume_count>=t.max_attempts){await tx.query("UPDATE tasks SET state='failed',error_code='ATTEMPTS_EXHAUSTED',retryable=true WHERE id=$1",[id]);if(this.billing&&t.reservation_id)await this.billing.releaseReservationTx(tx,t.reservation_id);await event(tx,id);return null;}
-  const updated=await tx.query<TaskRow>("UPDATE tasks SET state='running',attempt_no=attempt_no+1,resume_count=resume_count+$4,version=version+1,lease_owner=$2,lease_until=now()+$3*interval '1 millisecond' WHERE id=$1 RETURNING *",[id,owner,this.leaseMs,continuation?1:0]);
+  if(!continuation&&t.attempt_no-t.resume_count>=t.max_attempts){await finalizeUnsuccessfulTaskTx(tx,t,{state:'failed',errorCode:'ATTEMPTS_EXHAUSTED',retryable:true});return null;}
+  const updated=await tx.query<TaskRow>("UPDATE tasks SET state='running',attempt_no=attempt_no+1,resume_count=resume_count+$4,version=version+1,lease_owner=$2,lease_until=clock_timestamp()+$3*interval '1 millisecond' WHERE id=$1 RETURNING *",[id,owner,this.leaseMs,continuation?1:0]);
   const task=updated.rows[0]!;await tx.query("INSERT INTO task_attempts(task_id,attempt_no,version,owner,state) VALUES($1,$2,$3,$4,'running')",[id,task.attempt_no,task.version,owner]);await event(tx,id);
   return {task,owner,version:task.version,attempt:task.attempt_no};
  });}
- async heartbeat(a:Attempt){const r=await this.pool.query("UPDATE tasks SET lease_until=now()+$5*interval '1 millisecond' WHERE id=$1 AND lease_owner=$2 AND version=$3 AND attempt_no=$4 AND state='running' AND lease_until>now()",[a.task.id,a.owner,a.version,a.attempt,this.leaseMs]);return r.rowCount===1;}
+ async heartbeat(a:Attempt){const r=await this.pool.query(`WITH locked AS MATERIALIZED (
+  SELECT id,lease_owner,version,attempt_no,state,lease_until FROM tasks WHERE id=$1 FOR UPDATE
+ ) UPDATE tasks t SET lease_until=clock_timestamp()+$5*interval '1 millisecond' FROM locked l
+ WHERE t.id=l.id AND l.lease_owner=$2 AND l.version=$3 AND l.attempt_no=$4
+  AND l.state='running' AND l.lease_until>clock_timestamp()`,[a.task.id,a.owner,a.version,a.attempt,this.leaseMs]);return r.rowCount===1;}
  async finish(a:Attempt,digest:string,byteCount:number,apply?:(tx:pg.PoolClient)=>Promise<void>){const applied=await transaction(this.pool,async tx=>{
-  const lease=await tx.query<Pick<TaskRow,'id'|'reservation_id'>>(`WITH locked AS MATERIALIZED (
-   SELECT id,reservation_id,state,version,attempt_no,lease_owner,lease_until FROM tasks WHERE id=$1 FOR UPDATE
-  )
-  SELECT id,reservation_id FROM locked WHERE state='running' AND version=$2 AND attempt_no=$3
-   AND lease_owner=$4 AND lease_until>clock_timestamp()`,[a.task.id,a.version,a.attempt,a.owner]);
-  const t=lease.rows[0];if(!t)return false;
+  const t=await lockOwnedAttemptTx(tx,a);if(!t)return false;
   if(apply)await apply(tx);
   const resultId=randomUUID();await tx.query('INSERT INTO task_results(id,task_id,attempt_no,digest,byte_count) VALUES($1,$2,$3,$4,$5)',[resultId,t.id,a.attempt,digest,byteCount]);
-  await tx.query("UPDATE tasks SET state='succeeded',result_id=$2,version=version+1,lease_until=NULL,lease_owner=NULL,error_code=NULL,retryable=false WHERE id=$1",[t.id,resultId]);
   await tx.query("UPDATE task_attempts SET state='succeeded',finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[t.id,a.attempt]);
-  if (this.billing && t.reservation_id) await this.billing.commitReservationTx(tx,t.reservation_id);
-  await event(tx,t.id);return true;
+  await finalizeTaskTx(tx,t,{state:'succeeded',resultId},async()=>{
+   if(this.billing&&t.reservation_id)await this.billing.commitReservationTx(tx,t.reservation_id);
+  });return true;
  });if(applied)this.metrics?.recordTaskAttempt(a.task.kind,'success');return applied;}
  async fail(a:Attempt,code:string,retryable:boolean){const outcome=await transaction(this.pool,async tx=>{
-  const r=await tx.query<TaskRow>("SELECT * FROM tasks WHERE id=$1 AND version=$2 AND lease_owner=$3 AND state='running' AND lease_until>now() FOR UPDATE",[a.task.id,a.version,a.owner]);const t=r.rows[0];if(!t)return {applied:false,result:null};
+  const t=await lockOwnedAttemptTx(tx,a);if(!t)return {applied:false,result:null};
   const retry=retryable&&t.attempt_no-t.resume_count<t.max_attempts&&t.external_state==='none',delay=retryDelay(t.attempt_no-t.resume_count);
   const state=t.external_state!=='none'?'reconciling':retry?'retry_scheduled':'failed';
-  await tx.query("UPDATE tasks SET state=$2,error_code=$3,retryable=$4,lease_until=NULL,lease_owner=NULL,version=version+1,available_at=now()+$5*interval '1 millisecond' WHERE id=$1",[t.id,state,code,retryable,delay]);
   await tx.query("UPDATE task_attempts SET state='failed',error_code=$3,finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[t.id,a.attempt,code]);
-  if(retry)await enqueueIntent(tx,t.id,delay); if (!retry && t.external_state === 'none' && this.billing && t.reservation_id) await this.billing.releaseReservationTx(tx,t.reservation_id); await event(tx,t.id);return {applied:true,result:state==='reconciling'?null:'failure' as TaskResult};
+  if(state==='failed')await finalizeUnsuccessfulTaskTx(tx,t,{state,errorCode:code,retryable});
+  else{
+   await tx.query("UPDATE tasks SET state=$2,error_code=$3,retryable=$4,lease_until=NULL,lease_owner=NULL,version=version+1,available_at=now()+$5*interval '1 millisecond' WHERE id=$1",[t.id,state,code,retryable,delay]);
+   if(retry)await enqueueIntent(tx,t.id,delay);await event(tx,t.id);
+  }
+  return {applied:true,result:state==='reconciling'?null:'failure' as TaskResult};
  });if(outcome.result)this.metrics?.recordTaskAttempt(a.task.kind,outcome.result);return outcome.applied;}
  // Future provider adapters must record intent BEFORE the external call. Recovery never resubmits it.
- async markExternal(a:Attempt,reference:string|null){const r=await this.pool.query("UPDATE tasks SET external_state='unknown',external_reference=$5 WHERE id=$1 AND version=$2 AND lease_owner=$3 AND attempt_no=$4 AND state='running' AND lease_until>now()",[a.task.id,a.version,a.owner,a.attempt,reference]);return r.rowCount===1;}
+ async markExternal(a:Attempt,reference:string|null){return transaction(this.pool,async tx=>{
+  if(!await lockOwnedAttemptTx(tx,a))return false;
+  await tx.query("UPDATE tasks SET external_state='unknown',external_reference=$2 WHERE id=$1",[a.task.id,reference]);return true;
+ });}
  async waitingExternal(a:Attempt,reference:string){return transaction(this.pool,async tx=>{
-  const r=await tx.query("UPDATE tasks SET state='waiting_external',external_state='submitted',external_reference=$5,lease_owner=NULL,lease_until=NULL,version=version+1 WHERE id=$1 AND version=$2 AND lease_owner=$3 AND attempt_no=$4 AND state='running' AND lease_until>now()",[a.task.id,a.version,a.owner,a.attempt,reference]);
-  if(r.rowCount){await tx.query("UPDATE task_attempts SET state='waiting_external',finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[a.task.id,a.attempt]);await event(tx,a.task.id);}return r.rowCount===1;
+  if(!await lockOwnedAttemptTx(tx,a))return false;
+  await tx.query("UPDATE tasks SET state='waiting_external',external_state='submitted',external_reference=$2,lease_owner=NULL,lease_until=NULL,version=version+1 WHERE id=$1",[a.task.id,reference]);
+  await tx.query("UPDATE task_attempts SET state='waiting_external',finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[a.task.id,a.attempt]);await event(tx,a.task.id);return true;
  });}
  async defer(a:Attempt,delayMs:number){return transaction(this.pool,async tx=>{
   const row=(await tx.query<TaskRow&{external_reference:string;cancel_requested_at:Date|null}>(`WITH locked AS MATERIALIZED (
@@ -90,7 +99,7 @@ export class TaskEngine {
    const spec=JSON.parse(String(input.body)) as {noteId:string;revisionId:string;tagSetVersion?:number};
    const n=(await this.pool.query(`SELECT n.*,p.content_markdown FROM notes n
      JOIN workspaces w ON w.id=n.workspace_id AND w.user_id=$3 AND w.state='ready'
-     LEFT JOIN LATERAL (SELECT content_markdown FROM note_part_revisions WHERE note_id=n.note_id AND part='raw' ORDER BY revision DESC LIMIT 1) p ON true
+     LEFT JOIN note_parts p ON p.note_id=n.note_id AND p.part='raw'
      WHERE n.note_id=$1 AND n.workspace_id=$2`,[spec.noteId,a.task.workspace_id,a.task.user_id])).rows[0];
    const outcome=(status:string)=>this.finish(a,hash(status),0,async tx=>{
      await tx.query('UPDATE content_jobs SET outcome=$2,provider=$3 WHERE task_id=$1',[a.task.id,status,this.tagExtractor.provider]);

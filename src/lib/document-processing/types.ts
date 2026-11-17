@@ -7,8 +7,6 @@ export interface SectionRange { sourceStart: number; sourceEnd: number; sectionI
 export interface DocumentStructure { toc: TocItem[]; sections: SectionNode[]; ranges: SectionRange[]; offsetUnit: 'utf16'; version: string; }
 export interface StructureOptions {
   format?: 'markdown' | 'text'; maxHeadingDepth?: number;
-  /** Existing parser evidence such as OCR prose; never a second heading tree. */
-  ignoreHeadingRanges?: Array<{ sourceStart: number; sourceEnd: number }>;
 }
 export interface TokenCounter { readonly id: string; readonly model: string; readonly maxInputTokens: number; count(text: string): number | Promise<number>; }
 export class DocumentProcessingError extends Error {

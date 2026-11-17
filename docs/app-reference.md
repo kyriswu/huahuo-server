@@ -1,3 +1,50 @@
+## 用户资源与当前笔记参照（2026-11-17）
+
+沿用本轮只读核对的 App 提交 `bf23c1b14d847de5561c1ba66bd4192dc308b356`；`lib` 未发现上传 HTTP、contentMd5/uploadRequired 或 Note 历史正文的消费者。当前改动只在 Server：资源只按用户归属、同一资源 ID 多处引用及计数、零引用自动硬删除、Note 只存当前正文；旧 part 修订入参不再接受。按用户最终要求不做内容去重，客户端不计算 MD5/SHA；接线时以幂等键重试同次上传、用 resourceId 复用文件，按 uploadRequired 决定是否直传，并用 If-Match 编辑当前 Note，不将修订 ID 当历史正文查询键。本轮不写 App、不运行 Flutter，不宣称移动端上传已联调。参见[当前协议与验证](acceptance/user-resources-and-current-notes.md)。
+
+## 内部 HTTP 协定参照（2026-11-17）
+
+只读复核真实App提交bf23c1b14d847de5561c1ba66bd4192dc308b356，api_endpoints.dart定义Server/Agent公开Base URL，未发现内部路径或可信身份头消费者；其SHA256仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1，http_auth_repository.dart仍为d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。本轮仅修改Server内部注册与出站封装；不写App，不读取/修改其他Agent项目，不宣称双方联调。见[协定](runbooks/internal-services.md)。
+
+## 通用上传解耦参照（2026-11-17）
+
+本轮只读核对真实 App，HEAD 为 `bf23c1b14d847de5561c1ba66bd4192dc308b356`，开始和核对后工作树均干净。当前 `lib` 未发现 `upload-token`、`media/uploads`、`sourceScene`、`durationSeconds` 或 `resourceId` 的上传 HTTP 消费实现。`core/platform/inspiration_files.dart` 仅负责本地选取/分享文件；`features/home/presentation/upload_more_menu.dart` 仅为菜单，不能作为云上传已接线的证据。
+
+后端通用上传不再接收场景、音视频时长或数字分身参数，只负责文件授权、校验和用户归属；工作区属于后续业务上下文。上传后的业务由其他 API 主动引用 `resourceId`。客户端预期通过一个上传组件封装申请、OSS 直传和完成确认；此次未修改 App、未运行 Flutter，也未验证移动端上传进度或断网恢复。现有 `api_endpoints.dart` 仍分别声明 Server/Agent 地址，不代表已经实现统一上传组件。
+
+本轮实际读取文件及 SHA-256：
+
+| App 相对路径 | SHA-256 |
+| --- | --- |
+| `lib/core/network/api_endpoints.dart` | `17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1` |
+| `lib/features/auth/data/http_auth_repository.dart` | `d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5` |
+| `lib/core/platform/inspiration_files.dart` | `4b561ec23ed5fda54f0983fdff5e4b438ee6ffa48c24d07402fbf704fde9b597` |
+| `lib/features/home/presentation/upload_more_menu.dart` | `7dc8de27c1bc96b6e98b90c74059c3b5f6e58c8180a92f297ec95e116cbe9e93` |
+
+## OSS 直传直读参照（2026-11-17）
+
+只读检索真实 `../huahuo-ai/lib` 未发现 upload-token、media/uploads、media/resources、extractionUrl/downloadUrl、contentMarkdown/KBIMAGE 的当前 HTTP 消费实现。本轮仅修改后端签名 URL/元信息确认/下载 JSON 契约，未写 App、运行 Flutter 或宣称移动端联调。后端证据见[OSS 验收](acceptance/oss-direct-access.md)。
+
+## KBIMAGE 与可编辑 Markdown 参照（2026-11-17）
+
+只读检索真实 `../huahuo-ai/lib`，未发现 KBIMAGE/contentMarkdown/displayMarkdown/imageLinks 的消费者；`features/inspiration/presentation/inspiration_image_embed.dart:34` 仍为 FileImage，`features/auth/presentation/auth_resources.dart:240` 是法律文本 Markdown，不属于本次 Note 编辑协议。前者 SHA256 为 `3b23860d989bf7f9729e092d25d98ef95281492994c4359d590a61c8f7cd3296`，后者为 `4f52a825e6fb3fd9909420eae173f39fce5662b3f6f3da66386ad652987b8fc2`。本轮只完成后端单正文标准 Markdown、过期图片地址识别及 KBIMAGE 无损往返；未修改/构建 App，不能宣称移动端编辑器联调完成。见[后端验收](acceptance/kbimage-unification.md)。
+
+## 任务基础机制参照（2026-11-17）
+
+本轮仅加强Server内部调度、终态事务与租约保护，公开请求/响应及队列载荷不变，扣费扩展按用户要求暂缓。沿用同轮只读App基准bf23c1b14d847de5561c1ba66bd4192dc308b356，两份认证/地址参照文件哈希未变；未写App或运行Flutter。历史后端模块交接不作为移动端验收，见[边界](acceptance/task-reservation-recovery.md)。
+
+## traceId贯通参照（2026-11-17）
+
+只读核对api_endpoints.dart与http_auth_repository.dart，SHA256仍分别为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1、d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。本轮仅补后台trace上下文与任务持久关联，不改App或运行Flutter；已有响应Envelope保持，见[验收](acceptance/trace-id.md)。
+
+## 发布策略契约（2026-11-17）
+
+本次只增加发布顺序/幂等及services按角色更新约束；App路由与业务响应Schema不变，固定云命令仍只接收SHA、返回原终态协议。私密成功记录新增逐角色镜像身份，不暴露到App。只读复核api_endpoints.dart、http_auth_repository.dart，文件SHA256仍分别为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1和d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5；未写App或运行Flutter。详见[发布保护验收](acceptance/release-order-and-services.md)。
+
+## 任务预留恢复参照（2026-11-17）
+
+只读核对当前App提交bf23c1b14d847de5561c1ba66bd4192dc308b356及干净工作树，lib未找到通用Task接口消费者；两份认证/地址参照文件哈希与上次一致。此轮仅改任务终态与预留事务，不改HTTP请求/响应结构，不写App或运行Flutter；后端测试不作为移动端联调。证据见[任务恢复验收](acceptance/task-reservation-recovery.md)。
+
 ## 统一入口与Agent配套修改参照（2026-11-16）
 
 只读复核真实App的api_endpoints.dart、http_auth_repository.dart，SHA256仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1和d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。App继续从环境读取两个Base URL；统一域名部署时配置Server origin和Agent的/agent前缀，不修改内部业务路径。本轮没有写App，用户另行明确授权的Agent后端已配套调整；后端代理联调不冒充移动端验收。见[证据](acceptance/ingress-auth.md)。

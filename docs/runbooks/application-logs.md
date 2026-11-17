@@ -2,6 +2,8 @@
 
 沿用 Docker 标准输出的 JSON 日志和已有 Dozzle，不新增组件、端口或服务。中心已有 [Grafana](https://grafana.chuda.cc/d/huahuo-server) 与 [Dozzle](https://dozzle.chuda.cc/) 入口；本轮未修改中心配置。
 
+traceId：入口只接受X-Trace-Id，缺失或不合法时为新请求生成；一次请求后续调用沿用该值。任务在创建时写入非空tasks.trace_id，Worker重试/恢复只读取原值，不修补缺失字段。日志中的Task step started/completed/failed携带相同traceId；Agent HTTP日志、Mastra子日志及出站调用也使用它。解析回调通过callback_url的traceId参数关联，仅在回调路径生效。无需新增追踪服务或ENV，代码及隔离验证见[验收](../acceptance/trace-id.md)，尚未部署。
+
 1. 从 Grafana 5xx 表确认角色、路由和时间。
 2. 在 Dozzle 对应角色容器中定位 `Request failed`，复制 `traceId` 搜索请求上下文。它与响应头 `X-Trace-Id`、错误正文 traceId 一致。
 3. 读取 `err.type`、`err.message`、`err.code`、`err.stack` 和嵌套 `err.cause`，定位 `src/...ts:行:列`。记录另有 service（角色）、instanceId、method、路由模板 route、statusCode 和 errorCode。

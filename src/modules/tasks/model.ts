@@ -7,11 +7,13 @@ export type TaskState = 'queued'|'running'|'retry_scheduled'|'waiting_external'|
 export interface TaskRow {
  id:string; user_id:string|null; workspace_id:string|null; kind:string; queue:QueueName; input_id:string|null;
  state:TaskState; version:number; attempt_no:number; resume_count:number;max_attempts:number; lease_owner:string|null;
- reservation_id:string|null;
+ reservation_id:string|null;trace_id:string;
  lease_until:Date|null; external_state:'none'|'submitted'|'unknown'; result_id:string|null;
  error_code:string|null; retryable:boolean; event_sequence:number; created_at:Date; updated_at:Date;
 }
 export const terminal = (s:TaskState) => ['succeeded','failed','cancelled'].includes(s);
+// Capture policy only on INSERT; redelivery must preserve the task's original limit.
+export const newTaskMaxAttempts = () => currentRuntimeConfig()?.taskPolicy.maxAttempts ?? 3;
 export const retryDelay = (attempt:number, random=Math.random) => {const p=currentRuntimeConfig()?.taskPolicy;return Math.min(p?.retryMaxMs??60000,(p?.retryBaseMs??1000)*2**Math.min(attempt,20))*(0.75+random()*0.5);};
 export const hash = (text:string) => createHash('sha256').update(text).digest('hex');
 export function parserRequestId(reference:unknown):string|undefined{
@@ -26,8 +28,6 @@ export async function event(tx:pg.PoolClient,id:string) {
  if(r.rows[0]?.kind==='processing.node-start'&&r.rows[0].external_reference?.startsWith('node-start:'))await tx.query("SELECT pg_notify('processing_node_events',$1)",[r.rows[0].external_reference.slice('node-start:'.length)]);
 }
 export async function enqueueIntent(tx:pg.PoolClient,id:string,delayMs=0) {
- const policy=currentRuntimeConfig()?.taskPolicy;
- if(policy)await tx.query('UPDATE tasks SET max_attempts=$2 WHERE id=$1 AND version=1 AND attempt_no=0',[id,policy.maxAttempts]);
  await tx.query(`INSERT INTO task_outbox(id,task_id,available_at) VALUES($1,$2,now()+$3*interval '1 millisecond')
   ON CONFLICT(task_id) WHERE status IN ('pending','delivering') DO UPDATE SET available_at=least(task_outbox.available_at,excluded.available_at)`,[randomUUID(),id,delayMs]);
 }

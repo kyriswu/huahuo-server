@@ -1,6 +1,7 @@
 import { idempotent } from '../../lib/idempotency.js';
 import type pg from 'pg';
-import { attachResource } from '../storage/references.js';
+import { replaceResourceRefs } from '../storage/references.js';
+import type { ResourceClaims } from '../storage/resource-claims.js';
 import { randomUUID } from 'node:crypto';
 import { transaction, assertScope, audit, DomainError, type Scope } from '../identity/store.js';
 import { status, validateTimeZone } from '../identity/service.js';
@@ -16,7 +17,7 @@ async function workspace(tx:pg.PoolClient,scope:Scope,id:string) {
  if(!r.rows[0])throw new DomainError(404,'WORKSPACE_NOT_FOUND');return r.rows[0];
 }
 export class WorkspaceService {
- constructor(private pool:pg.Pool,private secret:string){}
+ constructor(private pool:pg.Pool,private secret:string,private readonly resourceClaims?:ResourceClaims){}
  private read<T>(scope:Scope,fn:(tx:pg.PoolClient)=>Promise<T>){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return fn(tx);});}
  private write<T>(scope:Scope,operation:string,key:string,input:unknown,fn:(tx:pg.PoolClient)=>Promise<T>){
   return transaction(this.pool,async tx=>{
@@ -37,8 +38,8 @@ export class WorkspaceService {
 
   return this.write(scope,'profile.update',key,input,async tx=>{
    if(input.avatarResourceId!==undefined){
-    if(input.avatarResourceId){try{await attachResource(tx,scope.userId,input.avatarResourceId,'avatar',scope.userId);}catch(e){if(e instanceof DomainError&&e.statusCode===404)throw new DomainError(409,'AVATAR_RESOURCE_NOT_VERIFIED');throw e;}}
-    await tx.query("DELETE FROM resource_refs WHERE user_id=$1 AND ref_kind='avatar' AND ref_id_external=$1 AND resource_id IS DISTINCT FROM $2::uuid",[scope.userId,input.avatarResourceId]);
+    if(input.avatarResourceId){try{await this.resourceClaims?.ensure(tx,scope,undefined,[input.avatarResourceId]);}catch(e){if(e instanceof DomainError&&e.statusCode===404)throw new DomainError(409,'AVATAR_RESOURCE_NOT_VERIFIED');throw e;}}
+    await replaceResourceRefs(tx,scope.userId,'avatar',scope.userId,input.avatarResourceId?[input.avatarResourceId]:[]);
     await tx.query('UPDATE users SET avatar_resource_id=$2 WHERE id=$1',[scope.userId,input.avatarResourceId]);
    }
    const r=await tx.query<{displayName:string;updatedAt:Date;avatarResourceId:string|null}>('UPDATE users SET display_name=$1,updated_at=now() WHERE id=$2 RETURNING display_name AS "displayName",updated_at AS "updatedAt",avatar_resource_id AS "avatarResourceId"',[input.displayName.trim(),scope.userId]);

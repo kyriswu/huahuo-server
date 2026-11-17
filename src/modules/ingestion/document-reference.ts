@@ -1,8 +1,8 @@
 export interface DocumentParseState {
   phase:'bound'|'intent'|'job'|'cancelling'|'cancelled'|'complete'|'failed'; requestId:string; fingerprint:string;
   jobId?:string; artifactUri?:string; canonicalUri?:string; manifestUri?:string;
-  fileName?:string;mimeType?:string;retryFrom?:string;
-  sourceUri?:string;startedAt?:number;timedOut?:boolean;
+  retryFrom?:string;
+  startedAt?:number;timedOut?:boolean;
 }
 
 /** Shared durable format: a receipt must describe the same phase as its prefix. */

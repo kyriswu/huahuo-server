@@ -1,3 +1,119 @@
+## 配置整理与移除部署级解析调用开关（2026-11-17，本地完成）
+
+实际ENV与七份根级/规格模板统一分组，删除过时tokenizer、双向鉴权空标题、历史验收和重复注释。用户明确要求配置好节点就直接调用，已完整删除PROCESSING_NODES_ENABLED及config.enabled、Admin状态/列表字段和UI分支；按实际配置选择节点，连接不可达显示unreachable，保留调用期限、租约、取消和未知结果恢复。云启停权限仍独立，不为此扩展实际云操作。
+
+纯整理保留所有值；删除旧开关后逐键/Compose脱敏比对其他值不变。1163项unit/contract、458项隔离PG/Redis通过（4项Milvus跳过），类型/Lint/构建/Compose/diff通过。无本项新SQL/依赖/密钥，旧键停用已记录在候选清单，未更新实际环境、启动节点、发布或重启。见[验收及测试边界](acceptance/node-call-configuration.md)。
+
+## 清除双向服务 Secret Key 配置（2026-11-17，本地完成）
+
+生产代码与Compose已不读取服务间Key，本轮从.env、.env.compose.local及两份规格ENV模板删除双向废弃项；同步删除已废弃的agent-jwt接入手册，修正当前文档仍要求JWT+ServiceKey的旧说明。保留外部用户认证与第三方服务自身密钥。内部路由仍通过统一策略区分入口，同一业务共用Service；RAG公开/内部共用同一个RagQueryService实例和query路由工厂。
+
+42项配置/网关/内部策略/生产注册契约测试通过；脱敏检查全部运行ENV及模板无旧键、Compose展开没有角色收到旧键、diff检查通过。无新代码分支/依赖/迁移，未改Agent仓库、重启或发布。
+
+## 用户资源与当前 Note 收敛（2026-11-17，本地完成，待发布）
+
+按用户最终定义，resources 仅归用户，移除工作区、重复上传 ID、解析状态和软删除时间；不做内容去重，删除候选 MD5 字段/索引和客户端哈希要求，sha256 可空备用。每次独立上传生成新 UUID，多个业务显式使用同一 resourceId 可跨自己的工作区，空间只计一次。引用关系与 reference_count 同事务增减；最后一个引用解除时自动提交现有 storage.delete 任务，Worker 删 OSS 后硬删资源并释放空间，失败按原任务重试，完成回执避免重放多扣。请求重试依赖轻量元数据幂等，不读取文件。临时阶段继续仅 Redis、首次起 24 小时、不计空间、不加临时额度限制，业务成功后清 Redis。保留已有查询索引，不新增清理组件或缓存。
+
+Note 改为 note_parts 当前值，每部分一行；修订字段只用于并发/异步防旧写，不留正文历史和历史图片 pin。移除历史 part query/basePartRevisionId，If-Match 仍强制。新增 0009–0011，不改冻结 SQL；孤立/跨用户引用在迁移前拒绝，旧写入须排空，兼容项维持 false。
+
+最终规则的全仓类型/Lint/构建、1163 项单元/契约及 461 项真实隔离 PG/Redis/Milvus 集成通过（无跳过），另有 111 项定向复测；schema 3→11、重复迁移为空、四角色及零物理外键通过，OSS 为本地替身。前一轮 MD5 草案数量仅作历史证据。用户要求等待另一个窗口，本轮不固定候选或提交/触发发布；未执行共享库迁移、服务重启或部署。见[完整证据与边界](acceptance/user-resources-and-current-notes.md)。此前上传解耦记录为历史轮次，当前资源归属/引用/正文契约以上述为准。
+
+## Server 内部 HTTP 协定与通用客户端（2026-11-17，本地完成，未部署）
+
+内部API由单入口注册到/internal/v1，业务继续分模块，统一显式鉴别策略、no-store和公开OpenAPI隐藏；漏配策略启动失败。RAG公开/内部共用Schema/handler/运行配置；gateway会话刷新/注销在请求校验后执行，回调能力在读取大响应前授权。解析回调迁入内部前缀，生成URL与trace识别同步，删除旧公开路径；Agent当前RAG/gateway路径保持。当前无Server主动调用Agent业务，不预建空壳客户端。
+
+手写出站HTTP共用ServiceHttpClient，复用原生连接池，统一trace、deadline/取消、拒绝重定向、受限JSON和响应释放；业务provider保留各自协议、凭据、状态码与重试，解析unknown不自动重发。1168项单元/契约、456项隔离PG/Redis通过（4项Milvus跳过），类型/Lint/构建通过；首次并行上传fixture和2项时序失败已留证后复验。无本项SQL/ENV/依赖变更，不改其他Agent项目或App、不联网调用真实云、未提交/发布/重启。见[轻量协定](runbooks/internal-services.md)及[验收边界](acceptance/internal-services.md)。
+
+## 通用上传、业务认领与用户空间汇总（2026-11-17，本地完成，未部署）
+
+上传阶段仅 Redis 保存 24 小时临时回执、幂等关系和到期索引，不维护用户临时空间计数、不判断剩余额度，也不增加异常上传限流或临时文件数量/总量限制；文件大小保留为校验元数据。Server 控制 OSS 单片上传的初始化/完成/取消，文件不经 Server；上传 ID、resourceId 与 OSS Key 使用同一 UUID。业务 API 首次使用时才在同一事务校验正式额度、登记资源、正式占用和引用，提交成功后清 Redis；清理失败不影响正式用量或空间判定。到期清理只核对统一资源表，不遍历业务表，保留崩溃/重试下的误删保护。移除上传的场景/时长/数字分身入参及旧 PG 上传流程，临时预览不触发业务。
+
+users 增加 used/reserved 两个非负字节计数，正式认领使用用户行条件更新完成额度判断和 used 增量，不再逐次 SUM 明细。既有 PostgreSQL reserved 基础逻辑与临时上传无关，本次保留；认领、既有容量预留及正式删除均事务维护计数，幂等重试不重复增减。明细与普通索引保留用于细分统计和对账，未扩展权益/扣费政策或新增汇总任务。新增 0007/0008，不改冻结迁移；现有占用一次初始化且失败整笔回滚。
+
+最终 typecheck、lint、build、diff 检查通过；1142 项单元/契约、451 项真实隔离 PG/Redis/Milvus 通过且无跳过，schema 3→8、重复迁移为空、四角色及零物理外键验收通过。之前失败的测试替身/fixture 与一次测试凭据公网读取已如实留证，后者已加默认禁止网络的 guard；真实 OSS 联调与千万行压测未完成。App 仅读，不修改共享数据库、运行服务或部署；兼容项保持 false，目标迁移准备另行评估。见[完整证据、迁移边界及 Redis 故障限制](acceptance/generic-uploads.md)。
+
+## 全仓回归完成（2026-11-17，历史轮次；上传已由上项替代）
+
+当前工作区类型、Lint、Server/Admin构建、本机/云模板Compose解析及diff检查通过；1109项单元/契约、397项真实隔离PG/Redis/Milvus全部通过、无跳过。版本3→6应用0004/0005/0006、重复迁移为空、四角色断言与零物理外键验收通过。前次OSS测试类型和Scheduler发布断言权限阻塞已解除。本轮首次构建/测试并行造成4项dist依赖加载失败，调整为先构建后全量复测通过，失败日志保留。没有修改业务代码、提交、重启或部署；候选兼容项仍为false，发布前准备另行按现有流程落实。详见[完整结果与边界](acceptance/full-check-20261117.md)。
+
+只读审查另发现已完成上传在签名到期前物理删除后，旧PUT链接可能重新写入而留下无主对象；开启Bucket版本控制时，未完成上传的不带版本删除也可能只建立删除标记。两项均与测试通过分开记录，未调用真实OSS或扩展回收业务；具体证据、适用条件和下一步见上述验收。
+
+## OSS 客户端直传直读与旧检查清理（2026-11-17，本地实现）
+
+客户端文件上传/下载、图片与播放统一直接访问OSS；上传完成只HEAD元信息确认，删除Server对象代理、播放令牌及storage.inspect后台任务。移除SHA入参、MIME/DOCX/音频时长本地解析和file-type/music-metadata依赖；自产artifact写入边流写边hash，不再二次读取。新资源SHA为空、时长明确为客户端声明。图片UUID按已配置bucket/对象key与归属校验，过期链接保存/OCR往返继续工作；版本化OSS来源URL与下载/删除按真实版本匹配。
+
+本地.env已设OSS驱动，新增可选公网签名endpoint；现有凭据保留。新增0006及配置/数据库只读验收文件，仅在临时库演练：基线0003→0006及四角色验收通过，1109项单元/契约、393项隔离PG/Redis通过（4项Milvus跳过），typecheck/lint/build通过。失败的权限验收SQL、旧local fixture和并行build测试顺序均已修正/重测，不扩大运行角色权限。未提交、推送、发布、重启或修改共享数据库/OSS；目标迁移与真实OSS联调未执行。见[完整证据与边界](acceptance/oss-direct-access.md)。
+
+## 后台状态 SSE 背压与闲置监控恢复（2026-11-17，待发布）
+
+状态 SSE 在缓冲满时暂停读取、序列化及心跳，恢复后只读最新快照；1 MiB 待发送限制、30秒 drain 超时，关闭及错误路径完整清理。闲置监控首连/首订阅失败后释放实例，复用现有30秒扫描重建；并发启动共享结果，关闭不复活。105项定向单元/生命周期、31项真实隔离Redis及Lint/构建通过。最终全仓类型检查与完整集成入口分别被并行OSS测试类型、发布断言权限问题阻塞，未改正式门禁。无本项SQL/ENV/依赖或新增轮询，未发布、重启或调用真实云；见[验收与边界](acceptance/state-stream-idle-monitor.md)。
+
+## 会话鉴权活跃记录限频（2026-11-17，待发布）
+
+普通鉴权每次实时读取账号与会话有效性；last_seen_at最多每60秒更新，行锁忙时跳过本次活动记录。复用单条SQL，保留业务FOR SHARE和注销/刷新逻辑，无新增缓存、表、配置或后台任务。新增14项专项与身份/用户/资产回归共73项真实PG/Redis、53项单元/契约及全仓类型/Lint/构建通过。撤销提交后的新鉴权拒绝，提交前已开始的快照读取可能通过，明确在途边界；未做线上性能压测。未部署或重启，见[验收](acceptance/session-activity.md)。
+
+## 笔记列表20条分页与摘要（2026-11-17，待发布）
+
+按用户确认固定20条，使用更新时间/ID游标续页，保留PG微秒、严格校验工作区与格式；列表一次批量查询元信息和有界raw前缀，preview最多200字，不返回parts/resourceRefs或签发图片链接，详情全文保持。42项真实隔离PG/Redis及11项接口契约、全仓类型/Lint/构建通过。实时列表的并发编辑通过刷新首屏可见，不新增跨请求快照。App当前本地SQLite首页未接远程笔记列表；API字段改变如实标记compatibility.api=false，无新SQL/配置/组件/回填，未部署或重启。见[验收与边界](acceptance/note-pagination.md)。
+
+## Scheduler运行时配置修复（2026-11-17，待发布）
+
+每轮过期清理/恢复/派单复用一份运行配置快照，后台新执行次数与投递退避从下一轮生效；配置无效时不执行该轮，恢复后无需重启。全部11处任务INSERT直接保存次数上限，Outbox补投不再改写旧任务；Admin手动节点启动补接相同配置机制，人工retry规则不变。990项unit/contract、既有338项真实依赖回归与新增7项专项分轮通过，4项Milvus跳过；最终全仓类型检查、构建和改动文件Lint通过，全仓Lint受并行新增图片测试的两处多余转义错误阻塞。新增测试fixture两处错误已修，期间其他窗口缺文件导致的收集失败及最终源码通过证据均保留。每轮增加1次配置SELECT，新任务省去1次补写UPDATE，无新SQL/配置键/组件/计费改动，未部署或重启既有服务。见[验收](acceptance/scheduler-runtime-configuration.md)。
+
+## KBIMAGE统一与客户端Markdown往返（2026-11-17，待发布）
+
+Note和手动正文在写入时统一KBIMAGE，查询/展示共用轻量扫描器，无图快速跳过，不再为图片识别构建全文AST。客户端Note只收一个contentMarkdown（手动文本raw_content）标准Markdown；图片路径/Object Key查UUID与下载签名有效期分离，过期链接仍可保存，响应重签。URL fragment定位原节点，同UUID多OCR不混淆；幂等后恢复原OCR/属性，再写hash/revision。原key重试不依赖新正文。签名URL的运输长度和canonical业务上限分别控制，无新增表/缓存/SQL或读取旧格式兼容分支。
+
+1049项单元/契约、368项隔离PG/Redis（4项Milvus跳过）、typecheck/lint/build通过。真实过期下载令牌GET401但PATCH成功、无修改无新版本、编辑保留OCR及原key重放均有接口实测。1MiB合成无图扫描中位389.17→0.28ms，有1图392.09→14.17ms；仅组件实验，不是线上压测。未调用真实模型/解析/OSS，未改App/AGENTS或共享数据、未发布/重启；旧正文仍须发布前盘点。见[完整验收与边界](acceptance/kbimage-unification.md)。
+
+## 文件解析统一外部 OSS URL（2026-11-17，待发布）
+
+按用户明确的底层规则，正式文档、FILE_UPLOAD与后台试用统一只传OSS链接，PDF/Office/TXT/MD/CSV不再本地提取，也不下载再转发。移除Server二进制上传、DOCX Base64、失效下载配置、旧tokenizer及无调用依赖；媒体申请改签发OSS PUT，完成校验仍保留真实完整性/归属/配额保护并改流式读取。资源ID与URL绑定，签名过期及取消/回调恢复补齐。进一步删除无人调用解析旁路/客户端方法、旧正文回退/标题范围/处理状态，；相关工作偏好按用户要求仅作为会话指令，不固化到AGENTS。最终990项单元/契约、338项隔离PG/Redis（4项Milvus跳过）、最后22项直传复测及类型/Lint/构建通过；真实解析服务/OSS均未调用，未部署/重启/写共享库，无本项SQL迁移。其他系统审查条目未包含在本次已修复声明中，详见[实现与验收](acceptance/document-parser-url-contract.md)。
+
+## Worker / Scheduler 空闲资源优化（2026-11-17，待发布）
+
+拆出队列发布器，Scheduler不再加载Worker执行依赖；仅后台两角色健康探针改为启动宽限期5秒、稳态30秒。完整入口隔离容器各90秒采样：Worker/Scheduler CPU单核占比1.079%→0.364%、1.213%→0.479%；Scheduler主进程RSS中位131→106 MiB，Worker内存无明显下降。首次健康约5秒；临时Redis故障约101秒连续4次失败后unhealthy、恢复约30秒后healthy，代价是后台健康状态发现延迟增加。28项真实PG/Redis、25项单元/契约及类型/Lint/构建/Compose通过。未新增SQL/依赖/ENV键或扩展扣费，既有服务未重启、未部署；保留其他窗口累计迁移及兼容声明，详见[验收与局限](acceptance/background-idle-resources.md)。
+
+## 全系统技术债与资源审查（2026-11-17，原始记录；文件链路与依赖已修见上）
+
+按用户要求以当前实现为准减少历史兼容与无调用代码。扫描当前152份src TypeScript文件、14个业务模块及四角色入口、发布策略、依赖和资源，追踪鉴权/工作区、资产/标签、存储/导入、检索、任务/解析节点、配置和管理路径。包含已有未提交修复，不把此前任务预留释放问题重复列为待修；未扩展计费功能或解除此前File线路业务调整暂缓。这里只审查Server；App仅只读核对入口和认证契约，不代表全部未来Pxx或Agent实现验收。
+
+| 顺序 | 当前确认的问题 | 轻量处理方向与证据 |
+| --- | --- | --- |
+| 已修，待发布 | 解析节点首次订阅失败后，闲置监控缓存失败对象 | 首连/首订阅失败卸监听、断开并清空实例；现有30秒扫描重建，覆盖并发启动和关闭竞态。定向与真实Redis证据见[验收](acceptance/state-stream-idle-monitor.md)，未调用真实云。 |
+| 优先 | OSS链接被Worker下载并中转上传，且复制源缓冲 | 用户进一步明确：所有文件由客户端直传OSS，Server接收链接，外部解析服务自行读取；应按外部URL契约移除中转，不以Buffer/流优化继续固化该路径。`integrations/document-extraction.ts:131`的32 MiB输入产生约96 MiB ArrayBuffer实验仅证明现有中转成本，不是实测OOM或RSS峰值。现已按URL契约移除中转，业务接口说明见契约文档，验证见上。 |
+| 已修 | RAG为了图片回读并同步解析命中来源全文，无图片也构建AST | 原无图片1 MiB合成Markdown单次约366 ms、RSS前后差约193 MiB，不是线上压测或泄漏。现统一KBIMAGE存储、无图快速跳过/有图轻量扫描，保留跨OCR分块语义，无新增表或偏移缓存。来源读取与哈希校验仍保留，详见[当前验收](acceptance/kbimage-unification.md)。 |
+| 已修，待发布 | 笔记列表游标无效，逐条读取详情和全文 | 已改20条游标分页、一次批量列表查询与有界摘要，独立详情保留；42项真实依赖与11项契约通过，见[验收](acceptance/note-pagination.md)。 |
+| 优先 | 文件夹恢复无差别恢复此前单独删除的笔记 | `assets/service.ts:31`；缺少笔记自身revision/事件/索引状态转换。记录删除来源，只恢复本次级联删除对象，复用单笔记生命周期。 |
+| 已修，待发布 | 每次鉴权UPDATE会话，与业务事务FOR SHARE互阻 | 每次实时验证、活动记录60秒限频且锁忙跳过，保留业务会话锁；73项真实依赖和53项单元/契约通过，见[验收](acceptance/session-activity.md)。 |
+| 随后 | OSS stat全量装内存；put/complete/inspect重复核验；删除在持锁事务内做远程IO | `object-storage/aliyun-oss.ts:32`、`storage/port.ts:28,29,62`、`storage/jobs.ts:31`；区分元信息与完整校验，流式核验且复用不可变对象的可信结果；远程删除放事务外，前后短事务保留引用/租约检查。 |
+| 已修，待发布 | Scheduler漏接运行时配置上下文 | 每轮快照与创建时保存次数已实现，补投保留旧上限；7项专项含真实入口故障恢复通过，见[验收](acceptance/scheduler-runtime-configuration.md)。 |
+| 已修，待发布 | 后台SSE忽略write(false)，慢客户端缓冲继续增长 | 现等待drain并暂停读取、序列化及心跳；100次通知在堵塞期间只读1次，恢复后取最新。1 MiB发送限制、30秒超时；见[验收](acceptance/state-stream-idle-monitor.md)，不是公开API容量测试。 |
+| 后续 | 检索先加载全部chunk元数据并拼pointId过滤；索引计划逐chunk SQL和平方级find | `rag/query-service.ts:78,94,103`、`kb/jobs.ts:54,59,60,76`；按发布来源身份过滤后只查命中元数据，保留权限/版本复核；批量SQL及Map寻址。不能简单删除200来源上限，否则放大全量读取；原检索完整性和File/text业务问题保留暂缓记录。 |
+| 后续 | 任务/已投递outbox/认证及幂等历史缺少正式留存清理 | 小批次维护、保留未知结果及必要幂等墓碑；过期密文不应长期累积。解析回调正文已有consumed清除，不列为泄漏。 |
+
+明确清理候选：无调用的`loadModelTokenizer`、旧`resources/tokenizers/bge-m3`资源及HF依赖；无源码使用的`diff`/`pdf-parse`（本机pdf-parse包目录约34 MiB，只说明磁盘/镜像占用，不等于常驻内存）；只有单测消费的`stableUuid`/`dedupeByChunkKey`；package重复`release:review`键。固定ali-oss版本已经有getStream，可去旧SDK回退。节点配置继续写退役enabled、运行配置隐式v1/未知字段保留、发布记录单镜像转换均是可收敛的历史格式逻辑；先一次性规范化现有测试状态，再删除运行时双路径，历史已执行迁移不重写。
+
+附加noUnused编译检查只报告`assets/service.ts:192`的basePartRevisionId未使用；这属于接收参数却不执行对应版本约束，不能只删参数掩盖契约问题。已存在整篇Note ETag保护。`recordRunUsage`重复欠账/结清回冲问题仍在，但没有正式调用方，保留为未来结算接入前问题，不在本次扩展扣费。当前应用指标只有HTTP/任务等，后续可补进程CPU、RSS/堆、事件循环延迟、PG池等待及队列积压，以相同样本比较优化前后；本轮不凭空调整容器额度。
+
+证据：`.local/system-audit-20261117/search.json`、`runtime.json`、`runtime-probes.mjs`。Node26.11.0，真实本地函数加明确替身及源码审查；没有本轮真实PG/Milvus/云压测，没有业务代码改动、部署、服务重启、共享数据库写入或付费调用。App api_endpoints与http_auth_repository哈希仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1、d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。
+
+## 任务基础机制加强与扣费范围收敛（2026-11-17，待发布）
+
+按用户最终要求停止额度/扣费扩展，撤回新增自动成功扣款及账本索引方案；上一轮必要预留释放修复保留。通用终态模块独立于计价规则；Scheduler逐任务短事务、整页异常轮转与故障报告，Worker统一锁后租约检查，等待锁后过期的心跳不再复活任务。27项专项、全量323项隔离PG/Redis（4跳过）、978项单元/契约及类型/Lint/构建通过。此前5种交接记录基于可空trace草案，不作为当前严格Schema的新旧混跑保证。累计迁移3→5包含既有0004和并行trace的0005，无扣费新表/模型/索引。未提交、部署或写共享库；见[当前验收](acceptance/task-reservation-recovery.md)。
+
+## 简单traceId贯通（2026-11-17，待发布）
+
+只用X-Trace-Id，删除旧别名、任务执行时补值和Agent通用路由兼容探测。11处业务创建点直接写trace，0005改为必填且无默认值；只在迁移事务初始化现有小规模测试数据，不留运行时修补路径。Server978项单元/契约、324项隔离PG/Redis（4跳过）、Agent321项测试及两仓类型/构建、Server lint通过。严格Schema不支持旧二进制，已据实关闭database兼容声明，未执行共享库迁移或发布；见[当前验收](acceptance/trace-id.md)，不推进Pxx。
+
+## 发布防倒退、幂等与按角色更新（2026-11-17）
+
+复用发布锁和成功记录，补齐普通发布顺序、写库/切换前状态核对及同SHA实际镜像/ENV校验；services现在控制需要替换的角色，未选角色保留成功镜像、配置与容器，新记录逐角色保存镜像身份。新增SQL暂保持四角色更新，因为旧镜像不能接受未知迁移历史；不添加自动回滚，默认修复代码向前发布。267项发布专项、6项宿主候选替身（含15种角色组合）、类型/Lint/构建通过。测试机执行器已安装：当前085de22同SHA重跑成功、旧b729842在checkout被拒绝，两次四容器ID和成功记录均不变，公网ready200；本次没有业务重启或新业务发布，正式生产未接入。先前长度拒绝、持锁等待和替身边界保留，见[验收](acceptance/release-order-and-services.md)。同期业务修复及其迁移仍由各自任务维护，不归本项成果。
+
+## 任务终态额度预留修复（2026-11-17，待发布）
+
+按用户要求仅修P1/P2复核第4项，检索第3项暂缓。Worker、Scheduler、用户取消、文本替换取消和解析确认取消共用事务内额度释放；自动重试保留、手动重试重新预留，未知外部结果不释放。不改表，仅新增0004授予Scheduler释放所需列权限，不增加补偿服务或发布特例。22项新增真实PG用例、前期49项专项及最终全量318项隔离PG/Redis（4跳过）通过；973项单元/契约、类型/Lint/构建通过。迁移3→4、重复执行0新增、逐角色权限与物理外键0通过。未提交、部署、改共享库或业务数据；见[验收与未验边界](acceptance/task-reservation-recovery.md)。其他窗口的发布控制改动保留，本轮不代为提交。
+
 ## Server发布候选提交准备（2026-11-16）
 
 发布控制已从当前main单独准备PR #18，包含review与普通自动部署门禁分离，独立工作区232项发布测试、类型/Lint/构建及干净提交review通过。main由owner审核合并；本期Server业务候选继续保持自身不兼容门禁，Agent不参与本次发布。宿主资源限制已调整，鉴权路由与应用尚未切换。后续先合控制再同步test，避免旧main误触发云命令。
@@ -82,7 +198,7 @@ Server 903项unit/contract、288项真实隔离PG/Redis（4跳过）、类型/Li
 
 ## 测试环境启用解析调用（2026-11-16）
 
-用户明确要求开启 PROCESSING_NODES_ENABLED 并发布测试服；已准备沿用现有凭据的候选快照，新增本期配置断言。无数据库变化，开发默认不变。见[候选记录](acceptance/parser-api-enabled.md)。
+该阶段用户明确要求开启当时的部署级解析调用开关并发布测试服（当前代码已移除该开关）；已准备沿用现有凭据的候选快照，新增本期配置断言。无数据库变化，开发默认不变。见[候选记录](acceptance/parser-api-enabled.md)。
 
 ## README 与线上云控制环境规则（2026-11-16）
 
@@ -185,7 +301,7 @@ README 按实际工具/版本、依赖、四角色关系、首次运行、配置
 
 用户随后明确要求不用隔离环境，启动当前项目。已核对原RDS基线与HEAD一致、新基线仅追加3张配置表，在事务内新增表/索引/授权并导入5项原非秘密业务配置，最后CAS更新基线校验；没有重跑整份0001、清库、修改原账号或重置凭据。用户、会话、工作区、笔记、资源及任务行数前后一致，物理外键仍为0。
 
-现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。CPU节点及PROCESSING_NODES_ENABLED保持关闭，未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
+现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。当时CPU节点及解析调用保持关闭（当前代码已移除部署级调用开关），未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
 
 
 ## 分类运行配置与 Admin 页面（2026-11-15）
@@ -346,7 +462,7 @@ Typecheck、Lint、Build、337 项 unit/contract、120 项真实隔离 PG/Redis/
 
 - 当前代码统一为真实 Note 混合检索与资料纯关键词检索。四张 PG 表为 `kb_note_hybrid_builds/chunks`、`kb_document_keyword_builds/chunks`，只保存处理、哈希、坐标及 Milvus 点 ID；完整正文仍由所属业务保存，分段正文写对应 Milvus 集合。
 - Note 保存接原 Task/Outbox/Worker，BGE-M3 1024/profile `bge-m3-1024` 与固定 SHA 的官方 tokenizer 已同步到实际 `.env`、示例、Compose、代码及镜像。资料≤2000码点/零重叠，Note≤500码点/同章节约50字重叠；无独立章节 Parent 表。资料及纯 keyword 路径模型/tokenizer/Rerank 调用为零。
-- 删除旧分路 Chunk 表、视图、Note PG 全文召回、旧 Qwen/集合默认值和被取代的索引实现，不双写、不兼容回读。App `part=raw`、整篇 `revisionId` 与 `partRevisionId` 的精确读取契约已经真实 HTTP 测试；Agent 内部入口继续使用用户 JWT + 方向 Service Key。
+- 删除旧分路 Chunk 表、视图、Note PG 全文召回、旧 Qwen/集合默认值和被取代的索引实现，不双写、不兼容回读。App `part=raw`、整篇 `revisionId` 与 `partRevisionId` 的精确读取契约已经真实 HTTP 测试；该阶段曾使用用户 JWT + 方向 Service Key；现已移除，当前内部入口使用可信身份头，见[内部协定](runbooks/internal-services.md)。
 - Typecheck、Lint、Build、196项 unit/contract、117项独立 PG/Redis/Milvus integration、Compose 与 diff 检查通过。真实 BGE tokenizer，确定性模型替身，未调用付费模型。全部6份环境变量示例及规范示例统一；新增配置一致性与中文无空格句界测试。镜像 `huahuo-server:kb-search-dev` 构建成功，关键产物哈希一致。
 - 现有云 Milvus `default` 内两个新空集合已真实创建/加载/验证：`huahuo_kb_keyword_chunks` 只有BM25稀疏索引，`huahuo_kb_note_hybrid_chunks` 同行BM25+1024维Dense；Strong ready计数均0。已通过实际执行审批定向删除旧 `huahuo_chunks`、`huahuo_manual_text`，保留database和实例。
 - 用户明确允许忽略其它开发部署并直接清理后，实际执行审批通过，RDS `huahuo` 按唯一基线重置为58张表、0外键，两个旧归档Schema已删除；1个管理员账号及凭据保留。四角色已切换 `huahuo-server:kb-search-dev` 且healthy，API/Admin readiness200，migrate `applied=[]/current=1`。实际四角色配置BGE/1024一致，API容器新集合连接通过，PG/Milvus一致性计数0/0无残留。详见 [本轮验收](acceptance/knowledge-base.md)；未操作另一部署的运行包。

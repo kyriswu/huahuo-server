@@ -16,6 +16,15 @@ function samples(body: string, name: string) {
   return body.split('\n').filter(line => line.startsWith(name + '{'));
 }
 describe('Prometheus HTTP instrumentation over real loopback HTTP', () => {
+  it('counts recovery failures without creating a metric series for each task ID', async () => {
+    const metrics = new ApplicationMetrics(config('scheduler'));
+    metrics.recordTaskRecoveryFailures(2);
+    const body = await metrics.registry.metrics();
+    expect(samples(body,'task_recovery_failures_total')).toEqual([
+      'task_recovery_failures_total{env="test",service="huahuo-server",role="scheduler"} 2',
+    ]);
+    expect(body).not.toContain('task_id=');
+  });
   it('counts final 200/201/302/400/401/404/500 once and groups different IDs by route template', async () => {
     const app = await buildBase({ config: config(), dependencies: dependencies() });
     app.get('/tasks/:taskId', async () => { await new Promise(resolve => setTimeout(resolve, 20)); return { ok: true }; });

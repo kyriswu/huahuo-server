@@ -5,11 +5,12 @@ import {digest,canonical} from '../../lib/crypto.js';
 import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 import {assertSuperadmin,type AdminScope} from '../admin/service.js';
 import {DomainError,lock,transaction} from '../identity/store.js';
-import {enqueueIntent,event} from '../tasks/model.js';
+import {enqueueIntent,event,newTaskMaxAttempts} from '../tasks/model.js';
 import type {Attempt} from '../tasks/engine.js';
 import {ProcessingNodes} from './service.js';
 import {nodeFromRow,nodeConfig} from './model.js';
 import {PgEvents} from '../../lib/pg-events.js';
+import {resolveTraceId} from '../../lib/trace.js';
 
 /** Manual startup uses the existing maintenance queue; no process or loop per node. */
 export class ProcessingNodeJobs {
@@ -29,7 +30,7 @@ export class ProcessingNodeJobs {
    const reference='node-start:'+nodeId;
    const old=(await tx.query("SELECT id FROM tasks WHERE kind='processing.node-start' AND external_reference=$1 AND state NOT IN ('succeeded','failed','cancelled') LIMIT 1",[reference])).rows[0];
    if(old)return {taskId:old.id,state:'starting'};
-   const id=randomUUID();await tx.query("INSERT INTO tasks(id,kind,queue,state,external_reference) VALUES($1,'processing.node-start','maintenance','queued',$2)",[id,reference]);
+   const id=randomUUID();await tx.query("INSERT INTO tasks(id,kind,queue,state,external_reference,trace_id,max_attempts) VALUES($1,'processing.node-start','maintenance','queued',$2,$3,$4)",[id,reference,resolveTraceId(traceId),newTaskMaxAttempts()]);
    await tx.query('INSERT INTO processing_node_assignments(request_id,node_id,capability,snapshot) VALUES($1,$2,$3,$4)',['manual:'+id,node.id,node.capabilities[0],JSON.stringify(node)]);
    await enqueueIntent(tx,id);await event(tx,id);
    await tx.query('INSERT INTO admin_audit_events(id,admin_id,action,target_id,trace_id,reason) VALUES($1,$2,$3,$4,$5,$6)',[randomUUID(),scope.adminId,'processing-node.start',nodeId,traceId,JSON.stringify({taskId:id})]);
