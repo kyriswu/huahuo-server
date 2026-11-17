@@ -83,7 +83,8 @@
       "specs/backend-plan/examples/.env.compose.cloud.example",
       "specs/backend-plan/examples/.env.compose.local.example",
       "resources/processing-nodes/external-control.env.example",
-      "resources/processing-nodes/test-control.env.example"
+      "resources/processing-nodes/test-control.env.example",
+      "src/config/document-extraction.ts"
     ],
     "verifyFile": "scripts/release/changes/20261117-task-reservation-recovery/verify-config.mjs"
   },
