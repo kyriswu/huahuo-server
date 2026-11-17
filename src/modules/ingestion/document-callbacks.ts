@@ -31,7 +31,7 @@ export class DocumentCallbacks {
   }
   if(row.task_id!==input.taskId||row.fingerprint!==input.fingerprint||canonical(row.contexts)!==canonical(input.contexts))throw new DomainError(409,'DOCUMENT_CALLBACK_CONTEXT_CONFLICT');
   const token=unseal<string>(row.token_sealed,secret);
-  const url=new URL(`api/v1/document-parser/callbacks/${row.id}/${token}`,baseUrl+'/');
+  const url=new URL(`internal/v1/document-parser/callbacks/${row.id}/${token}`,baseUrl+'/');
   const task=(await tx.query<{trace_id:string}>('SELECT trace_id FROM tasks WHERE id=$1',[row.task_id])).rows[0];
   if(!task)throw new DomainError(409,'DOCUMENT_CALLBACK_CONTEXT_CONFLICT');
   url.searchParams.set('traceId',task.trace_id);

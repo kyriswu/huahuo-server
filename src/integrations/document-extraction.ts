@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { EnabledDocumentExtractionConfig } from '../config/document-extraction.js';
 import { assertCompleteExtractionConfig } from '../config/document-extraction.js';
 import type { ParserContext } from '../lib/document-parser-machine/index.js';
-import {traceHeaders} from '../lib/trace.js';
+import { ServiceHttpClient, ServiceHttpError, readJsonResponse } from './http-client.js';
 import { ParserExecutionError,ParserExecutionDeferred } from '../lib/document-parser-machine/index.js';
 import {inputImages} from '../lib/markdown-images.js';
 
@@ -82,34 +82,34 @@ export function validateExtractionResponse(value: unknown, contexts: readonly (F
 }
 
 export class DocumentExtractionClient {
-  constructor(readonly config: EnabledDocumentExtractionConfig, private readonly fetchImpl: typeof fetch = fetch) {
+  private readonly http:ServiceHttpClient;
+  constructor(readonly config: EnabledDocumentExtractionConfig, fetchImpl: typeof fetch = fetch) {
+    this.http=new ServiceHttpClient({fetchImpl});
     if(config.parameters!==null)assertCompleteExtractionConfig(config.parameters);
   }
   private url(baseUrl: string, path: string): URL { return new URL(baseUrl.replace(/\/$/, '') + path); }
   private async request(url: URL, init: RequestInit, signal: AbortSignal, submitting: boolean, allowPending = false): Promise<{status:number;body:unknown}> {
-    let response: Response;
-    try { response = await this.fetchImpl(url, { ...init, headers:traceHeaders(init.headers),signal, redirect: 'error' }); }
-    catch { throw new DocumentExtractionError('DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN', 'unknown', true); }
-    if (response.status !== 200 && !((submitting && this.config.mode==='async' || allowPending) && response.status === 202)) {
-      await response.body?.cancel();
-      const settled = submitting && response.status >= 400 && response.status < 500 && response.status !== 408;
-      throw new DocumentExtractionError('DOCUMENT_EXTRACTION_HTTP_FAILED', settled ? 'settled' : 'unknown', response.status >= 500 || response.status === 429,response.status);
-    }
-    const reader = response.body?.getReader(); let size = 0; const parts: Uint8Array[] = [];
-    if (!reader) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_EMPTY_RESPONSE', submitting ? 'unknown' : 'unknown');
+    let headersReceived=false;
     try {
-      while (true) {
-        const chunk = await reader.read(); if (chunk.done) break;
-        size += chunk.value.byteLength;
-        if (size > this.config.maxResponseBytes) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_TOO_LARGE', 'unknown');
-        parts.push(chunk.value);
-      }
-      return {status:response.status,body:JSON.parse(Buffer.concat(parts).toString('utf8')) as unknown};
-    } catch (error) {
-      if (error instanceof DocumentExtractionError) throw error;
-      throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE', 'unknown');
-    } finally { void reader.cancel().catch(() => undefined); }
+      return await this.http.request(url,{...init,signal},{timeoutMs:this.config.timeoutMs},async response=>{
+        headersReceived=true;
+        if (response.status !== 200 && !((submitting && this.config.mode==='async' || allowPending) && response.status === 202)) {
+          const settled = submitting && response.status >= 400 && response.status < 500 && response.status !== 408;
+          throw new DocumentExtractionError('DOCUMENT_EXTRACTION_HTTP_FAILED', settled ? 'settled' : 'unknown', response.status >= 500 || response.status === 429,response.status);
+        }
+        try { return {status:response.status,body:await readJsonResponse(response,this.config.maxResponseBytes)}; }
+        catch(error) {
+          if(error instanceof ServiceHttpError&&error.code==='HTTP_RESPONSE_TOO_LARGE')throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_TOO_LARGE','unknown');
+          if(error instanceof ServiceHttpError&&error.code==='HTTP_RESPONSE_EMPTY')throw new DocumentExtractionError('DOCUMENT_EXTRACTION_EMPTY_RESPONSE','unknown');
+          throw new DocumentExtractionError('DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE','unknown');
+        }
+      });
+    } catch(error) {
+      if(error instanceof DocumentExtractionError)throw error;
+      throw new DocumentExtractionError(headersReceived?'DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE':'DOCUMENT_EXTRACTION_TRANSPORT_UNKNOWN','unknown',!headersReceived);
+    }
   }
+
   async extract(files: readonly ExtractionFile[], context: ParserContext, hooks: { beforeSubmit: () => Promise<void>; submitted: (jobId: string) => Promise<void>;cancellation?:()=>Promise<'send'|'wait'|false>;callbackUrl?:string;singleStep?:boolean;received?:(jobId:string,response:ExtractionResponse)=>Promise<void> }, resumeJobId?: string): Promise<ExtractionResponse> {
     if (!files.length || files.length > 16) throw new DocumentExtractionError('DOCUMENT_EXTRACTION_INPUT_INVALID', 'settled');
     const contexts:Array<FileContext|null>=[];

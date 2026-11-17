@@ -8,12 +8,12 @@ import {verifyTestCloudControl} from '../../scripts/release/changes/20261116-tes
 
 const credentials={ALIYUN_RAM_ACCESS_KEY_ID:'synthetic-test-ak',ALIYUN_RAM_ACCESS_KEY_SECRET:'synthetic-test-secret'};
 describe('cloud-control environment permissions, no live cloud calls',()=>{
- it.each(['api-server','admin','worker','scheduler'] as const)('%s defaults test cloud permission on without enabling private parser calls',role=>{
-  const cfg=loadConfig(role,{...fixtureEnv,APP_ENV:'test',PROCESSING_NODES_ENABLED:'false'});
-  expect(cfg.processingNodes).toMatchObject({enabled:false,cloudControlEnabled:true});
+ it.each(['api-server','admin','worker','scheduler'] as const)('%s defaults test cloud permission on',role=>{
+  const cfg=loadConfig(role,{...fixtureEnv,APP_ENV:'test',});
+  expect(cfg.processingNodes).toMatchObject({cloudControlEnabled:true});
  });
- it.each(['test','production'])('%s enables cloud control without enabling private parser calls',appEnv=>{
-  expect(loadProcessingNodesConfig({APP_ENV:appEnv})).toMatchObject({enabled:false,cloudControlEnabled:true});
+ it.each(['test','production'])('%s enables cloud control by deployment environment',appEnv=>{
+  expect(loadProcessingNodesConfig({APP_ENV:appEnv})).toMatchObject({cloudControlEnabled:true});
   expect(loadProcessingNodesConfig({APP_ENV:appEnv,PROCESSING_NODES_CLOUD_CONTROL_ENABLED:''}).cloudControlEnabled).toBe(true);
   expect(loadProcessingNodesConfig({APP_ENV:appEnv,...credentials,PROCESSING_NODES_CLOUD_CONTROL_ENABLED:'false'}).cloudControlEnabled).toBe(false);
  });

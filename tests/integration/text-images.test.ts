@@ -40,7 +40,7 @@ async function fixture() {
 }
 async function image(f: Awaited<ReturnType<typeof fixture>>, workspaceId = f.workspaceId, mimeType = 'image/png') {
   const bytes = mimeType === 'image/png' ? png : Buffer.from('plain document');
-  const upload = await storage.createUpload(f.scope, { fileName: mimeType === 'image/png' ? '图.png' : 'test.txt', mimeType, sizeBytes: BigInt(bytes.length), workspaceId }, randomUUID());
+  const upload = await storage.createUpload(f.scope, { fileName: mimeType === 'image/png' ? '图.png' : 'test.txt', mimeType, sizeBytes: BigInt(bytes.length), workspaceId },randomUUID());
   await adapter.uploadPart(upload.uploadUrl, bytes);
   await storage.complete(f.scope, upload.uploadId, randomUUID());
   return upload.resourceId;
@@ -57,8 +57,7 @@ describe('manual text image canonicalization with isolated PostgreSQL', () => {
   it('claims a completed file only with its owning business transaction and pins the exact object version', async () => {
     const f = await fixture(), id = await image(f, f.workspaceId, 'text/plain');
     const sourceUrl = (await storage.playback(f.scope, id)).url;
-    const fileConfig = { ...config, processingNodes: { ...config.processingNodes, enabled: true },
-      rag: { ...config.rag, sourceAllowedHosts: [new URL(sourceUrl).hostname] } };
+    const fileConfig = { ...config, rag: { ...config.rag, sourceAllowedHosts: [new URL(sourceUrl).hostname] } };
     const service = new TextIngestionService(pool, fileConfig, claims);
     expect((await root.query('SELECT resource_id FROM resources WHERE resource_id=$1', [id])).rows).toEqual([]);
     const wrongVersion = new URL(sourceUrl); wrongVersion.searchParams.set('versionId', 'wrong-version');
@@ -116,12 +115,12 @@ describe('manual text image canonicalization with isolated PostgreSQL', () => {
     expect((await storage.remove(f.scope, f.workspaceId, next, randomUUID())).status).toBe('delete_pending');
   });
 
-  it('rejects foreign/workspace/non-image/missing resources and unsupported URLs without partial state', async () => {
+  it('rejects foreign/non-image/missing resources and unsupported URLs without partial state', async () => {
     const f = await fixture(), foreign = await image(await fixture()), document = await image(f, f.workspaceId, 'text/plain');
     const otherWorkspace = randomUUID();
     await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'Other',false,$3)", [otherWorkspace, f.scope.userId, randomUUID()]);
-    const other = await image(f, otherWorkspace);
-    for (const id of [foreign, other, randomUUID()]) await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: tag(id) }, randomUUID())).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
+    await image(f, otherWorkspace);
+    for (const id of [foreign, randomUUID()]) await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: tag(id) }, randomUUID())).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
     await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: tag(document) }, randomUUID())).rejects.toMatchObject({ code: 'NOTE_RESOURCE_NOT_IMAGE' });
     for (const target of ['data:image/png;base64,AA', 'file:///tmp/image.png', 'asset://not-a-uuid', `https://other.test/${randomUUID()}`]) {
       await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: `![图](${target})` }, randomUUID())).rejects.toMatchObject({ statusCode: 400 });

@@ -16,9 +16,9 @@ describe('one request trace',()=>{
   }finally{await app.close();}
  });
  it('accepts callback correlation only on the callback route and rejects invalid values',()=>{
-  expect(requestTrace({'x-trace-id':'callback-new'},'/api/v1/document-parser/callbacks/id/token?traceId=original-trace')).toBe('original-trace');
+  expect(requestTrace({'x-trace-id':'callback-new'},'/internal/v1/document-parser/callbacks/id/token?traceId=original-trace')).toBe('original-trace');
   expect(requestTrace({'x-trace-id':'normal-request'},'/api/v1/notes?traceId=other-trace')).toBe('normal-request');
-  expect(requestTrace({'x-trace-id':'fallback-trace'},'/api/v1/document-parser/callbacks/id/token?traceId=bad%0Avalue')).toBe('fallback-trace');
+  expect(requestTrace({'x-trace-id':'fallback-trace'},'/internal/v1/document-parser/callbacks/id/token?traceId=bad%0Avalue')).toBe('fallback-trace');
   expect(requestTrace({'x-trace-id':'invalid\r\nheader'})).toMatch(/^[a-f0-9-]{36}$/);
   expect(requestTrace({'x-request-id':'obsolete-request-id'})).not.toBe('obsolete-request-id');
   expect(()=>withTraceId('',()=>undefined)).toThrow('TRACE_ID_INVALID');

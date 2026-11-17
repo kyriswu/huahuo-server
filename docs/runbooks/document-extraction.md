@@ -8,7 +8,7 @@
 
 每个节点独立保存唤醒方式与 Xberg 调用配置，入口为 Admin「处理节点」；「解析与模型」保留读取同一配置和客户端的试用弹窗，直接探测已可访问的API，结果仅内存、不进入正式调度。详见[运行配置手册](runtime-configuration.md)。不再读取 DOCUMENT_EXTRACTION/DOCUMENT_PARSER 旧 ENV，也不再配置全局提取 JSON。
 
-当前 CPU ECS `i-2zejbbo2svjieb44tqy8` / `172.18.102.103:8000` 已部署解析服务。默认分步骤启动既有 ECS、检查 `/health`，再异步调用 `/extract-async`，JSON 请求省略 `config`，直接使用服务端默认配置；无需镜像名，也不发送历史 GPU/CUDA JSON。当前本机不在 VPC 内，节点与 PROCESSING_NODES_ENABLED 仍关闭，PDF/Office 真实验收留到可达的内网环境。
+当前 CPU ECS `i-2zejbbo2svjieb44tqy8` / `172.18.102.103:8000` 已部署解析服务。默认分步骤启动既有 ECS、检查 `/health`，再异步调用 `/extract-async`，JSON 请求省略 `config`，直接使用服务端默认配置；无需镜像名，也不发送历史 GPU/CUDA JSON。解析按已登记节点直接调用；本机若无法访问节点私网，健康检查和调用会报告不可达。PDF/Office 真实验收仍需在网络可达环境完成。
 
 节点固定异步模式，高级设置可选完整提取参数覆盖；覆盖整体替换、不递归合并，仅作用于该节点。母文件/批次 UUID 在受理时保存，调用配置在分配节点时保存，已有任务恢复和安全重试继续沿用原节点配置。明确提交前的 bound 阶段可安全恢复；intent 模糊提交不重发，匹配的认证回调可将其收敛到已知 job；job 恢复只处理该次结果。健康检查、云唤醒、提交、查询与取消继续使用原客户端及状态机。
 
@@ -91,7 +91,7 @@ PG 的外部提交意图先于 POST 持久化。返回 job_id 时只允许关联
 
 终态取消/失败会 POST `/jobs/{id}/ack` 释放服务的未消费记录；成功领取已由GET结果接口消费，不再发送额外ack。完整执行配置仍是 [kbxml-request.json](../../resources/document-extraction/kbxml-request.json)，与用户本次JSON一致；服务端环境另见[无凭据模板](../../resources/document-extraction/a10-fast-callback-runtime.env.example)。当前样本镜像固定 `152b65be…31a6c7` digest，ECS与ECI必须一起更新到新异步协议，再启用这版客户端，不能只换调用端。
 
-API 已装载 `/api/v1/document-parser/callbacks/{id}/{token}`，令牌每次提交独立生成，持久保存摘要及加密重试副本。先认证再接收大响应，结果需匹配母文件/批次、请求指纹、job 和上传回执；重复通知幂等，冲突拒绝。事务保存完整结果、记录唤醒后才2xx，最终业务产物提交成功后清理收件正文；取消和删除后晚到结果不能发布。回调URL用可从解析机访问的 `API_SERVICE_BASE_URL`，配置规则见[服务地址](service-addresses.md)。不记录含令牌的原始URL。
+API 已装载 `/internal/v1/document-parser/callbacks/{id}/{token}`，令牌每次提交独立生成，持久保存摘要及加密重试副本。先认证再接收大响应，结果需匹配母文件/批次、请求指纹、job 和上传回执；重复通知幂等，冲突拒绝。事务保存完整结果、记录唤醒后才2xx，最终业务产物提交成功后清理收件正文；取消和删除后晚到结果不能发布。回调URL用可从解析机访问的 `API_SERVICE_BASE_URL`，配置规则见[服务地址](service-addresses.md)。不记录含令牌的原始URL。
 
 补偿GET的HTTP完整输出仍只能确认服务端发送完成；下载中断且上游已消费、本地又没有持久回调结果时会明确失败，不声称无损恢复。真实云端回调及长文档尚未复测，当前只完成替身协议和真实独立PG/Redis验证，见[本轮验收](../acceptance/document-async-events.md)。
 

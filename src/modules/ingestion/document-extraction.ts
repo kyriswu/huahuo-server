@@ -121,8 +121,8 @@ export class ManagedDocumentExtractor {
     if(key===undefined)return source;
     if(key!==snapshot.sourceResourceId)throw new ManagedExtractionError('DOCUMENT_SOURCE_RESOURCE_MISMATCH');
     const row=(await this.pool.query<{file_name:string;mime_type:string;object_key:string;object_version:string;storage_driver:string;storage_bucket:string}>(`SELECT r.file_name,r.mime_type,r.object_key,r.object_version,r.storage_driver,r.storage_bucket
-      FROM resources r JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready'
-      WHERE r.resource_id=$1 AND r.user_id=$2 AND r.workspace_id=$3 AND r.status='ready'`,[snapshot.sourceResourceId,a.task.user_id,a.task.workspace_id])).rows[0];
+      FROM resources r JOIN workspaces w ON w.id=$3 AND w.user_id=r.user_id AND w.state='ready'
+      WHERE r.resource_id=$1 AND r.user_id=$2 AND r.status='ready'`,[snapshot.sourceResourceId,a.task.user_id,a.task.workspace_id])).rows[0];
     if(!row||row.object_key!==key||row.storage_driver!=='aliyun-oss'||row.storage_bucket!==this.config.storageAliyunOss?.bucket||!this.storage.signUrl)
       throw new ManagedExtractionError('DOCUMENT_SOURCE_RESOURCE_UNAVAILABLE');
     const version=row.object_version.startsWith('oss-version:')?row.object_version.slice('oss-version:'.length):null;

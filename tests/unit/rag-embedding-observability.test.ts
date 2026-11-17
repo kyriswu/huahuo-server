@@ -72,4 +72,23 @@ describe('Embedding attempt observations', () => {
     await expect(client.embed(['text'], { signal: controller.signal })).rejects.toMatchObject({ code: 'EMBEDDING_PROVIDER_TIMEOUT' });
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
+  it('rejects an oversized provider body without retrying it',async()=>{
+    const fetchImpl=vi.fn<typeof fetch>().mockResolvedValue(new Response(' '.repeat(8*1024*1024+1)));
+    await expect(new BailianEmbeddingClient({...options,fetchImpl}).embed(['text'])).rejects.toMatchObject({code:'EMBEDDING_RESPONSE_INVALID',retryable:false});
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('classifies a body read deadline as a provider timeout',async()=>{
+    vi.useFakeTimers();
+    try{
+      const fetchImpl=vi.fn<typeof fetch>().mockImplementation(async(_url,init)=>new Response(new ReadableStream({start(controller){
+        init!.signal!.addEventListener('abort',()=>controller.error(init!.signal!.reason),{once:true});
+      }})));
+      const pending=new BailianEmbeddingClient({...options,timeoutMs:20,maxRetries:0,fetchImpl}).embed(['text']);
+      const checked=expect(pending).rejects.toMatchObject({code:'EMBEDDING_PROVIDER_TIMEOUT',retryable:true});
+      await vi.advanceTimersByTimeAsync(20);await checked;
+      expect(fetchImpl).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);
+    }finally{vi.useRealTimers();}
+  });
+
 });

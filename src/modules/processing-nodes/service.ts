@@ -23,7 +23,7 @@ export class ProcessingNodes {
   const node=await this.node(id),key=routing(node),cached=this.observations.get(id);
   if(cached?.key===key&&cached.until>Date.now())return cached.pending;
   const pending=(async()=>{
-   try{return {...await (await this.runtime(node,false)).machine.observe(this.config.processingNodes.enabled),checkedAt:new Date().toISOString()};}
+   try{return {...await (await this.runtime(node,false)).machine.observe(),checkedAt:new Date().toISOString()};}
    catch{return {state:'unknown' as const,source:node.mode==='ecs'?'ecs' as const:'http' as const,serviceReady:null,serviceStatus:'not_checked' as const,canStart:false,reason:'PROCESSING_NODE_STATUS_UNAVAILABLE',checkedAt:new Date().toISOString()};}
   })();
   this.observations.set(id,{key,until:Date.now()+3000,pending});return pending;
@@ -42,7 +42,7 @@ export class ProcessingNodes {
   try{await entry.connected;return entry.runtime;}catch(error){if(this.runtimes.get(node.id)===entry)this.runtimes.delete(node.id);await entry.runtime.close().catch(()=>undefined);throw error;}
  }
  async bind(requestId:string,capability:Capability,recoverAdmission=false,retryFrom?:string,nodeId?:string,powerOnly=false):Promise<ProcessingNode>{
-  if(powerOnly?!this.config.processingNodes.cloudControlEnabled:!this.config.processingNodes.enabled)throw new DomainError(503,powerOnly?'PROCESSING_NODE_CLOUD_CONTROL_DISABLED':'PROCESSING_NODES_DISABLED');
+  if(powerOnly&&!this.config.processingNodes.cloudControlEnabled)throw new DomainError(503,'PROCESSING_NODE_CLOUD_CONTROL_DISABLED');
   if(!requestId||requestId.length>256||!['document','audio'].includes(capability))throw new DomainError(400,'PROCESSING_ASSIGNMENT_INVALID');
   return transaction(this.pool,async tx=>{
    await lock(tx,'processing-nodes');
@@ -88,7 +88,7 @@ export class ProcessingNodes {
  async settle(requestId:string){await this.pool.query('UPDATE processing_node_assignments SET settled=true,settled_at=coalesce(settled_at,now()) WHERE request_id=$1',[requestId]);}
  async withNode<T>(capability:Capability,input:ParserRequest&{retryFrom?:string;nodeId?:string},execute:(context:ParserContext,node:ProcessingNode)=>Promise<T>):Promise<T>{
   const powerOnly=input.readiness==='instance';
-  if(powerOnly?!this.config.processingNodes.cloudControlEnabled:!this.config.processingNodes.enabled)throw new DomainError(503,powerOnly?'PROCESSING_NODE_CLOUD_CONTROL_DISABLED':'PROCESSING_NODES_DISABLED');
+  if(powerOnly&&!this.config.processingNodes.cloudControlEnabled)throw new DomainError(503,'PROCESSING_NODE_CLOUD_CONTROL_DISABLED');
   const node=input.resume?await this.assigned(input.requestId):await this.bind(input.requestId,capability,input.recoverAdmission,input.retryFrom,input.nodeId,powerOnly);
   if(!node.capabilities.includes(capability))throw new DomainError(409,'PROCESSING_ASSIGNMENT_CONFLICT');
   const runtime=await this.runtime(node,!powerOnly);

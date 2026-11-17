@@ -182,4 +182,14 @@ describe('document extraction protocol; fetch is mocked, no private-network call
  it('rejects a nil document context before any HTTP call',async()=>{
   const fetch=vi.fn<typeof globalThis.fetch>();await expect(new DocumentExtractionClient(configuration(),fetch).extract([{...files[0]!,parse_run_id:'00000000-0000-0000-0000-000000000000'}],ctx,hooks())).rejects.toMatchObject({outcome:'settled'});expect(fetch).not.toHaveBeenCalled();
  });
+ it.each([
+  {body:null,code:'DOCUMENT_EXTRACTION_EMPTY_RESPONSE'},
+  {body:'invalid JSON',code:'DOCUMENT_EXTRACTION_RESPONSE_UNREADABLE'},
+  {body:' '.repeat(33),code:'DOCUMENT_EXTRACTION_RESPONSE_TOO_LARGE'},
+ ])('preserves unknown parser outcomes on bounded-body failures: $code',async({body,code})=>{
+  const fetch=vi.fn<typeof globalThis.fetch>(async()=>new Response(body)),h=hooks();
+  await expect(new DocumentExtractionClient({...configuration(),maxResponseBytes:32},fetch).extract(files,ctx,h)).rejects.toMatchObject({code,outcome:'unknown'});
+  expect(fetch).toHaveBeenCalledOnce();expect(h.beforeSubmit).toHaveBeenCalledOnce();expect(h.submitted).not.toHaveBeenCalled();
+ });
+
 });

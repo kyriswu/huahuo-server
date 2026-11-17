@@ -10,7 +10,7 @@
 
 Agent 通过 `HUAHUO_SERVER_BASE_URL` 使用部署方维护的稳定内部地址调用 `/internal/v1/rag/query`，
 不携带 JWT 或 ServiceKey。工作区、文档归属及事务内 `assertScope` 校验保留。
-两端删除 `HUAHUO_AGENT_TO_SERVER_API_KEY`、`HUAHUO_SERVER_TO_AGENT_API_KEY` 配置；
+服务间不配置双向 Secret Key；本 Server 仓库的运行配置与模板已删除对应废弃键。Agent 仓库由其调用方接入时同步清理；
 Server 的 JWT 签发与统一认证密钥继续保留。业务端口只允许可信入口和内部服务访问。
 
 Studio Cookie 认证和刷新集中在 Server 鉴权适配层，登录、刷新、退出均使用
@@ -27,7 +27,7 @@ Studio Cookie 认证和刷新集中在 Server 鉴权适配层，登录、刷新�
 | 调用方向 | 应用地址与路径 |
 | --- | --- |
 | Agent → API Server | `HUAHUO_SERVER_BASE_URL` 接受 `http://IP:端口` 或 `http://服务名:端口`，只配置 origin；客户端追加 `/internal/v1/...` 等实际路径 |
-| API Server → Agent | Agent 监听接受相同两种地址形式，业务接口使用原生 `/api/...`；当前 Server 尚无主动调用 Agent 的业务客户端，不新增没有调用方的地址变量 |
+| API Server → Agent | 当前 Server 尚无主动调用 Agent 的业务客户端；后续服务专用接口按 `/internal/v1/...` 协定接入，不新增没有调用方的地址变量 |
 
 同机容器在同一 Docker 网络时，可直连 `http://api-server:3000`、`http://agent:4111`。两个 Compose 项目默认网络各自独立，服务名只有在共享网络或部署方配置了相应 DNS 时才可解析。跨机器使用宿主私网 IP 与发布端口，或能跨机器解析的内部服务名；不固定容器 IP。绑定 `127.0.0.1` 的宿主端口不作为跨机入口。
 

@@ -7,13 +7,13 @@ type Category='document'|'rag'|'tasks'|'storage'|'billing'|'features'|'deploymen
 type SettingsCategory=Exclude<Category,'document'>;
 type Values=Record<string,unknown>;
 interface Definition {key:string;category:Category;label:string;description:string;type:'number'|'boolean'|'select'|'string';min?:number;max?:number;options?:string[];effect:string;}
-interface Configuration {revision:number;values:Values;updatedAt:string;definitions:Definition[];bootstrap:{processingNodesEnabled:boolean;cloudControlEnabled:boolean;billingMode:string;uploadHardMaxBytes:number;environmentKeys:string[]};billingPolicies:{policy_version:string;mode:string;monthly_credit_limit:string;currency:string}[];}
+interface Configuration {revision:number;values:Values;updatedAt:string;definitions:Definition[];bootstrap:{cloudControlEnabled:boolean;billingMode:string;uploadHardMaxBytes:number;environmentKeys:string[]};billingPolicies:{policy_version:string;mode:string;monthly_credit_limit:string;currency:string}[];}
 interface DocumentApi {mode:'async';parameters:Record<string,unknown>|null;timeoutSeconds:number;pollMs:number;maxResponseBytes:number;}
 const defaultDocumentApi=():DocumentApi=>({mode:'async',parameters:null,timeoutSeconds:3120,pollMs:2000,maxResponseBytes:67108864});
 interface Node {id:string;name:string;capabilities:('document'|'audio')[];resourceClass:'cpu'|'gpu';mode:'ecs'|'always-on';regionId:string|null;instanceId:string|null;privateIp:string|null;baseUrl:string;healthPath:string;tokenEnv:string|null;concurrency:number;idleSeconds:number;startupSeconds:number;queueSeconds:number;revision:number;eciFallback?:Record<string,unknown>|null;documentApi?:DocumentApi;}
 interface NodeStatus {state:'online'|'offline'|'starting'|'stopping'|'unknown';source:'ecs'|'eci'|'http';serviceReady:boolean|null;serviceStatus:'ready'|'unreachable'|'not_checked'|'not_running';canStart:boolean;checkedAt?:string;reason?:string;instanceStatus?:string;startup?:{taskId:string;state:string;error?:string}|null;}
 const nodeStatusText=(status?:NodeStatus)=>status?({online:'在线',offline:'不在线',starting:'开机中',stopping:'停机中',unknown:'状态未知'})[status.state]:'检测中';
-const nodeStatusDetail=(status?:NodeStatus)=>!status?'正在读取实例状态':status.state==='online'?`${status.source==='http'?'服务已运行':'实例已运行'} · ${status.serviceStatus==='ready'?'解析 API 可访问':status.serviceStatus==='not_checked'?'当前环境未启用解析 API 调用':'解析 API 暂不可达'}`:status.state==='starting'?'正在通过云端控制接口开机':status.state==='stopping'?'正在按空闲策略停机':status.state==='offline'?'实例或服务未运行':'无法确认实例状态，请检查查询权限和连接';
+const nodeStatusDetail=(status?:NodeStatus)=>!status?'正在读取实例状态':status.state==='online'?`${status.source==='http'?'服务已运行':'实例已运行'} · ${status.serviceStatus==='ready'?'解析 API 可访问':status.serviceStatus==='not_checked'?'尚未确认解析 API 状态':'解析 API 暂不可达'}`:status.state==='starting'?'正在通过云端控制接口开机':status.state==='stopping'?'正在按空闲策略停机':status.state==='offline'?'实例或服务未运行':'无法确认实例状态，请检查查询权限和连接';
 const labels:Record<Category,string>={document:'解析与模型',rag:'RAG 与检索',tasks:'任务策略',storage:'上传与容量',billing:'计费策略',features:'功能开关',deployment:'部署配置'};
 const optionLabels:Record<string,string>={disabled:'关闭',async:'异步解析',sync:'同步解析',deterministic:'测试提供器（仅开发/测试）',llm:'LLM（尚未接入）',dify:'Dify（尚未接入）'};
 const panel='rounded-xl border border-console-line bg-white p-5 sm:p-6';
@@ -25,7 +25,7 @@ function errorText(cause:unknown){
   if(cause.status===409)return '节点尚未排空。请等待已有任务结束；ECS 还需确认已节省停机后再修改。';
   if(cause.status===403)return '当前账号没有修改权限，或登录校验已失效。请重新登录后重试。';
   if(cause.status===400)return '配置未通过校验。请检查数值范围、完整 JSON、节点地址和密钥引用；不要填写密钥。';
-  if(cause.status===503)return '配置依赖暂不可用。请检查对应的部署开关和节点凭据引用后重试。';
+  if(cause.status===503)return '配置依赖暂不可用。请检查节点连接和凭据引用后重试。';
  }
  return '暂时无法保存或读取配置。请重试。';
 }

@@ -90,5 +90,25 @@ describe('RAG query ranking helpers', () => {
     expect(result.fallback).toBeUndefined();
     expect(result.candidates.map(candidate => [candidate.chunkKey, candidate.content])).toEqual([['c0', 'content c0'], ['c1', 'content c1']]);
   });
+  it('rejects an oversized rerank body without another provider request',async()=>{
+    const fetchImpl=vi.fn<typeof fetch>().mockResolvedValue(new Response(' '.repeat(1024*1024+1)));
+    const adapter=new HttpRerankAdapter({baseUrl:'https://rerank.test/v1',model:'fixture',fetchImpl});
+    await expect(adapter.rerank('question',[row('c0')])).rejects.toMatchObject({code:'RERANK_RESPONSE_INVALID',retryable:false});
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('includes the rerank response body in its timeout budget',async()=>{
+    vi.useFakeTimers();
+    try{
+      const fetchImpl=vi.fn<typeof fetch>().mockImplementation(async(_url,init)=>new Response(new ReadableStream({start(controller){
+        init!.signal!.addEventListener('abort',()=>controller.error(init!.signal!.reason),{once:true});
+      }})));
+      const adapter=new HttpRerankAdapter({baseUrl:'https://rerank.test/v1',model:'fixture',timeoutMs:20,fetchImpl});
+      const pending=expect(adapter.rerank('question',[row('c0')])).rejects.toMatchObject({code:'RERANK_PROVIDER_TIMEOUT',retryable:true});
+      await vi.advanceTimersByTimeAsync(20);await pending;
+      expect(fetchImpl).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);
+    }finally{vi.useRealTimers();}
+  });
+
 });
 

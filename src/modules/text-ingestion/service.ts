@@ -15,7 +15,7 @@ import { TextIngestionSourceType, type TextIngestionJob, type TextIngestionStatu
 import {resolveTraceId} from '../../lib/trace.js';
 import type { ResourceClaims } from '../storage/resource-claims.js';
 import { ownedObjectKey } from '../storage/object-locator.js';
-import { attachResource } from '../storage/references.js';
+import { attachResource,replaceResourceRefs } from '../storage/references.js';
 
 interface TextJobRow {
   id: string; source_type: TextIngestionSourceType; raw_content: string | null;
@@ -39,7 +39,6 @@ export class TextIngestionService {
   constructor(private readonly pool: pg.Pool, private readonly config: AppConfig, private readonly resourceClaims?: ResourceClaims) {}
   private available(source: TextIngestionSourceType): void {
     if (!this.config.rag.enabled) throw new DomainError(503, 'TEXT_INGESTION_DISABLED');
-    if (source === TextIngestionSourceType.FILE_UPLOAD && !this.config.processingNodes.enabled) throw new DomainError(503, 'DOCUMENT_PARSER_NOT_CONFIGURED');
     if (source !== TextIngestionSourceType.MANUAL_INPUT && source !== TextIngestionSourceType.FILE_UPLOAD) throw new DomainError(503, 'TEXT_SOURCE_ADAPTER_UNAVAILABLE');
   }
   private async owned(tx: pg.PoolClient, scope: Scope, id: string, lock = false): Promise<TextJobRow> {
@@ -61,9 +60,7 @@ export class TextIngestionService {
   /** The normalizer already locked and authorized these images in this transaction. */
   private async syncImageRefs(tx: pg.PoolClient, scope: Scope, workspaceId: string, id: string, content: string): Promise<void> {
     const ids = [...new Set(kbImages(content).map(image => image.resourceId))];
-    await tx.query("DELETE FROM resource_refs WHERE user_id=$1 AND workspace_id=$2 AND ref_kind='text-image' AND ref_id_external=$3 AND NOT(resource_id=ANY($4::uuid[]))", [scope.userId, workspaceId, id, ids]);
-    if (ids.length) await tx.query(`INSERT INTO resource_refs(resource_id,user_id,workspace_id,ref_kind,ref_id_external)
-      SELECT resource_id,$2,$3,'text-image',$4 FROM unnest($1::uuid[]) x(resource_id) ON CONFLICT DO NOTHING`, [ids, scope.userId, workspaceId, id]);
+    await replaceResourceRefs(tx,scope.userId,'text-image',id,ids,workspaceId);
   }
   async create(scope: Scope, input: unknown, key: string): Promise<TextIngestionJob> {
     assertCreateTextIngestionInput(input, EDITABLE_MARKDOWN_MAX_CHARS);
@@ -134,6 +131,9 @@ export class TextIngestionService {
       await assertScope(tx, scope);
       const current = await this.owned(tx, scope, id);
       assertManualTextEditable(current.source_type);
+      // Removing the last image also updates its resource count. Use the same
+      // account-before-business-row order as edits that claim new images.
+      if(current.raw_content&&kbImages(current.raw_content).length)await this.resourceClaims?.lockAccount(tx,scope);
       const prepared = await normalizeOwnedImageParts(tx, scope, current.workspace_id, { raw: input.raw_content }, this.config, this.resourceClaims);
       const stableInput = { raw_content: prepared.parts.raw, imageOrigins: prepared.imageOrigins };
       return idempotent(tx, this.config.appTokenSecret!, scope.userId, `text-ingestion.update:${id}`, key, { input: stableInput, ifMatch }, async () => {

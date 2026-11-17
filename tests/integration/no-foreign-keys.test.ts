@@ -74,7 +74,7 @@ const logicalReferences = [
   { tableName: 'rag_ingestion_versions', columnNames: ['workspace_id', 'user_id'] },
   { tableName: 'refresh_tokens', columnNames: ['session_id'] },
   { tableName: 'resource_refs', columnNames: ['resource_id', 'user_id', 'workspace_id'] },
-  { tableName: 'resources', columnNames: ['upload_id', 'user_id', 'workspace_id'] },
+  { tableName: 'resources', columnNames: ['user_id'] },
   { tableName: 'run_usage', columnNames: ['policy_version'] },
   { tableName: 'run_usage', columnNames: ['reservation_id'] },
   { tableName: 'run_usage', columnNames: ['task_id'] },

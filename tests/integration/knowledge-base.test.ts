@@ -1,3 +1,4 @@
+import {ProcessingNodes} from '../../src/modules/processing-nodes/service.js';
 import {beforeAll,afterAll,describe,it,expect,vi} from 'vitest';
 import {createHash,randomUUID} from 'node:crypto';
 import {Readable} from 'node:stream';
@@ -84,8 +85,8 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('keeps canonical rerank evidence and hydrates only deduplicated images of final topK on explicit request',async()=>{
   const f=await fixture(),a=randomUUID(),b=randomUUID();
-  for(const id of [a,b])await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
-   VALUES($1,$2,$3,$4,'fixture.png','image/png',1,$5,$1,'fixture','aliyun-oss',$6,'ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
+  for(const id of [a,b])await root.query(`INSERT INTO resources(resource_id,user_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
+   VALUES($1,$2,'fixture.png','image/png',1,$3,$1,'fixture','aliyun-oss',$4,'ready')`,[id,f.scope.userId,'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
   const first=await imageAssets.createNote(f.scope,f.workspaceId,{title:'A',parts:{raw:`imageselect ![A](asset://${a})`}},randomUUID());
   const inputBody=`imageselect ![B](asset://${b}) ![repeat](asset://${b})`;
   const second=await imageAssets.createNote(f.scope,f.workspaceId,{title:'B',parts:{raw:inputBody}},randomUUID());
@@ -113,8 +114,8 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('never requests previews for a candidate deleted during reranking',async()=>{
   const f=await fixture(),id=randomUUID();
-  await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
-   VALUES($1,$2,$3,$4,'fixture.png','image/png',1,$5,$1,'fixture','aliyun-oss',$6,'ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
+  await root.query(`INSERT INTO resources(resource_id,user_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
+   VALUES($1,$2,'fixture.png','image/png',1,$3,$1,'fixture','aliyun-oss',$4,'ready')`,[id,f.scope.userId,'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
   const note=await imageAssets.createNote(f.scope,f.workspaceId,{title:'删除竞态',parts:{raw:`imagedelete ![图](asset://${id})`}},randomUUID());await runNote(note.noteId);
   const resolveImages=vi.fn(async()=>new Map());
   const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'note-hybrid','markdown')).embed(texts)},resolveImages,
@@ -123,8 +124,8 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('associates OCR-only chunks with their whole KBIMAGE without parsing input Markdown at query time',async()=>{
   const f=await fixture(),id=randomUUID();
-  await root.query(`INSERT INTO resources(resource_id,user_id,workspace_id,upload_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
-   VALUES($1,$2,$3,$4,'fixture.png','image/png',1,$5,$1,'fixture','aliyun-oss',$6,'ready')`,[id,f.scope.userId,f.workspaceId,randomUUID(),'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
+  await root.query(`INSERT INTO resources(resource_id,user_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
+   VALUES($1,$2,'fixture.png','image/png',1,$3,$1,'fixture','aliyun-oss',$4,'ready')`,[id,f.scope.userId,'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
   const tag=`<KBIMAGE uuid="${id}" page="1"><![CDATA[${'crossimage '.repeat(150)}]]></KBIMAGE>`;
   const body=`正文\n\n${tag}\n\n尾部`,start=body.indexOf('<KBIMAGE'),end=start+tag.length;
   const note=await imageAssets.createNote(f.scope,f.workspaceId,{title:'OCR范围',parts:{raw:body}},randomUUID());await runNote(note.noteId);
@@ -252,25 +253,27 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(select).toHaveBeenCalled();expect(backend).not.toHaveProperty('hybridSearch');
   }finally{await q.close();}
  });
- it('requires the external parser for every file input while manual text remains available',async()=>{
-  const f=await fixture();const api=await buildApiServer({config:{...config,processingNodes:{...config.processingNodes,enabled:false}}});
+ it('accepts file intents without a deployment toggle and reports missing nodes at execution while manual text remains available',async()=>{
+  const originalNodes=(await root.query('SELECT * FROM processing_nodes')).rows;await root.query('DELETE FROM processing_nodes');
+  const f=await fixture(),api=await buildApiServer({config}),nodes=new ProcessingNodes(wp,workerConfig);
   try{
    for(const[fileName,mimeType]of [['document.txt','text/plain'],['document.md','text/markdown'],['document.csv','text/csv'],['document.pdf','application/pdf'],['document.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document']]){
     const headers={...fixtureScopeHeaders(f.bearer),'x-idempotency-key':randomUUID()};
     const result=await api.inject({method:'POST',url:'/api/v1/rag/ingestions',headers,payload:{ossUrl:'https://fixture.test/'+fileName,fileName,mimeType}});
-    expect(result.statusCode,result.body).toBe(503);expect(result.json().error.code).toBe('DOCUMENT_PARSER_NOT_CONFIGURED');
+    expect(result.statusCode,result.body).toBe(200);
     const text=await api.inject({method:'POST',url:'/api/v1/text-ingestions',headers,payload:{source_type:'FILE_UPLOAD',origin_resource_uri:'https://fixture.test/'+fileName}});
-    expect(text.statusCode,text.body).toBe(503);expect(text.json().error.code).toBe('DOCUMENT_PARSER_NOT_CONFIGURED');
+    expect(text.statusCode,text.body).toBe(200);
    }
-   expect(Number((await root.query('SELECT count(*) FROM rag_ingestion_versions WHERE user_id=$1',[f.scope.userId])).rows[0].count)).toBe(0);
-   expect(Number((await root.query('SELECT count(*) FROM text_ingestion_jobs WHERE created_by=$1',[f.scope.userId])).rows[0].count)).toBe(0);
-   expect(Number((await root.query("SELECT count(*) FROM tasks WHERE user_id=$1 AND kind IN ('rag.document-ingest','text.ingest')",[f.scope.userId])).rows[0].count)).toBe(0);
+   expect(Number((await root.query('SELECT count(*) FROM rag_ingestion_versions WHERE user_id=$1',[f.scope.userId])).rows[0].count)).toBe(5);
+   expect(Number((await root.query('SELECT count(*) FROM text_ingestion_jobs WHERE created_by=$1',[f.scope.userId])).rows[0].count)).toBe(5);
+   expect(Number((await root.query("SELECT count(*) FROM tasks WHERE user_id=$1 AND kind IN ('rag.document-ingest','text.ingest')",[f.scope.userId])).rows[0].count)).toBe(10);
+   const execute=vi.fn();await expect(nodes.withNode('document',{requestId:randomUUID(),fingerprint:'f'.repeat(64)},execute)).rejects.toMatchObject({code:'PROCESSING_NODE_UNAVAILABLE'});expect(execute).not.toHaveBeenCalled();
    const manual=await api.inject({method:'POST',url:'/api/v1/text-ingestions',headers:{...fixtureScopeHeaders(f.bearer),'x-idempotency-key':randomUUID()},payload:{source_type:'MANUAL_INPUT',raw_content:'手动正文保持可用'}});
    expect(manual.statusCode,manual.body).toBe(200);expect(manual.json().data.raw_content).toBe('手动正文保持可用');
-  }finally{await api.close();}
+  }finally{await nodes.close();await api.close();for(const row of originalNodes)await root.query('INSERT INTO processing_nodes(id,config,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5)',[row.id,JSON.stringify(row.config),row.revision,row.created_at,row.updated_at]);}
  });
  it('resumes keyword indexing and TOC from persisted external canonical Markdown',async()=>{
-  const f=await fixture();const settings={...config,processingNodes:{...config.processingNodes,enabled:true}};
+  const f=await fixture();const settings=config;
   const repo=new RagIngestionRepository(pool,settings);
   const created=await repo.create(f.scope,{ossUrl:'https://fixture.test/document.md',fileName:'document.md',mimeType:'text/markdown'});
   const source=storageFor(config),canonical='# Document\n\nPostgreSQL MVCC 资料关键词。\n',data=Buffer.from(canonical),canonicalUri='fixture-extracted.md';
@@ -279,7 +282,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   // The external parser already committed its output; this fixture covers indexing recovery only.
   await root.query("UPDATE rag_ingestion_versions SET canonical_content_uri=$2,raw_markdown_uri=$2,content_hash=$3,parser_provider='xberg',status='PARSED',current_stage='PARSED' WHERE id=$1",[created.documentVersionId,canonicalUri,sha]);
   const a=await engine.claim(created.jobId,randomUUID());expect(a).not.toBeNull();
-  const pipeline=new RagIngestionJobs(wp,{...workerConfig,processingNodes:{...workerConfig.processingNodes,enabled:true}},source,{kb:{index:factory,embedding:()=>{throw new Error('MODEL_CALLED');}}});
+  const pipeline=new RagIngestionJobs(wp,workerConfig,source,{kb:{index:factory,embedding:()=>{throw new Error('MODEL_CALLED');}}});
   try{
    await pipeline.execute(a!);
    expect((await root.query('SELECT * FROM kb_document_keyword_builds WHERE source_id=$1',[created.documentVersionId])).rows[0]).toMatchObject({published:true,status:'ready'});

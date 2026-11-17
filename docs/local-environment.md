@@ -1,3 +1,7 @@
+## 当前节点调用方式（2026-11-17，本地实现）
+
+已删除部署级解析调用开关；配置好节点直接执行，网络失败按节点不可达处理。云启停仍由独立云控制权限约束。下面的开关/停用记录仅为当时环境状态，不代表当前代码仍保留该开关；本轮没有启动节点、调用云服务或发布。
+
 # 本机环境与 P01 证据
 
 ## ENV与RAG配置整理（2026-11-15）
@@ -6,12 +10,12 @@
 
 ## 当前本地后台（2026-11-15）
 
-按用户后续授权，现有RDS已无损新增3张配置表，保留原数据/账号/凭据；主Compose四角色更新且全部healthy，地址为 http://127.0.0.1:3001/admin#configuration ，使用原管理员账号。PROCESSING_NODES_ENABLED=false，CPU节点停用。先前“未写RDS/未部署”记录是当时的代码验收状态，已由本次实际启动替代。见[验收](acceptance/runtime-configuration.md)。
+按用户后续授权，现有RDS已无损新增3张配置表，保留原数据/账号/凭据；主Compose四角色更新且全部healthy，地址为 http://127.0.0.1:3001/admin#configuration ，使用原管理员账号。当时解析调用关闭，CPU节点停用。先前“未写RDS/未部署”记录是当时的代码验收状态，已由本次实际启动替代。见[验收](acceptance/runtime-configuration.md)。
 
 
 ## ENV 与数据库运行配置边界（2026-11-15）
 
-本机旧DOCUMENT_PARSER/DOCUMENT_EXTRACTION目标与业务项已整理移除，非秘密旧值私有备份在 .local/runtime-config/previous-nonsecret-settings.json。业务参数改为Admin/DB，RAM等密钥未重置；保留PROCESSING_NODES_ENABLED=false、部署连接/提供器开关、HTTP硬上限和协调租约。Compose/模板同步，未操作实际RDS或主容器。新空库使用唯一0001基线；已有库部署前须单独审阅无损结构和配置映射，禁止清库或自动改checksum。详见[手册](runbooks/runtime-configuration.md)。
+本机旧DOCUMENT_PARSER/DOCUMENT_EXTRACTION目标与业务项已整理移除，非秘密旧值私有备份在 .local/runtime-config/previous-nonsecret-settings.json。业务参数改为Admin/DB，RAM等密钥未重置；当时保留解析调用关闭、部署连接/提供器开关、HTTP硬上限和协调租约。Compose/模板同步，未操作实际RDS或主容器。新空库使用唯一0001基线；已有库部署前须单独审阅无损结构和配置映射，禁止清库或自动改checksum。详见[手册](runbooks/runtime-configuration.md)。
 
 
 ## 当前 App 与短信配置（2026-11-12）

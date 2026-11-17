@@ -67,4 +67,36 @@ describe('current-only note content and retired settings migrations',()=>{
   expect((await tx.query(`SELECT count(*)::int n FROM ${schema}.note_part_revisions`)).rows[0].n).toBe(2);
   expect((await tx.query(`SELECT count(*)::int n FROM ${schema}.resource_refs`)).rows[0].n).toBe(2);
  }));
+
+ async function resources(tx:PoolClient,schema:string){
+  await tx.query(`CREATE TABLE ${schema}.resources(resource_id uuid PRIMARY KEY,user_id uuid NOT NULL,workspace_id uuid NOT NULL,upload_id uuid NOT NULL,processing_status text,deleted_at timestamptz,status text NOT NULL CONSTRAINT resources_status_check CHECK(status IN ('ready','deleting','deleted','quarantined')),size_bytes bigint,created_at timestamptz DEFAULT now());
+   CREATE TABLE ${schema}.resource_refs(resource_id uuid,user_id uuid,workspace_id uuid NOT NULL,ref_kind text,ref_id_external text);
+   CREATE TABLE ${schema}.storage_jobs(task_id uuid PRIMARY KEY);
+   CREATE TABLE ${schema}.tasks(id uuid PRIMARY KEY,user_id uuid,workspace_id uuid,kind text,
+    CONSTRAINT tasks_check CHECK((user_id IS NULL AND workspace_id IS NULL AND kind IN ('maintenance.check','processing.node-start')) OR(user_id IS NOT NULL AND workspace_id IS NOT NULL)))`);
+  const id=randomUUID(),user=randomUUID(),workspace=randomUUID();
+  await tx.query(`INSERT INTO ${schema}.resources(resource_id,user_id,workspace_id,upload_id,status,size_bytes) VALUES($1,$2,$3,$4,'ready',10)`,[id,user,workspace,randomUUID()]);
+  await tx.query(`INSERT INTO ${schema}.resource_refs VALUES($1,$2,$3,'note','first'),($1,$2,$3,'note','second')`,[id,user,workspace]);
+  return {id,user};
+ }
+ it('initializes exact reference counts, keeps UUID identity and permits only user-scoped deletion tasks without a workspace',async()=>fixture(async(tx,schema)=>{
+  const f=await resources(tx,schema);await tx.query(sql(11,schema));
+  expect((await tx.query(`SELECT reference_count FROM ${schema}.resources WHERE resource_id=$1`,[f.id])).rows[0].reference_count).toBe('2');
+  expect((await tx.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='resources' AND column_name IN ('workspace_id','upload_id','processing_status','deleted_at','content_md5')",[schema])).rows).toEqual([]);
+  expect((await tx.query("SELECT has_table_privilege('huahuo_worker',$1,'DELETE') AS allowed,has_column_privilege('huahuo_worker',$2,'completed_at','UPDATE') AS stamp",[`${schema}.resources`,`${schema}.storage_jobs`])).rows[0]).toEqual({allowed:true,stamp:true});
+  await tx.query(`INSERT INTO ${schema}.resources(resource_id,user_id,status,size_bytes) VALUES($1,$2,'ready',10)`,[randomUUID(),f.user]);
+  expect((await tx.query(`SELECT count(*)::int n FROM ${schema}.resources WHERE user_id=$1`,[f.user])).rows[0].n).toBe(2);
+  await tx.query(`INSERT INTO ${schema}.resource_refs VALUES($1,$2,NULL,'avatar','owner')`,[f.id,f.user]);
+  await tx.query(`INSERT INTO ${schema}.tasks VALUES($1,$2,NULL,'storage.delete')`,[randomUUID(),f.user]);
+  await tx.query('SAVEPOINT business_scope');
+  await expect(tx.query(`INSERT INTO ${schema}.tasks VALUES($1,$2,NULL,'text.ingest')`,[randomUUID(),f.user])).rejects.toMatchObject({code:'23514'});
+  await tx.query('ROLLBACK TO SAVEPOINT business_scope');
+ }));
+ it('refuses cross-user reference corruption before changing resource ownership or counters',async()=>fixture(async(tx,schema)=>{
+  await resources(tx,schema);await tx.query(`UPDATE ${schema}.resource_refs SET user_id=$1`,[randomUUID()]);
+  await tx.query('SAVEPOINT migration_start');
+  await expect(tx.query(sql(11,schema))).rejects.toThrow('RESOURCE_REFERENCE_OWNER_MISMATCH');
+  await tx.query('ROLLBACK TO SAVEPOINT migration_start');
+  expect((await tx.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='resources' AND column_name='workspace_id'",[schema])).rows).toHaveLength(1);
+ }));
 });

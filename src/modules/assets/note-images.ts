@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { kbImages } from '../../lib/kb-images.js';
 import { DomainError, type Scope } from '../identity/store.js';
+import {replaceResourceRefs} from '../storage/references.js';
 
 export interface NoteResourceRef { resourceId: string; usage: string; anchor?: string | null; alt?: string | null }
 const MAX_REFS = 1000;
@@ -33,8 +34,8 @@ export async function syncNoteRefs(tx: pg.PoolClient, scope: Scope, workspaceId:
   if (refs.length > MAX_REFS || ids.some(id => !imageUuid(id))) throw new DomainError(400, 'NOTE_RESOURCE_REFS_INVALID');
   if (ids.length) {
     const owned = (await tx.query<{ resource_id: string; mime_type: string }>(`SELECT r.resource_id,r.mime_type FROM resources r
-      JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready'
-      WHERE r.resource_id=ANY($1::uuid[]) AND r.user_id=$2 AND r.workspace_id=$3 AND r.status='ready'
+      JOIN workspaces w ON w.id=$3 AND w.user_id=r.user_id AND w.state='ready'
+      WHERE r.resource_id=ANY($1::uuid[]) AND r.user_id=$2 AND r.status='ready'
       ORDER BY r.resource_id FOR UPDATE OF r FOR SHARE OF w`, [ids, scope.userId, workspaceId])).rows;
     if (owned.length !== ids.length) throw new DomainError(404, 'RESOURCE_NOT_FOUND');
     const images = new Set(refs.filter(ref => ref.usage === 'inline-image').map(ref => ref.resourceId));
@@ -45,8 +46,6 @@ export async function syncNoteRefs(tx: pg.PoolClient, scope: Scope, workspaceId:
   if (refs.length) await tx.query(`INSERT INTO note_resource_refs(note_id,resource_id,ref_order,usage,anchor,alt)
     SELECT $1,x.id,x.ord-1,x.usage,x.anchor,x.alt FROM unnest($2::uuid[],$3::text[],$4::text[],$5::text[]) WITH ORDINALITY x(id,usage,anchor,alt,ord)`,
   [noteId, refs.map(ref => ref.resourceId), refs.map(ref => ref.usage), refs.map(ref => ref.anchor ?? null), refs.map(ref => ref.alt ?? null)]);
-  await tx.query("DELETE FROM resource_refs WHERE user_id=$1 AND workspace_id=$2 AND ref_kind='note' AND ref_id_external=$3 AND NOT(resource_id=ANY($4::uuid[]))", [scope.userId, workspaceId, noteId, ids]);
-  if (ids.length) await tx.query(`INSERT INTO resource_refs(resource_id,user_id,workspace_id,ref_kind,ref_id_external)
-    SELECT id,$2,$3,'note',$4 FROM unnest($1::uuid[]) x(id) ON CONFLICT DO NOTHING`, [ids, scope.userId, workspaceId, noteId]);
+  await replaceResourceRefs(tx,scope.userId,'note',noteId,ids,workspaceId);
   return true;
 }

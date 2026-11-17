@@ -48,7 +48,7 @@ describe('business admission uses the active canonical user', () => {
     const db = database(false), storage = { put: vi.fn(), stat: vi.fn(), read: vi.fn(), remove: vi.fn(), head: vi.fn(),
       beginUpload: vi.fn(), signUploadPart: vi.fn(), inspectUploadPart: vi.fn(), completeUpload: vi.fn(), abortUpload: vi.fn() };
     const service = new StorageService(db.pool, mockOssUploadConfig(config()), storage);
-    await expect(service.createUpload(scope, { workspaceId, fileName: 'source.txt', mimeType: 'text/plain', sizeBytes: 13n }, 'key')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    await expect(service.createUpload(scope, { workspaceId, fileName: 'source.txt', mimeType: 'text/plain', sizeBytes: 13n },'fixture-upload')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
     expect(db.query.mock.calls.some(([sql]) => sql.startsWith('INSERT INTO storage_reservations') || sql.startsWith('INSERT INTO resources'))).toBe(false);
     expect(storage.beginUpload).not.toHaveBeenCalled();
     expect(storage.signUploadPart).not.toHaveBeenCalled();

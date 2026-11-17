@@ -5,7 +5,7 @@
  * active-index, and ready-state filters before passing candidates here.
  */
 
-import {traceHeaders} from '../../lib/trace.js';
+import { ServiceHttpClient, readJsonResponse } from '../../integrations/http-client.js';
 export interface RagSearchCandidate {
   chunkKey: string;
   documentKey: string;
@@ -76,26 +76,24 @@ interface RerankProviderRow { index?: unknown; relevance_score?: unknown }
 
 /** Native DashScope rerank API. Only scores and input indexes are trusted. */
 export class HttpRerankAdapter implements RerankAdapter {
-  constructor(private readonly options: HttpRerankOptions) {}
+  private readonly http:ServiceHttpClient;
+  constructor(private readonly options: HttpRerankOptions) { this.http=new ServiceHttpClient({fetchImpl:options.fetchImpl}); }
 
   async rerank(query: string, candidates: RagSearchCandidate[], options?: { signal?: AbortSignal }): Promise<Array<RagSearchCandidate & { rerankScore: number }>> {
     if (!candidates.length) return [];
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30_000);
     try {
-      const response = await (this.options.fetchImpl ?? fetch)(`${this.options.baseUrl.replace(/\/$/u, '')}/services/rerank/text-rerank/text-rerank`, {
+      return await this.http.request(`${this.options.baseUrl.replace(/\/$/u, '')}/services/rerank/text-rerank/text-rerank`, {
         method: 'POST',
-        headers: traceHeaders({
+        headers: {
           'content-type': 'application/json',
           ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {}),
-        }),
+        },
         body: JSON.stringify({ model: this.options.model, input: { query, documents: candidates.map((candidate) => candidate.content) }, parameters: { top_n: candidates.length } }),
-        redirect: 'error',
-        signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
-      });
-      if (!response.ok) { await response.body?.cancel(); throw new RerankError('RERANK_PROVIDER_UNAVAILABLE', `Rerank provider HTTP ${response.status}`, response.status >= 500 || response.status === 429); }
+        signal: options?.signal,
+      }, {timeoutMs:this.options.timeoutMs??30_000}, async response => {
+      if (!response.ok) { throw new RerankError('RERANK_PROVIDER_UNAVAILABLE', `Rerank provider HTTP ${response.status}`, response.status >= 500 || response.status === 429); }
       let payload: unknown;
-      try { payload = await response.json(); } catch (error) { throw new RerankError('RERANK_RESPONSE_INVALID', 'Rerank provider returned invalid JSON', false, { cause: error }); }
+      try { payload = await readJsonResponse(response,1024*1024); } catch (error) {if(error instanceof Error&&['AbortError','TimeoutError'].includes(error.name))throw error; throw new RerankError('RERANK_RESPONSE_INVALID', 'Rerank provider returned invalid JSON', false, { cause: error }); }
       const resultObject = payload && typeof payload === 'object' ? payload as { output?: { results?: unknown } } : {};
       const rawRows = Array.isArray(resultObject.output?.results) ? resultObject.output.results : [];
       const rows = rawRows as RerankProviderRow[];
@@ -108,11 +106,10 @@ export class HttpRerankAdapter implements RerankAdapter {
         seen.add(index);
         return { ...candidates[index]!, rerankScore: score };
       }).sort((left, right) => right.rerankScore - left.rerankScore);
+      });
     } catch (error) {
       if (error instanceof RerankError) throw error;
-      throw new RerankError(error instanceof Error && error.name === 'AbortError' ? 'RERANK_PROVIDER_TIMEOUT' : 'RERANK_PROVIDER_UNAVAILABLE', 'Rerank request failed', true, { cause: error });
-    } finally {
-      clearTimeout(timer);
+      throw new RerankError(error instanceof Error && ['AbortError','TimeoutError'].includes(error.name) ? 'RERANK_PROVIDER_TIMEOUT' : 'RERANK_PROVIDER_UNAVAILABLE', 'Rerank request failed', true, { cause: error });
     }
   }
 }

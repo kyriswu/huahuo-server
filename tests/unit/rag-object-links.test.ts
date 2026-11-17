@@ -68,7 +68,7 @@ describe('RAG uploaded source version binding', () => {
       return { rowCount: 0, rows: [] };
     });
     const pool = { query, connect: async () => Object.assign(new EventEmitter(), { query, release: vi.fn() }) } as unknown as pg.Pool;
-    const config = { appEnv: 'test', storageDriver: 'aliyun-oss', storageAliyunOss: testOssConfig, processingNodes: { enabled: true },
+    const config = { appEnv: 'test', storageDriver: 'aliyun-oss', storageAliyunOss: testOssConfig,
       kb: { documentCollection: 'fixture' }, rag: { enabled: true, sourceAllowedHosts: [`${testOssConfig.bucket}.oss-cn-beijing.aliyuncs.com`] } } as AppConfig;
     const repository = new RagIngestionRepository(pool, config);
     return (ossUrl: string) => repository.create(scope, { ossUrl, fileName: 'source.pdf', mimeType: 'application/pdf', sourceResourceId: sourceId, parseRunId: runId });

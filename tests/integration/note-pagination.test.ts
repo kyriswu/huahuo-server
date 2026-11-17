@@ -23,7 +23,7 @@ const config = loadConfig('api-server', {
   REDIS_CACHE_URL: redisUrls[0], REDIS_QUEUE_URL: redisUrls[1],
   REDIS_KEY_PREFIX: 'note_pagination_' + randomUUID().replaceAll('-', ''), METRICS_ENABLED: 'false',
   PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', BILLING_MODE: 'disabled',
-  PROCESSING_NODES_ENABLED: 'false', PROCESSING_NODES_CLOUD_CONTROL_ENABLED: 'false',
+  PROCESSING_NODES_CLOUD_CONTROL_ENABLED: 'false',
 });
 const migrationConfig = loadConfig('migrate', { APP_ENV: 'test', DATABASE_URL: migrationUrl });
 const root = poolFor(migrationConfig), pool = poolFor(config);

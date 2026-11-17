@@ -31,9 +31,9 @@ Scheduler每轮只读取一次运行配置，上传过期清理、任务恢复�
 
 环境由 `APP_ENV` 区分：`development` 为本地开发，`test` 为线上测试，`production` 为线上生产；分支名称和 Docker 的 `NODE_ENV=production` 不决定业务环境。
 
-`PROCESSING_NODES_ENABLED`仅允许本部署执行私网文档/音频API调用，默认false；它不再阻止手动云端开机。独立的`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`省略或为空时，线上测试和线上生产默认允许云端控制；本地开发沿用已配置完整RAM凭据或已启用节点调用时默认允许的规则。任何环境均可显式false禁止本部署开机及空闲停机。默认允许不提供凭据，实际云操作仍要求完整RAM凭据及其权限，并受超级管理员/业务调度授权和既有机器锁约束，不绕过会话或CSRF。
+处理节点登记并配置好后直接接收匹配任务，不再设置部署级解析调用开关。未登记匹配节点时报告节点不可用；已配置但连接失败时按实际健康探针和调用结果报告不可达，保留现有超时、取消和提交后未知结果恢复。`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`仅控制云端启停，省略或为空时测试/生产默认允许；开发环境在完整RAM凭据存在时默认允许。任何环境均可显式false禁止本部署开机及空闲停机。默认允许不提供凭据，实际云操作仍要求完整RAM凭据及其权限，并受超级管理员/业务调度授权和既有机器锁约束，不绕过会话或CSRF。
 
-测试部署使用 `APP_ENV=test`，建议显式 `PROCESSING_NODES_CLOUD_CONTROL_ENABLED=true`，四常驻角色注入已有授权的 `ALIYUN_RAM_ACCESS_KEY_ID` 和 `ALIYUN_RAM_ACCESS_KEY_SECRET`。本期发布在写库前逐角色校验；migrate只校验环境，不需要云凭据。旧ENV明确false时必须先改为true，保留私网调用开关原值，使用同一配置快照重新创建四角色，单纯restart不会更新ENV。隔离CI虽然也使用test，但显式关闭云控制且不继承真实凭据。生产执行器尚未接入，生产默认值通过本地配置解析验收，不代表已部署。见[环境与云控制验收](../acceptance/cloud-control-environments.md)。
+测试部署使用 `APP_ENV=test`，建议显式 `PROCESSING_NODES_CLOUD_CONTROL_ENABLED=true`，四常驻角色注入已有授权的 `ALIYUN_RAM_ACCESS_KEY_ID` 和 `ALIYUN_RAM_ACCESS_KEY_SECRET`。本期发布在写库前逐角色校验；migrate只校验环境，不需要云凭据。旧ENV明确false时必须先改为true，使用同一配置快照重新创建四角色，单纯restart不会更新ENV。隔离CI虽然也使用test，但显式关闭云控制且不继承真实凭据。生产执行器尚未接入，生产默认值通过本地配置解析验收，不代表已部署。见[环境与云控制验收](../acceptance/cloud-control-environments.md)。
 
 这里的网络环境是发起请求的Admin/Worker服务器，不是浏览器所在网络。浏览器从外网访问同VPC的后台时，后台仍可走内网解析；本地外网部署可以通过阿里云公网控制接口开机，但保持私网API调用关闭。控制专用部署可用[外网配置片段](../../resources/processing-nodes/external-control.env.example)，Worker仅消费maintenance；同VPC部署用[内网片段](../../resources/processing-nodes/test-control.env.example)。配置片段合入原环境，不替换已有凭据和连接。
 

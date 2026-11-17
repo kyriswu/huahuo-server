@@ -1,15 +1,16 @@
 import type pg from 'pg';
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config/config.js';
 import { env } from '../helpers.js';
 import { sourceFromUrl, sourceMetadataFromUrl, validateSourceUri } from '../../src/modules/rag/document-preparation.js';
 import { RagIngestionRepository } from '../../src/modules/rag/repository.js';
+import { ProcessingNodes } from '../../src/modules/processing-nodes/service.js';
 import { TextIngestionService } from '../../src/modules/text-ingestion/service.js';
 
-const configuration = (parserEnabled = true) => {
+const configuration = () => {
   const config = loadConfig('worker', { ...env, RAG_PROVIDER_MODE: 'disabled', RAG_SOURCE_ALLOWED_HOSTS: 'files.example' });
   config.rag.enabled = true;
-  config.processingNodes.enabled = parserEnabled;
   return config;
 };
 const scope = { userId: 'user', sessionId: 'session', traceId: 'trace' };
@@ -67,19 +68,22 @@ describe('external file URL metadata', () => {
 });
 
 describe('external parser admission', () => {
-  it.each(files)('rejects %s in both file entrypoints when the parser is unavailable before opening a transaction', async (fileName, mimeType) => {
-    const config = configuration(false), connect = vi.fn();
-    const pool = { connect } as unknown as pg.Pool;
-    await expect(new RagIngestionRepository(pool, config).create(scope, { fileName, mimeType, ossUrl: `https://files.example/${fileName}` }))
-      .rejects.toMatchObject({ statusCode: 503, code: 'DOCUMENT_PARSER_NOT_CONFIGURED' });
-    await expect(new TextIngestionService(pool, config).create(scope, { source_type: 'FILE_UPLOAD', origin_resource_uri: `https://files.example/${fileName}` }, 'file-key'))
-      .rejects.toMatchObject({ statusCode: 503, code: 'DOCUMENT_PARSER_NOT_CONFIGURED' });
-    expect(connect).not.toHaveBeenCalled();
+  it('reports an unavailable node before invoking a parser when the registered catalog is empty', async () => {
+    const query = vi.fn(async () => ({ rowCount: 0, rows: [] }));
+    const tx = Object.assign(new EventEmitter(), { query, release: vi.fn() });
+    const pool = { connect: vi.fn(async () => tx) } as unknown as pg.Pool;
+    const factory = vi.fn(), execute = vi.fn();
+    const nodes = new ProcessingNodes(pool, configuration(), factory);
+    await expect(nodes.withNode('document', { requestId: 'file-request', fingerprint: 'a'.repeat(64) }, execute))
+      .rejects.toMatchObject({ statusCode: 503, code: 'PROCESSING_NODE_UNAVAILABLE' });
+    expect(query).toHaveBeenCalledWith('ROLLBACK');
+    expect(factory).not.toHaveBeenCalled(); expect(execute).not.toHaveBeenCalled();
+    await nodes.close();
   });
 
   it('admits manual input without an external parser or model credentials', async () => {
     const boundary = new Error('DB_BOUNDARY'), connect = vi.fn(async () => { throw boundary; });
-    const service = new TextIngestionService({ connect } as unknown as pg.Pool, configuration(false));
+    const service = new TextIngestionService({ connect } as unknown as pg.Pool, configuration());
     await expect(service.create(scope, { source_type: 'MANUAL_INPUT', raw_content: '手动原文' }, 'manual-key')).rejects.toBe(boundary);
     expect(connect).toHaveBeenCalledTimes(1);
   });

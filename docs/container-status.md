@@ -81,7 +81,7 @@ Compose 新增 API/Admin/Worker/Scheduler 专用指标映射 9464/9465/9466/9467
 
 用户随后明确要求不用隔离环境，启动当前项目。已核对原RDS基线与HEAD一致、新基线仅追加3张配置表，在事务内新增表/索引/授权并导入5项原非秘密业务配置，最后CAS更新基线校验；没有重跑整份0001、清库、修改原账号或重置凭据。用户、会话、工作区、笔记、资源及任务行数前后一致，物理外键仍为0。
 
-现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。CPU节点及PROCESSING_NODES_ENABLED保持关闭，未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
+现有主Compose的api-server/admin/worker/scheduler已使用同一完整构建镜像更新，四者healthy/readiness200；未建立新数据库/隔离栈或改动已有卷。Admin在 http://127.0.0.1:3001/admin#configuration ，沿用原账号。HTML/JS 200，匿名配置接口401，API-server同路径404。当时CPU节点及解析调用保持关闭（当前代码已移除部署级调用开关），未开停云机器或调用解析。运行证据：.local/runtime-config/start-existing/runtime-result.json、database-sync.jsonl；镜像完整构建日志image-build-full.log。首次窄范围打包发现缺少API依赖，已改为锁文件完整构建并通过四角色模块导入/启动验证。
 
 
 ## 分类配置代码验收（2026-11-15）

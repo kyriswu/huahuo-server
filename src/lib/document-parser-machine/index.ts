@@ -8,6 +8,7 @@ import { DocumentParserEciFallback, type ParserEciProvider } from './eci-fallbac
 import { ParserMachineRedis, ParserMachineError, type MachinePhase } from './redis.js';
 import { ParserMachineIdleMonitor, type MonitorEvents } from './monitor.js';
 import {currentTraceId} from '../trace.js';
+import { ServiceHttpClient } from '../../integrations/http-client.js';
 
 export { ParserMachineError, ParserMachineRedis } from './redis.js';
 export type { MachineState, MachinePhase } from './redis.js';
@@ -65,14 +66,11 @@ export class DocumentParserMachine {
     if (config.mode === 'ecs' && config.eciFallback) this.eci = new DocumentParserEciFallback(state, config.eciFallback,
       eciProvider ?? new AliyunEciGpuProvider({ regionId: config.regionId, credentials: config.credentials,
         connectTimeoutMs: 1000, readTimeoutMs: 6000, workloadRamCredentials: true }));
+    const http=new ServiceHttpClient();
     this.healthy = healthCheck ?? (async ({ baseUrl, signal, headers }) => {
       if (!config.healthPath) return true;
       try {
-        const response = await fetch(new URL(config.healthPath, baseUrl), {
-          method: 'GET', headers, redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]),
-        });
-        await response.body?.cancel();
-        return response.status === 200;
+        return await http.request(new URL(config.healthPath, baseUrl), {method:'GET',headers,signal}, {timeoutMs:3000}, async response=>response.status===200);
       } catch { return false; }
     });
   }

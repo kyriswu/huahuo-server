@@ -19,14 +19,14 @@ function attempt(): Attempt {
 describe('storage relationship guards without database foreign keys', () => {
   it('does not create a relationship when the resource is absent', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
-    await expect(attachResource({ query } as unknown as pg.PoolClient, 'user', 'resource', 'note', 'note', 'workspace'))
+    await expect(attachResource({ query } as unknown as pg.PoolClient, 'user', 'resource', 'note', 'note'))
       .rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
     expect(query).toHaveBeenCalledTimes(1);
   });
   it('rejects resources outside the requested workspace before inserting a reference', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [{ workspace_id: 'foreign', mime_type: 'text/plain' }], rowCount: 1 });
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
     await expect(attachResource({ query } as unknown as pg.PoolClient, 'user', 'resource', 'note', 'note', 'workspace'))
-      .rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
+      .rejects.toMatchObject({ code: 'WORKSPACE_NOT_FOUND' });
     expect(query).toHaveBeenCalledTimes(1);
   });
   it('does not create a durable task when its scoped storage target is missing', async () => {
@@ -37,7 +37,7 @@ describe('storage relationship guards without database foreign keys', () => {
   });
   it.each([
     { user_id: 'foreign', workspace_id: 'workspace' },
-    { user_id: 'user', workspace_id: 'foreign' },
+    { user_id: 'foreign', workspace_id: 'foreign' },
   ])('does not access object storage when the task and target have different ownership: %j', async ownership => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [{ operation: 'delete', resource_id: 'resource' }] })

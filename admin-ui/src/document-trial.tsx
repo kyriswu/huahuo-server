@@ -2,7 +2,7 @@ import {Alert,Button,Input,Skeleton,Tabs,Tag} from 'antd';
 import {useEffect,useRef,useState} from 'react';
 import {AdminApiError,adminRequest,type AdminIdentity} from './session';
 interface TrialStatus {id:string;state:'running'|'completed'|'failed'|'cancelled';phase:string;fileName?:string;configRevision:number;configHash?:string;nodeId?:string;metrics:Record<string,number>;error?:string;}
-interface Capabilities {parserEnabled:boolean;unavailableReason:'deployment_disabled'|'no_online_node'|null;retentionSeconds:number;onlineNodes:{id:string;name:string}[];configRevision:number;}
+interface Capabilities {parserEnabled:boolean;unavailableReason:'no_online_node'|null;retentionSeconds:number;onlineNodes:{id:string;name:string}[];configRevision:number;}
 interface TrialOutput {state:string;error?:string;result:Record<string,unknown>|null;}
 const stateNames={running:'处理中',completed:'完成',failed:'失败',cancelled:'已取消'};
 const phases:Record<string,string>={preparing:'准备请求',parsing:'解析并收取结果',completed:'完成',failed:'失败',cancelled:'已取消'};
@@ -58,7 +58,7 @@ export function DocumentTrial({open,admin,csrfToken,onSessionExpired,onOpenConfi
   {error&&<Alert type="error" showIcon title={error} action={<Button size="small" onClick={()=>setRefresh(n=>n+1)}>刷新状态</Button>}/>}
   {loading?<Skeleton active paragraph={{rows:5}}/>:writable&&cap&&<section>
    <div className="mb-5 flex flex-wrap items-center justify-between gap-3"><h2 className="text-base font-semibold">选择文档</h2><span className="text-xs text-console-muted">配置版本 {cap.configRevision} · 候选节点 {cap.onlineNodes.length}</span></div>
-   {!cap.parserEnabled&&<div className="mb-5"><Alert type="info" showIcon title={cap.unavailableReason==='deployment_disabled'?'当前环境未启用解析调用':'尚未配置文档解析节点'} description={<>所有文件均由外部服务解析。请在<button type="button" onClick={onOpenConfiguration} className="cursor-pointer underline">文档节点</button>中核对配置，并预先启动解析服务。</>}/></div>}
+   {!cap.parserEnabled&&<div className="mb-5"><Alert type="info" showIcon title="尚未配置文档解析节点" description={<>所有文件均由外部服务解析。请在<button type="button" onClick={onOpenConfiguration} className="cursor-pointer underline">文档节点</button>中核对配置，并预先启动解析服务。</>}/></div>}
    <div className="mt-5"><label htmlFor="trial-url" className="mb-2 block text-sm font-medium">OSS 文件链接</label><Input id="trial-url" value={url} onChange={e=>setUrl(e.target.value)} disabled={active} placeholder="粘贴完整 OSS 链接，保留签名查询参数" autoComplete="off"/></div>
    <p className="mt-3 text-xs leading-5 text-console-muted">请先将文件上传到 OSS。支持 PDF、Word、Excel、PPT、TXT、Markdown、CSV，由解析服务直接读取链接并执行文件大小限制。结果临时保留 {Math.round(cap.retentionSeconds/60)} 分钟，服务重启后不保留。图片按解析服务配置保存到 OSS，本窗口不登记为业务素材。</p>
    <div className="mt-5 flex flex-wrap gap-3"><Button type="primary" loading={submitting} disabled={!cap.parserEnabled||job?.state==='running'} onClick={()=>void submit()}>开始试用</Button>{job?.state==='running'&&<Button onClick={()=>void cancel()} loading={cancelling}>取消本次试用</Button>}</div>

@@ -27,7 +27,7 @@ const env = {
   APP_PUBLIC_BASE_URL: 'http://scheduler-api.test', ADMIN_PUBLIC_BASE_URL: 'http://scheduler-admin.test',
   REDIS_CACHE_URL: process.env.REDIS_CACHE_URL, REDIS_QUEUE_URL: redisUrl,
   REDIS_KEY_PREFIX: 'scheduler_config_' + randomUUID().replaceAll('-', ''),
-  PROCESSING_NODES_ENABLED: 'false', PROCESSING_NODES_CLOUD_CONTROL_ENABLED: 'false',
+  PROCESSING_NODES_CLOUD_CONTROL_ENABLED: 'false',
   PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled',
   BILLING_MODE: 'disabled', ENABLE_DEMO_TASKS: 'true', METRICS_ENABLED: 'false',
 };

@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NOTE_EMBEDDING_MAX_BATCH_SIZE, NOTE_EMBEDDING_MAX_INPUT_TOKENS } from '../model-profile.js';
-import {traceHeaders} from '../../../lib/trace.js';
+import { ServiceHttpClient, readJsonResponse } from '../../../integrations/http-client.js';
 export class EmbeddingError extends Error {
   constructor(readonly code:string, message:string, readonly retryable=true, options?:{cause?:unknown}) { super(message,options); this.name='EmbeddingError'; }
 }
@@ -20,8 +20,8 @@ function vectors(data:unknown,count:number,dimensions:number):number[][]{
 }
 /** Native DashScope API, shared by Beijing public and provisioned PrivateLink hosts. */
 export class BailianEmbeddingClient implements EmbeddingClient {
-  readonly model:string; readonly dimensions:number; private readonly fetchImpl:typeof fetch;
-  constructor(private readonly options:EmbeddingOptions){this.model=options.model;this.dimensions=options.dimensions;this.fetchImpl=options.fetchImpl??fetch;if(!options.baseUrl||!options.apiKey||!options.model)throw new EmbeddingError('EMBEDDING_CONFIG_INVALID','Embedding provider configuration is incomplete',false);}
+  readonly model:string; readonly dimensions:number; private readonly http:ServiceHttpClient;
+  constructor(private readonly options:EmbeddingOptions){this.model=options.model;this.dimensions=options.dimensions;this.http=new ServiceHttpClient({fetchImpl:options.fetchImpl});if(!options.baseUrl||!options.apiKey||!options.model)throw new EmbeddingError('EMBEDDING_CONFIG_INVALID','Embedding provider configuration is incomplete',false);}
   async embed(texts:string[], requestOptions?:EmbeddingRequestOptions):Promise<number[][]>{
     if(!texts.length)return [];
     if(texts.some(t=>!t.trim()))throw new EmbeddingError('EMBEDDING_INPUT_INVALID','Embedding input contains empty text',false);
@@ -38,25 +38,25 @@ export class BailianEmbeddingClient implements EmbeddingClient {
     let last:unknown;
     for(let attempt=0;attempt<=this.options.maxRetries;attempt++){
       requestOptions?.signal?.throwIfAborted();
-      const controller=new AbortController(), started=performance.now();
-      const timer=setTimeout(()=>controller.abort(),this.options.timeoutMs);
+      const started=performance.now();
       const observation:EmbeddingAttempt={attempt,durationMs:0,succeeded:false};
       try{
-        const response=await this.fetchImpl(`${this.options.baseUrl.replace(/\/$/,'')}/services/embeddings/text-embedding/text-embedding`,{method:'POST',headers:traceHeaders({'content-type':'application/json',authorization:`Bearer ${this.options.apiKey}`}),body:JSON.stringify(body),redirect:'error',signal:requestOptions?.signal?AbortSignal.any([controller.signal,requestOptions.signal]):controller.signal});
-        observation.status=response.status;observation.firstByteMs=performance.now()-started;
-        if(!response.ok){await response.body?.cancel();throw new EmbeddingError('EMBEDDING_PROVIDER_UNAVAILABLE',`Embedding provider HTTP ${response.status}`,retryableStatus(response.status));}
-        let payload:unknown;
-        try{payload=await response.json();}catch(error){throw new EmbeddingError('EMBEDDING_RESPONSE_INVALID','Embedding provider returned invalid JSON',false,{cause:error});}
-        const result=vectors((payload as {output?:{embeddings?:unknown}}|null)?.output?.embeddings,texts.length,this.options.dimensions);
-        observation.succeeded=true;
-        return result;
+        return await this.http.request(`${this.options.baseUrl.replace(/\/$/,'')}/services/embeddings/text-embedding/text-embedding`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${this.options.apiKey}`},body:JSON.stringify(body),signal:requestOptions?.signal},{timeoutMs:this.options.timeoutMs},async response=>{
+          observation.status=response.status;observation.firstByteMs=performance.now()-started;
+          if(!response.ok)throw new EmbeddingError('EMBEDDING_PROVIDER_UNAVAILABLE',`Embedding provider HTTP ${response.status}`,retryableStatus(response.status));
+          let payload:unknown;
+          try{payload=await readJsonResponse(response,8*1024*1024);}catch(error){if(error instanceof Error&&['AbortError','TimeoutError'].includes(error.name))throw error;throw new EmbeddingError('EMBEDDING_RESPONSE_INVALID','Embedding provider returned invalid JSON',false,{cause:error});}
+          const result=vectors((payload as {output?:{embeddings?:unknown}}|null)?.output?.embeddings,texts.length,this.options.dimensions);
+          observation.succeeded=true;
+          return result;
+        });
       }catch(error){
         last=error;
         if(requestOptions?.signal?.aborted)throw new EmbeddingError('EMBEDDING_PROVIDER_TIMEOUT','Embedding request cancelled',true,{cause:error});
         if(error instanceof EmbeddingError&&!error.retryable)throw error;
-        if(attempt>=this.options.maxRetries)throw error instanceof EmbeddingError?error:new EmbeddingError(error instanceof Error&&error.name==='AbortError'?'EMBEDDING_PROVIDER_TIMEOUT':'EMBEDDING_PROVIDER_UNAVAILABLE','Embedding request failed',true,{cause:error});
+        if(attempt>=this.options.maxRetries)throw error instanceof EmbeddingError?error:new EmbeddingError(error instanceof Error&&['AbortError','TimeoutError'].includes(error.name)?'EMBEDDING_PROVIDER_TIMEOUT':'EMBEDDING_PROVIDER_UNAVAILABLE','Embedding request failed',true,{cause:error});
       }finally{
-        clearTimeout(timer);observation.durationMs=performance.now()-started;
+        observation.durationMs=performance.now()-started;
         try{requestOptions?.onAttempt?.({...observation});}catch{/* Diagnostics never change provider behavior. */}
       }
       await sleep(100*2**attempt);

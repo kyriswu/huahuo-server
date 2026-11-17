@@ -53,8 +53,8 @@ export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, 
   // Object keys are UUIDs in the current schema. Keep the typed equality indexed;
   // arbitrary filenames still fail the owned lookup without reaching a UUID cast.
   const rows = (await tx.query<{ resource_id: string; object_key: string; mime_type: string }>(`SELECT r.resource_id,r.object_key,r.mime_type
-    FROM resources r JOIN workspaces w ON w.id=r.workspace_id AND w.user_id=r.user_id AND w.state='ready'
-    WHERE r.user_id=$1 AND r.workspace_id=$2 AND r.status='ready'
+    FROM resources r JOIN workspaces w ON w.id=$2 AND w.user_id=r.user_id AND w.state='ready'
+    WHERE r.user_id=$1 AND r.status='ready'
     AND r.storage_driver='aliyun-oss' AND r.storage_bucket=$5
     AND (r.resource_id=ANY($3::uuid[]) OR r.object_key=ANY($4::uuid[])) ORDER BY r.resource_id FOR UPDATE OF r FOR SHARE OF w`,
   [scope.userId, workspaceId, ids, keys, oss.bucket])).rows;

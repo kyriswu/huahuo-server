@@ -32,8 +32,8 @@ export class AdminDocumentTrials {
  }
  async authorize(scope:AdminScope){await transaction(this.pool,tx=>assertSuperadmin(tx,scope));}
  async capabilities(){const state=await this.settings.load(),onlineNodes=(await this.nodes.list()).filter(n=>n.capabilities.includes('document')).map(n=>({id:n.id,name:n.name}));
-  return {parserEnabled:this.config.processingNodes.enabled&&onlineNodes.length>0,
-   retentionSeconds:TTL/1000,unavailableReason:!this.config.processingNodes.enabled?'deployment_disabled':!onlineNodes.length?'no_online_node':null,onlineNodes,configRevision:state.revision};
+  return {parserEnabled:onlineNodes.length>0,
+   retentionSeconds:TTL/1000,unavailableReason:!onlineNodes.length?'no_online_node':null,onlineNodes,configRevision:state.revision};
  }
  private prune(){for(const j of [...this.jobs.values()].filter(j=>j.state!=='running').sort((a,b)=>a.finishedAt!-b.finishedAt!))if(Date.now()-j.finishedAt!>TTL||this.jobs.size>=4)this.jobs.delete(j.id);}
  async start(scope:AdminScope,input:{url:string}){
@@ -42,7 +42,6 @@ export class AdminDocumentTrials {
   let source:ReturnType<typeof sourceFromUrl>;
   try{source=sourceFromUrl(input.url,config);}catch(e){if(e instanceof DocumentPreparationError)throw new DomainError(400,e.code);throw e;}
   if(!supported.test(source.fileName))throw new DomainError(400,'ADMIN_TRIAL_FILE_INVALID');
-  if(!config.processingNodes.enabled)throw new DomainError(503,'ADMIN_TRIAL_PARSER_NOT_CONFIGURED');
   const node=(await this.nodes.list()).find(n=>n.capabilities.includes('document'));
   if(!node)throw new DomainError(503,'ADMIN_TRIAL_PARSER_NOT_CONFIGURED');
   // Re-check after capability reads so concurrent submissions cannot both enter.

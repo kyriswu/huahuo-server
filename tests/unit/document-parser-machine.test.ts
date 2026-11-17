@@ -105,13 +105,13 @@ describe('ECI recovery with cloud control disabled; in-memory state and cloud pr
 });
 
 describe('document parser configuration (no live cloud calls)', () => {
-  it('defaults node execution disabled at the deployment boundary',()=>{
-    expect(loadConfig('worker',env).processingNodes.enabled).toBe(false);
+  it('defaults local cloud power control off without credentials',()=>{
+    expect(loadConfig('worker',{...env,APP_ENV:'development',ALIYUN_RAM_ACCESS_KEY_ID:'',ALIYUN_RAM_ACCESS_KEY_SECRET:''}).processingNodes.cloudControlEnabled).toBe(false);
   });
-  it('separates credential-backed cloud control from private parser execution and permits an explicit deny',()=>{
-    const settings={...env,PROCESSING_NODES_ENABLED:'false',ALIYUN_RAM_ACCESS_KEY_ID:'synthetic-ak',ALIYUN_RAM_ACCESS_KEY_SECRET:'synthetic-secret'};
-    expect(loadConfig('worker',settings).processingNodes).toMatchObject({enabled:false,cloudControlEnabled:true});
-    expect(loadConfig('worker',{...settings,PROCESSING_NODES_CLOUD_CONTROL_ENABLED:'false'}).processingNodes).toMatchObject({enabled:false,cloudControlEnabled:false});
+  it('permits credential-backed cloud control and an explicit deny',()=>{
+    const settings={...env,ALIYUN_RAM_ACCESS_KEY_ID:'synthetic-ak',ALIYUN_RAM_ACCESS_KEY_SECRET:'synthetic-secret'};
+    expect(loadConfig('worker',settings).processingNodes).toMatchObject({cloudControlEnabled:true});
+    expect(loadConfig('worker',{...settings,PROCESSING_NODES_CLOUD_CONTROL_ENABLED:'false'}).processingNodes).toMatchObject({cloudControlEnabled:false});
     expect(()=>loadConfig('worker',{...settings,PROCESSING_NODES_CLOUD_CONTROL_ENABLED:'invalid'})).toThrow('INVALID_CONFIG:PROCESSING_NODES_CLOUD_CONTROL_ENABLED');
   });
   it('configures one ECS with default one-minute idle and one global slot', () => {
@@ -144,12 +144,7 @@ describe('document parser configuration (no live cloud calls)', () => {
       expect(() => createDocumentParserConfig({ mode: 'always-on', baseUrl: url })).toThrow('INVALID_CONFIG:PROCESSING_NODE_BASE_URL');
     }
   });
-  it('uses DB nodes behind a deployment master switch, not legacy target environment', () => {
-    const settings={...env,DOCUMENT_PARSER_MODE:'ecs',DOCUMENT_PARSER_BASE_URL:'https://unused.invalid'};
-    expect(loadConfig('worker', settings).processingNodes.enabled).toBe(false);
-    expect(loadConfig('scheduler', {...settings,PROCESSING_NODES_ENABLED:'true'}).processingNodes.enabled).toBe(true);
-    expect(loadConfig('api-server', settings).processingNodes.enabled).toBe(false);
-  });
+
 });
 
 describe('ECS economical-stop RPC adapter (mock RPC, not live cloud)', () => {

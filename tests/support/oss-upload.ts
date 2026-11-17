@@ -64,8 +64,8 @@ export class MockOssStorageAdapter extends LocalStorageAdapter {
     return signed;
   }
 
-  async uploadPart(url: string, bytes: Buffer, headers?: Record<string,string>): Promise<void> {
-    const signed = this.signedParts.get(url);
+  async uploadPart(url: string|null, bytes: Buffer, headers?: Record<string,string>): Promise<void> {
+    const signed = url?this.signedParts.get(url):undefined;
     if (!signed || signed.expires <= Date.now()) throw Object.assign(new Error('AccessDenied'), { code: 'AccessDenied' });
     const upload = this.upload(signed.key, signed.uploadId);
     if (bytes.length !== signed.bytes || (headers && Object.entries(signed.headers).some(([key,value]) => headers[key] !== value))) {

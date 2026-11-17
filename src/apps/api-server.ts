@@ -23,23 +23,21 @@ import { RagQueryService, type RagQueryDependencies } from '../modules/rag/query
 import { RagImageLinks } from '../modules/rag/image-links.js';
 import {RuntimeSettings} from '../modules/runtime-settings/service.js';
 import {DocumentCallbacks} from '../modules/ingestion/document-callbacks.js';
-import {registerDocumentCallbacks} from '../modules/ingestion/document-callback-routes.js';
-import { registerGatewayAuthRoute } from '../modules/gateway/routes.js';
+import { registerInternalRoutes } from '../http/internal-routes.js';
 export async function buildApiServer(options: BuildOptions & IdentityOptions & { ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
  const pool=dependencies.pool??poolFor(options.config);
  const app=await buildBase({...options,dependencies});
  const settings=new RuntimeSettings(pool,options.config);
- app.addHook('onRequest',(req,_reply,done)=>{const path=req.routeOptions.url;if(path==='/internal/v1/rag/query'||path?.startsWith('/api/v1/')&&!path.startsWith('/api/v1/auth/')&&!path.startsWith('/api/v1/document-parser/callbacks/'))void settings.enter(done);else done();});
- const callbacks=new DocumentCallbacks(pool,options.config);registerDocumentCallbacks(app,callbacks);
+ app.addHook('onRequest',(req,_reply,done)=>{const path=req.routeOptions.url;if(path?.startsWith('/api/v1/')&&!path.startsWith('/api/v1/auth/'))void settings.enter(done);else done();});
+ const callbacks=new DocumentCallbacks(pool,options.config);
  if(!dependencies.pool)app.addHook('onClose',async()=>{await pool.end();});
  const uploads=new RedisTemporaryUploads(options.config);
  const resourceClaims=new ResourceClaims(options.config,uploads);
  app.addHook('onClose',async()=>{await uploads.close();});
  const identity=new IdentityService(pool,options.config,options);
  registerIdentityRoutes(app,identity,new WorkspaceService(pool,options.config.appTokenSecret!,resourceClaims));
- registerGatewayAuthRoute(app,identity);
  const billing=new BillingService(pool,options.config);
  if (options.config.billingMode !== 'disabled') registerBillingRoutes(app,billing);
  const storageService = new StorageService(pool,options.config,undefined,uploads);
@@ -53,6 +51,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
   resolveImages: (scope,images)=>imageLinks.resolve(scope,images),
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
+ registerInternalRoutes(app,{identity,callbacks,ragQuery,settings});
  registerAssetRoutes(app,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService);
  registerRagRoutes(app,new RagIngestionRepository(pool,options.config,resourceClaims),storageService.storage,ragQuery);
  registerTaskRoutes(app,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;

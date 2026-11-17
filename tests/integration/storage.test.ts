@@ -14,7 +14,7 @@ import { TemporaryUploadCleaner } from '../../src/modules/storage/temporary-uplo
 import { RedisTemporaryUploads } from '../../src/modules/storage/temporary-uploads.js';
 import { AliyunOssStorageAdapter } from '../../src/integrations/object-storage/aliyun-oss.js';
 import { MockOssStorageAdapter, mockOssUploadConfig } from '../support/oss-upload.js';
-import { attachResource } from '../../src/modules/storage/references.js';
+import { attachResource,replaceResourceRefs } from '../../src/modules/storage/references.js';
 import { transaction } from '../../src/modules/identity/store.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
 import { insertFixtureUser, insertFixtureSession, testJwtEnv, fixtureScopeHeaders } from './jwt-fixture.js';
@@ -54,7 +54,7 @@ async function fixture() {
 }
 async function uploaded(complete = false) {
   const user = await fixture();
-  const upload = await storage.createUpload(user.scope, { ...metadata, workspaceId: user.workspaceId }, randomUUID());
+  const upload = await storage.createUpload(user.scope, { ...metadata, workspaceId: user.workspaceId },randomUUID());
   await adapter.uploadPart(upload.uploadUrl, bytes);
   if (complete) await storage.complete(user.scope, upload.uploadId, randomUUID());
   return { user, upload };
@@ -112,7 +112,7 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
 
   it('keeps admission, progress recovery and completed receipts in Redis without business database writes', async () => {
     const user = await fixture(), before = await databaseCounts(user.userId);
-    const upload = await storage.createUpload(user.scope, { ...metadata, workspaceId: user.workspaceId }, randomUUID());
+    const upload = await storage.createUpload(user.scope, { ...metadata, workspaceId: user.workspaceId },randomUUID());
     expect(upload.resourceId).toBe(upload.uploadId);
     expect((await storage.recover(user.scope, upload.uploadId)).status).toBe('initiated');
     await adapter.uploadPart(upload.uploadUrl, bytes);
@@ -122,7 +122,8 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
     } });
     expect((await storage.recover(user.scope, upload.uploadId)).status).toBe('completed');
     expect(await databaseCounts(user.userId)).toEqual(before);
-    expect(await uploads.get(upload.uploadId)).toMatchObject({ status: 'completed', userId: user.userId, workspaceId: user.workspaceId });
+    expect(await uploads.get(upload.uploadId)).toMatchObject({ status: 'completed', userId: user.userId });
+    expect(await uploads.get(upload.uploadId)).not.toHaveProperty('workspaceId');
     const head = vi.spyOn(adapter, 'head').mockRejectedValue(new Error('UNEXPECTED_HEAD'));
     const read = vi.spyOn(adapter, 'read').mockRejectedValue(new Error('UNEXPECTED_FILE_READ'));
     try {
@@ -136,30 +137,33 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
   });
 
   it('reuses a Redis idempotency receipt without extending 24-hour retention or repeating initialization', async () => {
-    const user = await fixture(), key = randomUUID(), begin = vi.spyOn(adapter, 'beginUpload');
+    const user = await fixture(), key=randomUUID(), begin = vi.spyOn(adapter, 'beginUpload');
     try {
-      const first = await storage.createUpload(user.scope, metadata, key), original = await uploads.get(first.uploadId);
-      const second = await storage.createUpload(user.scope, metadata, key), after = await uploads.get(first.uploadId);
+      const first = await storage.createUpload(user.scope, metadata,key), original = await uploads.get(first.uploadId);
+      const second = await storage.createUpload(user.scope, metadata,key), after = await uploads.get(first.uploadId);
       expect(second.uploadId).toBe(first.uploadId); expect(begin).toHaveBeenCalledTimes(1);
       expect(original!.expiresAt - original!.createdAt).toBe(oneDay);
       expect(after!.expiresAt).toBe(original!.expiresAt);
-      expect(Date.parse(first.expiresAt) - Date.now()).toBeLessThanOrEqual(3600_000);
-      expect(new URL(first.uploadUrl).searchParams.get('partNumber')).toBe('1');
-      await expect(storage.createUpload(user.scope, { ...metadata, fileName: 'different.txt' }, key)).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
-      const other = await fixture(), separate = await storage.createUpload(other.scope, metadata, key);
+      expect(Date.parse(first.expiresAt!) - Date.now()).toBeLessThanOrEqual(3600_000);
+      expect(new URL(first.uploadUrl!).searchParams.get('partNumber')).toBe('1');
+      await expect(storage.createUpload(user.scope, { ...metadata, fileName: 'renamed.txt' },key)).rejects.toMatchObject({code:'IDEMPOTENCY_CONFLICT'});
+      await adapter.uploadPart(first.uploadUrl,bytes);await storage.complete(user.scope,first.uploadId,randomUUID());
+      expect(await storage.createUpload(user.scope,metadata,key)).toMatchObject({resourceId:first.resourceId,uploadRequired:false,uploadUrl:null});
+      expect(first.headers).not.toHaveProperty('Content-MD5');
+      const other = await fixture(), separate = await storage.createUpload(other.scope, metadata,key);
       expect(separate.uploadId).not.toBe(first.uploadId);
       expect(await databaseCounts(user.userId)).toEqual({ resources: 0, reservations: 0, tasks: 0, idempotency: 0 });
     } finally { begin.mockRestore(); }
   });
 
   it('retains retryable admission when initialization fails, with no duplicate resource identity', async () => {
-    const user = await fixture(), key = randomUUID();
+    const user = await fixture(),key=randomUUID();
     const begin = vi.spyOn(adapter, 'beginUpload').mockRejectedValueOnce(new Error('connection lost'));
     try {
-      await expect(storage.createUpload(user.scope, metadata, key)).rejects.toThrow();
+      await expect(storage.createUpload(user.scope, metadata,key)).rejects.toThrow();
       const entries = await redis.keys(`${prefix}:storage:temporary:record:*`); expect(entries).toHaveLength(1);
       const stored = JSON.parse((await redis.get(entries[0]!))!) as { id: string };
-      const retried = await storage.createUpload(user.scope, metadata, key);
+      const retried = await storage.createUpload(user.scope, metadata,key);
       expect(retried.resourceId).toBe(stored.id); expect(begin).toHaveBeenCalledTimes(2);
       expect(await databaseCounts(user.userId)).toEqual({ resources: 0, reservations: 0, tasks: 0, idempotency: 0 });
     } finally { begin.mockRestore(); }
@@ -223,10 +227,10 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
   });
 
   it('allows retrying early completion and rejects a bad part size before the cloud commit', async () => {
-    const user = await fixture(), upload = await storage.createUpload(user.scope, metadata, randomUUID());
+    const user = await fixture(), upload = await storage.createUpload(user.scope, metadata,randomUUID());
     await expect(storage.complete(user.scope, upload.uploadId, randomUUID())).rejects.toMatchObject({ code: 'UPLOAD_PARTS_INVALID' });
     await adapter.uploadPart(upload.uploadUrl, bytes);
-    adapter.setPartSize(new URL(upload.uploadUrl).searchParams.get('uploadId')!, 2);
+    adapter.setPartSize(new URL(upload.uploadUrl!).searchParams.get('uploadId')!, 2);
     const complete = vi.spyOn(adapter, 'completeUpload');
     try {
       await expect(storage.complete(user.scope, upload.uploadId, randomUUID())).rejects.toMatchObject({ code: 'UPLOAD_SIZE_MISMATCH' });
@@ -264,13 +268,13 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
 
   it('uploads multiple temporary files without charging or reserving account space', async () => {
     const user = await fixture(), limited = new StorageService(pool, { ...config, storageQuotaBytes: 13 }, adapter, uploads);
-    const attempts = await Promise.all([limited.createUpload(user.scope, metadata, randomUUID()), limited.createUpload(user.scope, metadata, randomUUID())]);
+    const attempts = await Promise.all([limited.createUpload(user.scope, metadata,randomUUID()), limited.createUpload(user.scope, {...metadata},randomUUID())]);
     expect(new Set(attempts.map(upload=>upload.uploadId)).size).toBe(2);
     const upload = attempts[0]!;
     await storage.cancel(user.scope, upload.uploadId, randomUUID());
-    await expect(limited.createUpload(user.scope, metadata, randomUUID())).resolves.toHaveProperty('uploadId');
+    await expect(limited.createUpload(user.scope, {...metadata},randomUUID())).resolves.toHaveProperty('uploadId');
     await cleaner.sweep();
-    await expect(limited.createUpload(user.scope, metadata, randomUUID())).resolves.toHaveProperty('uploadId');
+    await expect(limited.createUpload(user.scope, metadata,randomUUID())).resolves.toHaveProperty('uploadId');
     expect(await databaseCounts(user.userId)).toEqual({ resources: 0, reservations: 0, tasks: 0, idempotency: 0 });
     expect((await root.query('SELECT storage_used_bytes,storage_reserved_bytes FROM users WHERE id=$1',[user.userId])).rows[0]).toEqual({storage_used_bytes:'0',storage_reserved_bytes:'0'});
     expect(await redis.keys(`${prefix}:storage:temporary:pending:*`)).toEqual([]);
@@ -278,9 +282,10 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
 
   it('checks capacity only at the business claim and serializes concurrent claims without losing receipts', async () => {
     const user=await fixture(), limitedClaims=new ResourceClaims({...config,storageQuotaBytes:13},uploads);
-    const candidates=await Promise.all([0,1].map(async()=>{
-      const upload=await storage.createUpload(user.scope,metadata,randomUUID());
-      await adapter.uploadPart(upload.uploadUrl,bytes);
+    const candidates=await Promise.all([0,1].map(async index=>{
+      const body=Buffer.from(index?'other-storage':'hello-storage');
+      const upload=await storage.createUpload(user.scope,{...metadata},randomUUID());
+      await adapter.uploadPart(upload.uploadUrl,body);
       await storage.complete(user.scope,upload.uploadId,randomUUID());
       return upload;
     }));
@@ -311,6 +316,81 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
       expect(await uploads.get(upload.uploadId)).toBeFalsy();
       await expect(access(`${directory}/${upload.resourceId}`)).rejects.toThrow();
     } finally { remove.mockRestore(); }
+  });
+
+  it('shares a resource ID across its user workspaces and maintains exact business reference counts', async () => {
+    const {user,upload}=await uploaded(true),firstRef=await claim(user,upload.resourceId),workspaceId=randomUUID();
+    await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'Another',false,$3)",[workspaceId,user.userId,randomUUID()]);
+    const repeated=await storage.createUpload(user.scope,{...metadata,fileName:'renamed.txt',workspaceId},randomUUID());
+    expect(repeated.resourceId).not.toBe(upload.resourceId);expect(repeated.uploadRequired).toBe(true);
+    const secondRef=randomUUID();
+    const attach=()=>transaction(pool,async tx=>{
+      await claims.ensure(tx,user.scope,workspaceId,[upload.resourceId]);
+      await attachResource(tx,user.userId,upload.resourceId,'message',secondRef,workspaceId);
+    });
+    await Promise.all([attach(),attach(),attach()]);
+    expect((await root.query('SELECT reference_count FROM resources WHERE resource_id=$1',[upload.resourceId])).rows[0].reference_count).toBe('2');
+    expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('13');
+    const other=await fixture(),separate=await storage.createUpload(other.scope,metadata,randomUUID());
+    expect(separate.resourceId).not.toBe(upload.resourceId);expect(separate.uploadRequired).toBe(true);
+    await expect(storage.playback(other.scope,upload.resourceId)).rejects.toMatchObject({code:'RESOURCE_NOT_FOUND'});
+    await transaction(pool,tx=>replaceResourceRefs(tx,user.userId,'message',firstRef,[],user.workspaceId));
+    expect((await root.query('SELECT reference_count FROM resources WHERE resource_id=$1',[upload.resourceId])).rows[0].reference_count).toBe('1');
+    expect((await root.query('SELECT task_id FROM storage_jobs WHERE resource_id=$1',[upload.resourceId])).rows).toEqual([]);
+    await expect(transaction(pool,async tx=>{
+      await replaceResourceRefs(tx,user.userId,'message',secondRef,[],workspaceId);throw new Error('BUSINESS_ROLLBACK');
+    })).rejects.toThrow('BUSINESS_ROLLBACK');
+    expect((await root.query('SELECT reference_count FROM resources WHERE resource_id=$1',[upload.resourceId])).rows[0].reference_count).toBe('1');
+    expect((await root.query('SELECT task_id FROM storage_jobs WHERE resource_id=$1',[upload.resourceId])).rows).toEqual([]);
+    await expect(storage.remove(user.scope,user.workspaceId,upload.resourceId,randomUUID())).rejects.toMatchObject({code:'RESOURCE_REFERENCED'});
+    await transaction(pool,tx=>replaceResourceRefs(tx,user.userId,'message',secondRef,[],workspaceId));
+    expect((await root.query('SELECT reference_count,status FROM resources WHERE resource_id=$1',[upload.resourceId])).rows[0]).toEqual({reference_count:'0',status:'deleting'});
+    await transaction(pool,tx=>replaceResourceRefs(tx,user.userId,'message',secondRef,[],workspaceId));
+    const jobs=(await root.query('SELECT j.task_id,t.workspace_id,t.state FROM storage_jobs j JOIN tasks t ON t.id=j.task_id WHERE j.resource_id=$1',[upload.resourceId])).rows;
+    expect(jobs).toHaveLength(1);expect(jobs[0]).toMatchObject({workspace_id:null,state:'queued'});
+    const engine=new TaskEngine(worker,15000,undefined,new StorageJobs(worker,adapter,config)),a=await engine.claim(jobs[0].task_id,randomUUID());
+    expect(a).toBeTruthy();await engine.execute(a!);
+    expect((await root.query('SELECT resource_id FROM resources WHERE resource_id=$1',[upload.resourceId])).rows).toEqual([]);
+    await expect(access(`${directory}/${upload.resourceId}`)).rejects.toThrow();
+    expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('0');
+  });
+
+  it('retries failed zero-reference deletion and resumes after hard deletion without repeating storage or occupancy changes',async()=>{
+    const {user,upload}=await uploaded(true),ref=await claim(user,upload.resourceId);
+    await transaction(pool,tx=>replaceResourceRefs(tx,user.userId,'message',ref,[],user.workspaceId));
+    const job=(await root.query('SELECT task_id FROM storage_jobs WHERE resource_id=$1',[upload.resourceId])).rows[0];
+    const jobs=new StorageJobs(worker,adapter,config),engine=new TaskEngine(worker,15000,undefined,jobs),a=await engine.claim(job.task_id,randomUUID());expect(a).toBeTruthy();
+    const remove=vi.spyOn(adapter,'remove').mockRejectedValueOnce(new Error('OSS_UNAVAILABLE'));
+    try{
+      await expect(jobs.execute(a!)).rejects.toThrow('OSS_UNAVAILABLE');
+      expect((await root.query('SELECT status,reference_count FROM resources WHERE resource_id=$1',[upload.resourceId])).rows[0]).toEqual({status:'deleting',reference_count:'0'});
+      expect((await root.query('SELECT completed_at FROM storage_jobs WHERE task_id=$1',[job.task_id])).rows[0].completed_at).toBeNull();
+      expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('13');
+      await access(`${directory}/${upload.resourceId}`);
+      // The file/usage transaction committed, but the process stopped before
+      // TaskEngine.finish. A fresh worker uses the existing job receipt.
+      const result=await jobs.execute(a!);
+      expect((await root.query('SELECT resource_id FROM resources WHERE resource_id=$1',[upload.resourceId])).rows).toEqual([]);
+      expect((await root.query('SELECT completed_at FROM storage_jobs WHERE task_id=$1',[job.task_id])).rows[0].completed_at).toBeInstanceOf(Date);
+      expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('0');
+      await expect(new StorageJobs(worker,adapter,config).execute(a!)).resolves.toEqual(result);
+      await engine.execute(a!);expect(remove).toHaveBeenCalledTimes(2);
+      expect((await root.query('SELECT state FROM tasks WHERE id=$1',[job.task_id])).rows[0].state).toBe('succeeded');
+      expect(await engine.claim(job.task_id,randomUUID())).toBeNull();
+      await expect(storage.playback(user.scope,upload.resourceId)).rejects.toMatchObject({code:'RESOURCE_NOT_FOUND'});
+    }finally{remove.mockRestore();}
+  });
+
+  it('does not deduplicate identical bytes across independent uploads by the same user',async()=>{
+    const {user,upload}=await uploaded(true);await claim(user,upload.resourceId);
+    const second=await storage.createUpload(user.scope,metadata,randomUUID());
+    expect(second.resourceId).not.toBe(upload.resourceId);expect(second.uploadRequired).toBe(true);
+    expect(second.headers).not.toHaveProperty('Content-MD5');
+    await adapter.uploadPart(second.uploadUrl,bytes);await storage.complete(user.scope,second.uploadId,randomUUID());
+    await claim(user,second.resourceId);
+    const files=(await root.query('SELECT resource_id,reference_count,sha256 FROM resources WHERE user_id=$1',[user.userId])).rows;
+    expect(files).toHaveLength(2);expect(files.every(row=>row.reference_count==='1'&&row.sha256===null)).toBe(true);
+    expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('26');
   });
 
   it('cancels a live multipart session without a durable business task and invalidates the old part URL', async () => {
@@ -354,7 +434,7 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
   it('creates the permanent resource, occupancy and reference only inside the business transaction', async () => {
     const { user, upload } = await uploaded(true);
     await claim(user, upload.resourceId);
-    expect((await root.query('SELECT user_id,workspace_id,size_bytes,status FROM resources WHERE resource_id=$1', [upload.resourceId])).rows[0]).toEqual({ user_id: user.userId, workspace_id: user.workspaceId, size_bytes: '13', status: 'ready' });
+    expect((await root.query('SELECT user_id,size_bytes,status FROM resources WHERE resource_id=$1', [upload.resourceId])).rows[0]).toEqual({ user_id: user.userId, size_bytes: '13', status: 'ready' });
     expect((await root.query('SELECT status,confirmed_bytes FROM storage_reservations WHERE user_id=$1', [user.userId])).rows).toEqual([{ status: 'confirmed', confirmed_bytes: '13' }]);
     expect((await root.query('SELECT storage_used_bytes,storage_reserved_bytes FROM users WHERE id=$1',[user.userId])).rows[0]).toEqual({storage_used_bytes:'13',storage_reserved_bytes:'0'});
     expect((await root.query('SELECT count(*)::int n FROM resource_refs WHERE resource_id=$1', [upload.resourceId])).rows[0].n).toBe(1);
@@ -391,8 +471,9 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
     // 13-byte file can still be claimed inside this user's 26-byte formal quota.
     expect(await uploads.get(upload.uploadId)).toBeTruthy();
     const limitedConfig={...config,storageQuotaBytes:26}, limited=new StorageService(pool,limitedConfig,adapter,uploads);
-    const next=await limited.createUpload(user.scope,metadata,randomUUID());
-    await adapter.uploadPart(next.uploadUrl,bytes);
+    const nextBytes=Buffer.from('other-storage');
+    const next=await limited.createUpload(user.scope,{...metadata},randomUUID());
+    await adapter.uploadPart(next.uploadUrl,nextBytes);
     await limited.complete(user.scope,next.uploadId,randomUUID());
     await transaction(pool,async tx=>{
       await new ResourceClaims(limitedConfig,uploads).ensure(tx,user.scope,user.workspaceId,[next.resourceId]);
@@ -418,8 +499,9 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
     const {user,upload}=await uploaded(true);
     await claim(user,upload.resourceId);
     const limited=new StorageService(pool,{...config,storageQuotaBytes:13},adapter,uploads);
-    const next=await limited.createUpload(user.scope,metadata,randomUUID());
-    await adapter.uploadPart(next.uploadUrl,bytes);
+    const nextBytes=Buffer.from('other-storage');
+    const next=await limited.createUpload(user.scope,{...metadata},randomUUID());
+    await adapter.uploadPart(next.uploadUrl,nextBytes);
     await limited.complete(user.scope,next.uploadId,randomUUID());
     const limitedClaims=new ResourceClaims({...config,storageQuotaBytes:13},uploads);
     const claimNext=()=>transaction(pool,async tx=>{
@@ -428,7 +510,7 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
     });
     await expect(claimNext()).rejects.toMatchObject({code:'STORAGE_QUOTA_EXCEEDED'});
     expect((await uploads.get(next.uploadId))?.status).toBe('completed');
-    await pool.query('DELETE FROM resource_refs WHERE resource_id=$1',[upload.resourceId]);
+    await transaction(pool,async tx=>{const refs=(await tx.query('SELECT ref_kind,ref_id_external,workspace_id FROM resource_refs WHERE resource_id=$1',[upload.resourceId])).rows;for(const r of refs)await replaceResourceRefs(tx,user.userId,r.ref_kind,r.ref_id_external,[],r.workspace_id);});
     await storage.remove(user.scope,user.workspaceId,upload.resourceId,randomUUID());
     expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('13');
     const task=(await root.query("SELECT task_id FROM storage_jobs WHERE resource_id=$1 AND operation='delete'",[upload.resourceId])).rows[0];
@@ -444,7 +526,7 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
     await engine.execute(attempt!);
     expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('0');
     expect(await engine.claim(task.task_id,randomUUID())).toBeNull();
-    expect((await storage.remove(user.scope,user.workspaceId,upload.resourceId,randomUUID())).status).toBe('deleted');
+    await expect(storage.remove(user.scope,user.workspaceId,upload.resourceId,randomUUID())).rejects.toMatchObject({code:'RESOURCE_NOT_FOUND'});
     expect((await root.query('SELECT storage_used_bytes FROM users WHERE id=$1',[user.userId])).rows[0].storage_used_bytes).toBe('0');
     await expect(adapter.uploadPart(upload.uploadUrl,bytes)).rejects.toMatchObject({code:'STORAGE_UPLOAD_NOT_FOUND'});
     await claimNext();
@@ -478,7 +560,7 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
     const user = await fixture();
     for (const storageDriver of ['local', 's3'] as const) {
       const service = new StorageService(pool, { ...config, storageDriver }, adapter, uploads);
-      await expect(service.createUpload(user.scope, metadata, randomUUID())).rejects.toMatchObject({ code: 'DIRECT_UPLOAD_NOT_CONFIGURED' });
+      await expect(service.createUpload(user.scope, metadata,randomUUID())).rejects.toMatchObject({ code: 'DIRECT_UPLOAD_NOT_CONFIGURED' });
     }
     expect(await redis.keys(`${prefix}:storage:temporary:record:*`)).toHaveLength(0);
   });
@@ -502,9 +584,9 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
       expect(init.statusCode, init.body).toBe(200); expect(init.headers['cache-control']).toBe('no-store');
       const upload = init.json().data;
       expect(upload.uploadId).toBe(upload.resourceId);
-      expect(new URL(upload.uploadUrl).searchParams.get('partNumber')).toBe('1');
+      expect(new URL(upload.uploadUrl!).searchParams.get('partNumber')).toBe('1');
       expect(upload.headers).toMatchObject({ 'Content-Type': 'text/plain', 'Content-Length': '13' });
-      for (const unsupported of [{ sha256: '0'.repeat(64) }, { sourceScene: 'note_import' }, { durationSeconds: 23 }, { distillToDigitalTwin: true }]) {
+      for (const unsupported of [{contentMd5:'a'.repeat(32)}, { sha256: '0'.repeat(64) }, { sourceScene: 'note_import' }, { durationSeconds: 23 }, { distillToDigitalTwin: true }]) {
         const result = await app.inject({ method: 'POST', url: '/api/v1/media/upload-token', headers: { ...headers, 'x-idempotency-key': randomUUID() }, payload: { ...metadata, sizeBytes: 13, ...unsupported } });
         expect(result.statusCode, result.body).toBe(400);
       }

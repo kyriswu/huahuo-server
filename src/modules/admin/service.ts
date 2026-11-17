@@ -47,9 +47,9 @@ export class AdminService {
   });
  }
  async resource(scope:AdminScope,id:string,trace:string){
-  const r=await this.pool.query('SELECT resource_id,user_id,workspace_id,file_name,mime_type,size_bytes,status,processing_status,created_at FROM resources WHERE resource_id=$1',[id]);
+  const r=await this.pool.query('SELECT resource_id,user_id,reference_count,file_name,mime_type,size_bytes,status,created_at FROM resources WHERE resource_id=$1',[id]);
   if(!r.rows[0])throw new DomainError(404,'RESOURCE_NOT_FOUND');await this.audit(scope.adminId,'resource.inspect',id,null,trace);
-  const x=r.rows[0];return {resourceId:x.resource_id,userId:x.user_id,workspaceId:x.workspace_id,fileName:x.file_name,mimeType:x.mime_type,sizeBytes:Number(x.size_bytes),status:x.status,processingStatus:x.processing_status,createdAt:x.created_at.toISOString()};
+  const x=r.rows[0];return {resourceId:x.resource_id,userId:x.user_id,referenceCount:Number(x.reference_count),fileName:x.file_name,mimeType:x.mime_type,sizeBytes:Number(x.size_bytes),status:x.status,createdAt:x.created_at.toISOString()};
  }
  async users(scope: AdminScope, input: AdminUserQuery, traceId: string): Promise<AdminUserList> {
   const page = input.page ?? 1, pageSize = input.pageSize ?? 20;

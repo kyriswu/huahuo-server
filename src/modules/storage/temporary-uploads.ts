@@ -8,7 +8,6 @@ export const TEMPORARY_UPLOAD_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 export interface TemporaryUploadInput {
   userId: string;
-  workspaceId: string;
   fileName: string;
   mimeType: string;
   sizeBytes: number;
@@ -69,7 +68,7 @@ local raw = redis.call('GET', KEYS[1])
 if not raw then return {-1} end
 local previous = cjson.decode(raw)
 local next = cjson.decode(ARGV[1])
-local immutable = {'id','userId','workspaceId','fileName','mimeType','sizeBytes','storageDriver','storageBucket','createdAt','expiresAt','idempotencyHash','requestHash'}
+local immutable = {'id','userId','fileName','mimeType','sizeBytes','storageDriver','storageBucket','createdAt','expiresAt','idempotencyHash','requestHash'}
 for _, field in ipairs(immutable) do
   if previous[field] ~= next[field] then return {-2} end
 end
@@ -130,7 +129,7 @@ function recordFrom(value: unknown): TemporaryUpload {
   try {
     if (typeof value !== 'string') throw new Error('UPLOAD_RECORD_INVALID');
     const record = JSON.parse(value) as TemporaryUpload;
-    if (!record || typeof record.id !== 'string' || typeof record.userId !== 'string' || typeof record.workspaceId !== 'string'
+    if (!record || typeof record.id !== 'string' || typeof record.userId !== 'string'
       || typeof record.fileName !== 'string' || typeof record.mimeType !== 'string' || record.storageDriver !== 'aliyun-oss'
       || typeof record.storageBucket !== 'string' || !Number.isSafeInteger(record.sizeBytes) || record.sizeBytes < 1
       || !Number.isSafeInteger(record.createdAt) || !Number.isSafeInteger(record.expiresAt) || record.expiresAt <= record.createdAt
@@ -193,7 +192,7 @@ export class RedisTemporaryUploads implements TemporaryUploadStore {
   async admit(input: TemporaryUploadInput, key: string): Promise<TemporaryUpload> {
     if (!key || !Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1 || input.storageDriver !== 'aliyun-oss') throw new DomainError(400, 'UPLOAD_METADATA_INVALID');
     const fields: TemporaryUploadInput = {
-      userId: input.userId, workspaceId: input.workspaceId, fileName: input.fileName, mimeType: input.mimeType,
+      userId: input.userId, fileName: input.fileName, mimeType: input.mimeType,
       sizeBytes: input.sizeBytes, storageDriver: input.storageDriver, storageBucket: input.storageBucket,
     };
     const idempotencyHash = hash(JSON.stringify([input.userId, key]));

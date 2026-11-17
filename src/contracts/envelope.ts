@@ -3,7 +3,7 @@ import { Type } from '@sinclair/typebox';
 import {validTraceId} from '../lib/trace.js';
 export function requestTrace(headers: Record<string, unknown>,url?:string) {
   // Xberg cannot set callback headers; the opaque callback URL carries the same ID.
-  if(url?.startsWith('/api/v1/document-parser/callbacks/')){
+  if(url?.startsWith('/internal/v1/document-parser/callbacks/')){
     const trace=new URL(url,'http://internal').searchParams.get('traceId');
     if(validTraceId(trace))return trace;
   }

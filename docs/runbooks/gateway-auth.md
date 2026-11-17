@@ -1,5 +1,7 @@
 # 入口鉴权应用契约
 
+内部接口的统一前缀、注册策略及出站请求规则见 [Server–Agent 协定](internal-services.md)。网关会话操作通过统一 preHandler 在请求校验后执行；可信业务身份和大体积解析回调能力授权在 onRequest 执行。
+
 应用 Compose 只维护 API、Admin、Worker、Scheduler、一次性 migrate 及已有数据依赖。宿主入口、域名、证书和切流独立维护，配置、脚本和操作手册不放在本仓库。API 的 `API_BIND_HOST` / `API_HOST_PORT` 是受限应用监听，不是匿名用户可直连的公开认证入口。
 
 ## 认证子请求

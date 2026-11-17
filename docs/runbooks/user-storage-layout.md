@@ -1,6 +1,6 @@
 # 通用上传、资源归属与存储清理
 
-2026-11-17 本地候选说明。通用上传只负责文件传输授权、元数据确认、临时归属和清理；上传之后用于笔记、头像、消息还是文档解析，由后续业务 API 决定。本次没有实施目录迁移、OSS 对象复制、套餐计价或新的扣费模型，也没有修改真实 Bucket、凭据或共享数据库。验证与未验边界见[通用上传验收](../acceptance/generic-uploads.md)，本文不代表已经发布或完成真实 OSS 联调。
+2026-11-17 本地候选说明。通用上传只负责文件传输授权、元数据确认、用户归属和清理；上传之后用于笔记、头像、消息还是文档解析，由后续业务 API 决定。资源不归属工作区，文件不可覆盖、没有业务版本。按用户最终决定不按内容去重，App 不计算 MD5/SHA；每次新上传产生新 UUID，同一资源 ID 可在用户自己的多个业务对象中引用。最后一个引用解除后自动清理。本次没有实施目录迁移、OSS 对象复制、套餐计价或新的扣费模型，也没有修改真实 Bucket、凭据或共享数据库。当前验证见[用户资源与当前笔记验收](../acceptance/user-resources-and-current-notes.md)，本文不代表已经发布或完成真实 OSS 联调。
 
 ## 项目现状
 
@@ -9,7 +9,7 @@
 | 普通图片、音频和文件上传 | `StorageService` 在 Redis 登记有效期为 24 小时的临时上传，签发只允许 part 1 的 OSS PUT URL；Server 控制初始化、完成和取消，complete 校验分片与 HEAD 元数据，不下载正文。此时不写 PG 上传表、资源表或容量记录 | 不计用户实际占用，不读取额度汇总或检查剩余空间；不建立临时字节计数，不增加临时上传数量／总量限制 |
 | 业务首次使用上传文件 | `ResourceClaims` 在该业务事务中核对有效临时回执，建立 `resources`、confirmed 容量记录及对应业务关系，并条件递增用户 `storage_used_bytes`；文件 UUID、resourceId 和 OSS Key UUID 保持相同 | 业务真正使用时才检查正式额度并计入 used；提交后尽力移除 Redis 临时记录，移除失败不重复计算占用，也不影响正式空间判定 |
 | 用户头像 | 复用普通资源，以 `resource_refs.ref_kind=avatar` 关联用户 | 不应另存一份或重复计量 |
-| Note 正文图片／导入附件 | 正文在 PG revision 表；图片统一 KBIMAGE 资源 UUID，当前关联和历史 revision pin 分开 | 正文移除引用不等于原文件可删；历史仍可读则仍保留文件 |
+| Note 正文图片／导入附件 | `note_parts` 每部分仅一行当前正文；图片统一 KBIMAGE 资源 UUID，只维护当前业务引用 | 编辑解除旧图引用，不再保留历史正文或历史图片 pin；其他业务仍引用时不能删除原文件 |
 | 手动文本图片 | 规范正文统一 KBIMAGE；已有 resource_refs 的 text-image 记录当前引用 | 编辑时同事务解除旧图并固定新图，不引入历史正文表 |
 | 文件入口的原始文档 | Server 接收链接与业务元信息；提交已完成的自有 resourceId 时由业务事务认领，不下载／复制原文件 | 只对经通用上传认领的自有原文件计入该占用；外部链接与衍生产物不等同于普通上传容量 |
 | 结构化解析产物 | `extractions/{sourceResourceId}/{parseRunId}/{hash}.md`、`.json.gz`、`.assets.json`；图片实际位置来自解析上传回执 | 文件入口资产在 `rag_document_assets`，FILE_UPLOAD 在提取清单；尚无覆盖所有产物的用户容量台账 |
@@ -22,12 +22,14 @@
 
 客户端只需配置一个 API Base URL，可在客户端上传组件中封装“申请 → 直传 → 确认”。实际文件连接使用 API 下发的 OSS 临时地址，文件字节不经过 Server；业务 JWT 只发给自己的 API，不发给 OSS。客户端可统计 PUT 的发送进度，但最终成功以 complete 响应为准。本仓库没有修改 App 或交付客户端 SDK，以下是其应遵守的协议。
 
-1. `POST /api/v1/media/upload-token`：传 `fileName`、`mimeType`、`sizeBytes` 和可选 `workspaceId`，带 JWT 与幂等键。已移除 `sourceScene`、`durationSeconds`、`distillToDigitalTwin` 和上传 SHA 参数。返回稳定的 `uploadId=resourceId`、`uploadUrl`、`method=PUT`、必需请求头、签名 `expiresAt` 与 24 小时 `retentionExpiresAt`。
-2. 客户端按返回的 URL／请求头直接 PUT 文件。URL 绑定具体 OSS uploadId、partNumber=1 和长度，不能改成普通对象 PUT、其他分片或 Complete 请求。签名最多一小时，未完成期间可在临时记录有效期内用原申请重试；24 小时有效期不因重试重新开始。
-3. `POST /api/v1/media/uploads/{uploadId}/complete`：Server 核对唯一分片的大小和 ETag，调用 OSS Complete，再 HEAD 校验字节、声明 MIME、上传身份和对象版本；完成记录仍只在 Redis。响应丢失可按同一个 uploadId 重试或查询状态，不应立即另开上传。`POST .../cancel` 只标记取消并让清理优先处理，返回 `cancel_pending` 不代表已经物理删除。
+1. `POST /api/v1/media/upload-token`：传 `fileName`、`mimeType`、`sizeBytes` 和可选 `workspaceId`，带 JWT 与 `X-Idempotency-Key`。同用户同键、同元数据在临时回执存在时返回相同上传 ID；同键改变文件元数据返回冲突，不同键独立分配 UUID。幂等只对小量元数据计算内部摘要，不读文件。可选工作区仅校验业务上下文，不写入资源归属。不接收 `contentMd5`、上传 SHA、`sourceScene`、`durationSeconds` 或 `distillToDigitalTwin`。
+2. `uploadRequired=true` 时，返回 `uploadId=resourceId`、`uploadUrl`、`method=PUT`、必需请求头、签名 `expiresAt` 与 24 小时 `retentionExpiresAt`。客户端按这些 URL／头直接 PUT 文件；签名绑定具体 OSS uploadId、partNumber=1、长度和 Content-Type，不能改成其他分片或完成请求，不要求客户端计算内容摘要。签名最多一小时，重试不延长 24 小时有效期。
+3. `POST /api/v1/media/uploads/{uploadId}/complete`（带幂等键）：Server 核对唯一分片及大小，使用 OSS 返回的分片 ETag 完成上传，再 HEAD 校验字节、声明 MIME、上传身份和物理对象定位；完成记录仍只在 Redis。响应丢失可按同一个 uploadId 重试或查询状态，不应立即另开上传。`POST .../cancel` 只标记取消并让清理优先处理，返回 `cancel_pending` 不代表已经物理删除。
 4. 后续业务 API 通过 `resourceId` 调用 `ResourceClaims`，在业务事务中建立资源及归属。上传成功本身不创建笔记、文档、解析任务或计费事件，也不意味着完成了业务保存。
 
-complete 仅核对元数据，不做病毒扫描、真实文件格式识别、音视频时长测量或整文件 SHA-256。返回 `sha256:null`，不能把 OSS ETag 当作 SHA-256。后续业务需要解析或内容检查时，由该业务另行执行。
+原申请已完成且临时回执仍存在时，同键重试直接返回 `uploadRequired=false`、原 `resourceId` 和 `resource` 元信息，URL／method／签名到期为空；客户端跳过重复 PUT/complete。回执保持原 24 小时期限，认领成功后删除；业务已经持有的资源 ID 可直接用于之后的业务，不应重新申请上传来查找同一文件。同名、同大小甚至完全相同字节的新上传也不合并，不同用户的上传始终独立。
+
+Server 不读取文件字节，不做内容去重、病毒扫描、真实格式识别、音视频时长测量或整文件 SHA-256；`sha256` 可空备用，新资源返回 `sha256:null`。不将 OSS ETag 当成业务文件哈希或安全证明。后续内容处理由业务执行。
 
 客户端获得的是 UploadPart 能力。OSS Complete 成功后该 uploadId 失效，原分片 URL 不能在文件删除后重新创建完整对象，见 [CompleteMultipartUpload](https://www.alibabacloud.com/help/en/oss/developer-reference/completemultipartupload)。取消也由 Server 控制；仍在传输中的分片残留与初始化响应丢失，需要部署时核对 OSS 的未完成分片生命周期策略，不能声称单次 Abort 已证明全部物理字节消失。
 
@@ -42,6 +44,10 @@ complete 仅核对元数据，不做病毒扫描、真实文件格式识别、�
 ## 对象定位与容量
 
 普通上传保持 `uploadId = resourceId = Object Key UUID`；OSS 适配器仅叠加已有的环境 `keyPrefix`，不加入用户目录、临时目录或文件后缀。临时文件被业务认领后不移动、不复制、不改标签。`resources.object_key` 继续使用 UUID，文件名只用于展示；Note／手动文本的 KBIMAGE、解析批次目录和衍生产物路径保持各自已有约定。
+
+`resources` 只保留 13 个字段：`resource_id`、`user_id`、`file_name`、`mime_type`、`size_bytes`、`sha256`、`object_key`、`object_version`、`storage_driver`、`storage_bucket`、`reference_count`、`status`、`created_at`。无工作区、重复上传 ID、解析状态、MD5 或软删除时间。主键用于按 ID 访问；`(user_id, created_at DESC, resource_id)` 支持用户明细分页。已有资源/业务引用索引保留，不新增内容去重索引、分区、分库或缓存层。
+
+工作区和业务对象放在 `resource_refs`；头像引用的工作区为空。引用次数按不同业务对象计数，同一笔记出现多次同一资源 ID 算一次。新增、替换、解除引用与业务写入、`reference_count` 增减同事务；重复保存不增计数，失败回滚也恢复计数。文件 ID 可跨自己的工作区复用，工作区归属仍由各业务验证，不能读取其他用户文件。最后一个引用解除时，同事务标记 `deleting` 并提交现有 `storage.delete` 任务；无延迟保留策略，不需要客户端另调删除。Worker 成功删除 OSS 后，同事务硬删资源行、释放正式占用，并在原任务记录完成时间以支持重试；删除失败保留待删记录和用量，按原任务机制重试，不新增清理组件。独立重传同样内容属于新文件，分别计量。
 
 申请上传、直传、complete 和临时预览都不计入用户实际占用，也不读取用户额度汇总或判断剩余空间。Redis 仅保存临时回执、幂等和到期清理索引，不维护 pending 字节计数。本次不增加异常上传限流，也不增加临时上传数量或总量限制；现有身份、归属、文件参数及完成元数据校验仍保留。
 
@@ -71,12 +77,14 @@ Worker 的 maintenance 执行路径约每 60 秒运行一轮，最多处理 10 �
 
 Redis 的持久化与 noeviction 是保留临时所有权信息的前提，现有 Compose 使用 AOF／noeviction。即便如此，灾难性清空、磁盘丢失或未持久化窗口仍可能丢失临时回执和清理索引；此时不能凭 Redis 缺失自动删除 OSS。需要通过 OSS 清单与 PG 资源对账，人工处理未认领对象。本轮没有增加全桶扫描平台，也不承诺 Redis 丢失后零残留恢复。
 
-正式资源删除继续使用引用检查及现有 Worker 删除任务；历史 Note revision、文档来源或其他引用仍存在时，不承诺移除一处正文就立即释放物理空间。临时上传清理不改变这些业务删除语义。
+正式资源删除继续使用引用检查及现有 Worker 删除任务；文档来源、其他业务对象或回收站中的当前笔记仍保留引用时，移除一处正文不会释放文件。Note 不再保留历史正文和历史图片 pin。临时上传清理不改变这些业务删除语义。
 
 ## 迁移与发布边界
 
 新增 `0007_generic_direct_upload.sql` 退役 PG `upload_sessions` 和资源上的 `source_scene`、`duration_seconds`，保留已登记资源、引用、实测 hash 和正式占用；不重写任何已执行迁移，也不增加物理外键。旧二进制与新 Schema 不兼容，需要停止旧上传受理、处理在途上传／预留／旧清理任务并排空相关角色后切换。
 
 后续 `0008` 迁移为 `users` 增加 `storage_used_bytes`、`storage_reserved_bytes`，用已有容量明细初始化汇总，之后由相关写入事务同步维护。明细索引用于统计／对账，不引入周期聚合或新的统计表。目标实际数据规模、迁移初始化及汇总一致性需按本次发布清单验收，不能用默认零值代替已有占用。
+
+`0010` 将 Note 正文收敛为 `note_parts` 当前值，移除历史正文及历史图片 pin，保留当前内容、修订标记和 ETag；`0011` 移除资源业务归属和软删除时间，按真实引用初始化 `reference_count`，建立用户明细索引。原删除任务增加完成回执，只给 Worker 资源 DELETE 及回执列 UPDATE 权限；用户级资源删除任务无需工作区，其他任务归属约束保留。迁移先验证引用用户及生命周期，无物理外键；冻结历史 SQL 不修改。不增加 MD5 字段/去重索引或旧参数兼容路径。
 
 迁移 guard 会拒绝仍活跃的旧记录、预留、授权期限和清理任务，但数据库检查无法证明 OSS 上已开始的普通 PUT 已经结束。发布前必须另行确认旧签名与在途远端写入已经处理完毕；不能只把数据库 expires_at 改成过去或等 guard 通过就认为云端安全。迁移不自动删 OSS、转移旧上传、释放旧预留或清库。具体验收与待执行项以[通用上传验收](../acceptance/generic-uploads.md)及本次发布清单为准。

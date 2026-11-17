@@ -10,6 +10,6 @@ export const NodeSchema=Type.Object({
 },Strict);
 export const ConfigurationResponse=Type.Object({revision:Type.Integer(),values:Type.Record(Type.String(),Type.Unknown()),updatedAt:Type.String(),
  definitions:Type.Array(Type.Object({key:Type.String(),category:Type.String(),label:Type.String(),description:Type.String(),type:Type.String(),default:Type.Unknown(),min:Type.Optional(Type.Number()),max:Type.Optional(Type.Number()),options:Type.Optional(Type.Array(Type.String())),effect:Type.String()})),
- bootstrap:Type.Object({processingNodesEnabled:Type.Boolean(),cloudControlEnabled:Type.Boolean(),billingMode:Type.String(),uploadHardMaxBytes:Type.Integer(),environmentKeys:Type.Array(Type.String())}),
+ bootstrap:Type.Object({cloudControlEnabled:Type.Boolean(),billingMode:Type.String(),uploadHardMaxBytes:Type.Integer(),environmentKeys:Type.Array(Type.String())}),
  billingPolicies:Type.Array(Type.Object({policy_version:Type.String(),mode:Type.String(),monthly_credit_limit:Type.String(),currency:Type.String()})),
 });

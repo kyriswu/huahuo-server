@@ -47,11 +47,8 @@ SELECT 'removed_inspection_jobs_retired', NOT EXISTS (
     WHERE t.kind='storage.inspect' AND o.status IN ('pending','delivering')
 )
 UNION ALL
-SELECT 'resource_processing_constraint_validated', EXISTS (
-  SELECT 1 FROM pg_constraint WHERE conrelid='public.resources'::regclass
-    AND conname='resources_processing_status_check' AND convalidated
-    AND pg_get_constraintdef(oid) LIKE '%metadata_confirmed%'
-    AND pg_get_constraintdef(oid) NOT LIKE '%inspection_pending%'
+SELECT 'resource_processing_state_removed', NOT EXISTS (
+ SELECT 1 FROM pg_attribute WHERE attrelid='public.resources'::regclass AND attname='processing_status' AND NOT attisdropped
 )
 UNION ALL
 SELECT 'generic_upload_business_fields_removed', NOT EXISTS (
@@ -66,9 +63,9 @@ SELECT 'claimed_resource_role_access',
   AND has_column_privilege('huahuo_api','public.storage_reservations','confirmed_bytes','INSERT')
   AND has_column_privilege('huahuo_worker','public.resources','status','UPDATE')
 UNION ALL
-SELECT 'claimed_resource_identity_index', EXISTS (
+SELECT 'claimed_resource_owner_index', EXISTS (
   SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
-    WHERE i.indrelid='public.resources'::regclass AND c.relname='resources_upload_id_key' AND i.indisvalid
+    WHERE i.indrelid='public.resources'::regclass AND c.relname='resources_owner_created' AND i.indisvalid AND i.indpred IS NULL
 )
 UNION ALL
 SELECT 'storage_active_occupancy_index', EXISTS (
@@ -129,4 +126,21 @@ SELECT 'notes_current_parts_only', to_regclass('public.note_part_revisions') IS 
   AND to_regclass('public.note_parts') IS NOT NULL
   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.note_parts'::regclass AND contype='p' AND pg_get_constraintdef(oid)='PRIMARY KEY (note_id, part)')
   AND has_table_privilege('huahuo_api','public.note_parts','UPDATE')
-  AND has_table_privilege('huahuo_worker','public.note_parts','SELECT');
+  AND has_table_privilege('huahuo_worker','public.note_parts','SELECT')
+UNION ALL
+SELECT 'resources_user_owned_only', NOT EXISTS (
+ SELECT 1 FROM pg_attribute WHERE attrelid='public.resources'::regclass AND attname IN ('workspace_id','upload_id','deleted_at') AND NOT attisdropped
+) AND EXISTS (
+ SELECT 1 FROM pg_attribute WHERE attrelid='public.resources'::regclass AND attname='reference_count' AND attnotnull AND NOT attisdropped
+)
+UNION ALL
+SELECT 'resource_hard_delete_role_access',
+ has_table_privilege('huahuo_worker','public.resources','DELETE')
+ AND NOT has_table_privilege('huahuo_api','public.resources','DELETE')
+ AND has_column_privilege('huahuo_worker','public.storage_jobs','completed_at','UPDATE')
+ AND NOT has_column_privilege('huahuo_worker','public.storage_jobs','resource_id','UPDATE')
+UNION ALL
+SELECT 'resource_user_delete_task_scope', EXISTS (
+ SELECT 1 FROM pg_constraint WHERE conrelid='public.tasks'::regclass AND conname='tasks_check' AND convalidated
+  AND pg_get_constraintdef(oid) LIKE '%storage.delete%'
+);

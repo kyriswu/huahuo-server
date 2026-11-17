@@ -1,8 +1,16 @@
+## 用户资源与当前笔记参照（2026-11-17）
+
+沿用本轮只读核对的 App 提交 `bf23c1b14d847de5561c1ba66bd4192dc308b356`；`lib` 未发现上传 HTTP、contentMd5/uploadRequired 或 Note 历史正文的消费者。当前改动只在 Server：资源只按用户归属、同一资源 ID 多处引用及计数、零引用自动硬删除、Note 只存当前正文；旧 part 修订入参不再接受。按用户最终要求不做内容去重，客户端不计算 MD5/SHA；接线时以幂等键重试同次上传、用 resourceId 复用文件，按 uploadRequired 决定是否直传，并用 If-Match 编辑当前 Note，不将修订 ID 当历史正文查询键。本轮不写 App、不运行 Flutter，不宣称移动端上传已联调。参见[当前协议与验证](acceptance/user-resources-and-current-notes.md)。
+
+## 内部 HTTP 协定参照（2026-11-17）
+
+只读复核真实App提交bf23c1b14d847de5561c1ba66bd4192dc308b356，api_endpoints.dart定义Server/Agent公开Base URL，未发现内部路径或可信身份头消费者；其SHA256仍为17bfcbf28b18fb7aa7a23f6e51a9bf0cdcb4f1933eda29b45b61261f7d5606a1，http_auth_repository.dart仍为d41d211a7febcb2b53c6603ece3b17c4c471cf638b8ff1669573fc181d10e6d5。本轮仅修改Server内部注册与出站封装；不写App，不读取/修改其他Agent项目，不宣称双方联调。见[协定](runbooks/internal-services.md)。
+
 ## 通用上传解耦参照（2026-11-17）
 
 本轮只读核对真实 App，HEAD 为 `bf23c1b14d847de5561c1ba66bd4192dc308b356`，开始和核对后工作树均干净。当前 `lib` 未发现 `upload-token`、`media/uploads`、`sourceScene`、`durationSeconds` 或 `resourceId` 的上传 HTTP 消费实现。`core/platform/inspiration_files.dart` 仅负责本地选取/分享文件；`features/home/presentation/upload_more_menu.dart` 仅为菜单，不能作为云上传已接线的证据。
 
-后端通用上传不再接收场景、音视频时长或数字分身参数，只负责文件授权、校验和用户/工作区归属。上传后的业务由其他 API 主动引用 `resourceId`。客户端预期通过一个上传组件封装申请、OSS 直传和完成确认；此次未修改 App、未运行 Flutter，也未验证移动端上传进度或断网恢复。现有 `api_endpoints.dart` 仍分别声明 Server/Agent 地址，不代表已经实现统一上传组件。
+后端通用上传不再接收场景、音视频时长或数字分身参数，只负责文件授权、校验和用户归属；工作区属于后续业务上下文。上传后的业务由其他 API 主动引用 `resourceId`。客户端预期通过一个上传组件封装申请、OSS 直传和完成确认；此次未修改 App、未运行 Flutter，也未验证移动端上传进度或断网恢复。现有 `api_endpoints.dart` 仍分别声明 Server/Agent 地址，不代表已经实现统一上传组件。
 
 本轮实际读取文件及 SHA-256：
 

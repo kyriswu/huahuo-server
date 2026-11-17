@@ -35,7 +35,6 @@ const config = mockOssUploadConfig(loadConfig('api-server', { ...process.env, ..
   APP_TOKEN_SECRET: 'note-image-test-'.repeat(5), APP_PUBLIC_BASE_URL: 'https://notes.test', ALLOW_MOCK_PROVIDERS: 'true', RAG_PROVIDER_MODE: 'mock',
   RAG_RERANK_PROVIDER: 'disabled', RAG_SOURCE_ALLOWED_HOSTS: 'fixture.test', STORAGE_DRIVER: 'local', STORAGE_LOCAL_ROOT: directory }));
 config.kb.noteEnabled=true;
-config.processingNodes.enabled=true; // File receipt fixtures represent already-completed external extraction.
 const root = poolFor(loadConfig('migrate', { DATABASE_URL: url })), pool = poolFor(config);
 const adapter = new MockOssStorageAdapter(directory), storage = new StorageService(pool, config, adapter);
 const claims = new ResourceClaims(config, storage.uploads), assets = new AssetService(pool, config.appTokenSecret!, config, undefined, claims);
@@ -48,7 +47,7 @@ async function fixture() {
 }
 async function image(f: Awaited<ReturnType<typeof fixture>>, workspaceId = f.workspaceId, mimeType = 'image/png') {
   const bytes = mimeType === 'image/png' ? png : Buffer.from('plain document');
-  const upload = await storage.createUpload(f.scope, { fileName: mimeType === 'image/png' ? '图.png' : 'test.txt', mimeType, sizeBytes: BigInt(bytes.length), workspaceId }, randomUUID());
+  const upload = await storage.createUpload(f.scope, { fileName: mimeType === 'image/png' ? '图.png' : 'test.txt', mimeType, sizeBytes: BigInt(bytes.length), workspaceId },randomUUID());
   await adapter.uploadPart(upload.uploadUrl, bytes);
   await storage.complete(f.scope, upload.uploadId, randomUUID()); return upload.resourceId;
 }
@@ -93,15 +92,17 @@ describe('canonical Note images with real isolated PostgreSQL and mocked OSS', (
     const external = `![外链](https://other.test/${id}?Signature=external)`;
     await expect(service.createNote(f.scope, f.workspaceId, { title: '外链', parts: { raw: external } }, randomUUID())).rejects.toMatchObject({ code: 'NOTE_IMAGE_UPLOAD_REQUIRED' });
   });
-  it('rejects foreign, other-workspace, missing and non-image resources without partial writes', async () => {
+  it('rejects foreign, missing and non-image files while allowing reuse across the owning user workspaces', async () => {
     const a = await fixture(), b = await fixture(), foreign = await image(b), document = await image(a, a.workspaceId, 'text/plain');
     const otherWorkspace = randomUUID();
     await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'Other',false,$3)", [otherWorkspace, a.scope.userId, randomUUID()]);
     const other = await image(a, otherWorkspace);
-    for (const id of [foreign, other, randomUUID()]) await expect(assets.createNote(a.scope, a.workspaceId, { title: 'bad', parts: { raw: `![x](asset://${id})` } }, randomUUID())).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
+    for (const id of [foreign, randomUUID()]) await expect(assets.createNote(a.scope, a.workspaceId, { title: 'bad', parts: { raw: `![x](asset://${id})` } }, randomUUID())).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
     await expect(assets.createNote(a.scope, a.workspaceId, { title: 'bad', parts: { raw: `![x](asset://${document})` } }, randomUUID())).rejects.toMatchObject({ code: 'NOTE_RESOURCE_NOT_IMAGE' });
     for (const target of ['data:image/png;base64,AA', 'file:///private/image.png', 'asset://not-a-uuid']) await expect(assets.createNote(a.scope, a.workspaceId, { title: 'bad', parts: { raw: `![x](${target})` } }, randomUUID())).rejects.toMatchObject({ statusCode: 400 });
     expect((await root.query('SELECT count(*)::int n FROM notes WHERE workspace_id=$1', [a.workspaceId])).rows[0].n).toBe(0);
+    const shared=await assets.createNote(a.scope,a.workspaceId,{title:'shared',parts:{raw:`![shared](asset://${other})`}},randomUUID());
+    expect(shared.resourceRefs.map(ref=>ref.resourceId)).toContain(other);
   });
   it('rejects image identities from another bucket or storage driver before writing a note', async () => {
     const f = await fixture(), wrongBucket = await image(f), wrongDriver = await image(f);

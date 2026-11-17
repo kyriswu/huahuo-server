@@ -16,7 +16,7 @@ function store(namespace = randomUUID()) {
   return { uploads, config: { redisCacheUrl: redisUrl!, queuePrefix }, base: `${queuePrefix}:storage:temporary:` };
 }
 function input(overrides: Partial<TemporaryUploadInput> = {}): TemporaryUploadInput {
-  return { userId: randomUUID(), workspaceId: randomUUID(), fileName: '任意文件.bin', mimeType: 'application/octet-stream', sizeBytes: 10, storageDriver: 'aliyun-oss', storageBucket: 'isolated-fixture', ...overrides };
+  return { userId: randomUUID(), fileName: '任意文件.bin', mimeType: 'application/octet-stream', sizeBytes: 10, storageDriver: 'aliyun-oss', storageBucket: 'isolated-fixture', ...overrides };
 }
 async function redisTime() { const [seconds, microseconds] = await client.time(); return Number(seconds) * 1000 + Math.floor(Number(microseconds) / 1000); }
 async function ownKeys() {
@@ -96,7 +96,7 @@ describe('temporary uploads: real isolated Redis, no PostgreSQL or OSS calls', (
   it('rejects changes to ownership, size, expiry and idempotency identity', async () => {
     const { uploads } = store(); const record = await uploads.admit(input(), randomUUID());
     for (const changed of [
-      { userId: randomUUID() }, { workspaceId: randomUUID() }, { sizeBytes: 11 }, { fileName: 'other.bin' },
+      { userId: randomUUID() }, { sizeBytes: 11 }, { fileName: 'other.bin' },
       { expiresAt: record.expiresAt + 1 }, { idempotencyHash: 'a'.repeat(64) }, { requestHash: 'b'.repeat(64) },
     ]) await expect(uploads.save({ ...record, ...changed })).rejects.toMatchObject({ code: 'UPLOAD_RECORD_CONFLICT' });
     expect(await uploads.get(record.id)).toEqual(record);

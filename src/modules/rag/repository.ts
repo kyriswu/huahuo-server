@@ -13,7 +13,7 @@ import type { TocStatus } from '../../lib/document-processing/types.js';
 import type { StoragePort } from '../storage/port.js';
 import { publicToc, readCanonicalSection, type CanonicalTocItem } from './canonical-toc.js';
 import {validUuid} from '../../integrations/document-extraction.js';
-import {attachResource} from '../storage/references.js';
+import {attachResource,replaceResourceRefs} from '../storage/references.js';
 import type { ResourceClaims } from '../storage/resource-claims.js';
 import {TaskService} from '../tasks/service.js';
 import type {TaskRow} from '../tasks/model.js';
@@ -65,7 +65,6 @@ export class RagIngestionRepository {
     if(!this.config.enabled)throw new DomainError(503,'RAG_INGESTION_DISABLED');
     const normalized={ossUrl:hostAllowed(input.ossUrl,this.config.sourceAllowedHosts,this.appEnv==='production'),fileName:input.fileName.trim(),mimeType:input.mimeType.split(';',1)[0]!.trim().toLowerCase()};
     if(!normalized.fileName||normalized.fileName.length>255||/[\0\\/]/.test(normalized.fileName))throw new DomainError(400,'RAG_FILE_NAME_INVALID');
-    if(!this.appConfig.processingNodes.enabled)throw new DomainError(503,'DOCUMENT_PARSER_NOT_CONFIGURED');
     const mode = modeFor(normalized.fileName, normalized.mimeType);
     if((input.sourceResourceId!==undefined&&!validUuid(input.sourceResourceId))||(input.parseRunId!==undefined&&!validUuid(input.parseRunId)))throw new DomainError(400,'DOCUMENT_EXTRACTION_CONTEXT_INVALID');
     const format = 'markdown';
@@ -83,7 +82,7 @@ export class RagIngestionRepository {
       let sourceResource:{object_key:string;object_version:string|null;sha256:string|null;size_bytes:string;mime_type:string;storage_driver:string;storage_bucket:string}|undefined;
       if(input.sourceResourceId){
         await this.resourceClaims?.ensure(tx,scope,workspace.id,[input.sourceResourceId]);
-        sourceResource=(await tx.query<NonNullable<typeof sourceResource>>("SELECT object_key,object_version,sha256,size_bytes,mime_type,storage_driver,storage_bucket FROM resources WHERE resource_id=$1 AND user_id=$2 AND workspace_id=$3 AND status='ready' FOR UPDATE",[input.sourceResourceId,scope.userId,workspace.id])).rows[0];
+        sourceResource=(await tx.query<NonNullable<typeof sourceResource>>("SELECT object_key,object_version,sha256,size_bytes,mime_type,storage_driver,storage_bucket FROM resources WHERE resource_id=$1 AND user_id=$2 AND status='ready' FOR UPDATE",[input.sourceResourceId,scope.userId])).rows[0];
         if(!sourceResource)throw new DomainError(404,'RESOURCE_NOT_FOUND');
         if(sourceResource.mime_type!==normalized.mimeType)throw new DomainError(400,'RAG_FILE_TYPE_MISMATCH');
         assertResourceUrl(normalized.ossUrl,sourceResource.object_key,sourceResource.object_version,sourceResource.storage_driver,sourceResource.storage_bucket,this.appConfig);
@@ -175,6 +174,7 @@ export class RagIngestionRepository {
   async action(scope:Scope,jobId:string,action:'delete'|'retry-toc'){
     return transaction(this.pool,async tx=>{
       await assertScope(tx,scope);
+      if(action==='delete')await this.resourceClaims?.lockAccount(tx,scope);
       // Match the worker's Task -> source lock order before taking the source row lock.
       const original=action==='delete'?(await tx.query<TaskRow>(`SELECT t.* FROM tasks t JOIN rag_ingestion_versions v ON v.task_id=t.id
         WHERE v.task_id=$1 AND v.user_id=$2 AND t.user_id=v.user_id AND t.workspace_id=v.workspace_id FOR UPDATE OF t`,[jobId,scope.userId])).rows[0]:undefined;
@@ -184,7 +184,7 @@ export class RagIngestionRepository {
       if(action==='delete'){
         if(original)await new TaskService(this.pool,this.appConfig.appTokenSecret!).change(tx,original,'cancel');
         await tx.query('UPDATE rag_ingestion_versions SET deleted_at=coalesce(deleted_at,now()),active=false,cleanup_status=$2 WHERE id=$1',[version.id,'pending']);
-        await tx.query("DELETE FROM resource_refs WHERE ref_kind='document-source' AND ref_id_external=$1 AND user_id=$2 AND workspace_id=$3",[version.id,scope.userId,version.workspace_id]);
+        await replaceResourceRefs(tx,scope.userId,'document-source',version.id,[],version.workspace_id);
       }
       else await tx.query("UPDATE rag_ingestion_versions SET toc_status='pending',toc_error=NULL WHERE id=$1",[version.id]);
       const taskId=randomUUID(),inputId=randomUUID();
