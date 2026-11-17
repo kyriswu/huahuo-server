@@ -24,7 +24,6 @@ x-backend: &backend
       max-file: '3'
 
 x-app-env: &app-env
-  PROCESSING_NODES_ENABLED: ${PROCESSING_NODES_ENABLED:-false}
   PROCESSING_NODES_CLOUD_CONTROL_ENABLED: ${PROCESSING_NODES_CLOUD_CONTROL_ENABLED:-}
   HTTP_UPLOAD_HARD_MAX_BYTES: ${HTTP_UPLOAD_HARD_MAX_BYTES:-2147483648}
   PROCESSING_NODE_LEASE_MS: ${PROCESSING_NODE_LEASE_MS:-30000}
@@ -140,6 +139,7 @@ services:
       STORAGE_LOCAL_ROOT: /app/var/storage
       STORAGE_ALIYUN_OSS_REGION: ${STORAGE_ALIYUN_OSS_REGION:-cn-beijing}
       STORAGE_ALIYUN_OSS_ENDPOINT: ${STORAGE_ALIYUN_OSS_ENDPOINT:-https://oss-cn-beijing.aliyuncs.com}
+      STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT: ${STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT:-}
       STORAGE_ALIYUN_OSS_BUCKET: ${STORAGE_ALIYUN_OSS_BUCKET:-}
       ALIYUN_RAM_ACCESS_KEY_ID: ${ALIYUN_RAM_ACCESS_KEY_ID:-}
       ALIYUN_RAM_ACCESS_KEY_SECRET: ${ALIYUN_RAM_ACCESS_KEY_SECRET:-}
@@ -204,6 +204,7 @@ services:
       STORAGE_LOCAL_ROOT: /app/var/storage
       STORAGE_ALIYUN_OSS_REGION: ${STORAGE_ALIYUN_OSS_REGION:-cn-beijing}
       STORAGE_ALIYUN_OSS_ENDPOINT: ${STORAGE_ALIYUN_OSS_ENDPOINT:-https://oss-cn-beijing.aliyuncs.com}
+      STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT: ${STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT:-}
       STORAGE_ALIYUN_OSS_BUCKET: ${STORAGE_ALIYUN_OSS_BUCKET:-}
       ALIYUN_RAM_ACCESS_KEY_ID: ${ALIYUN_RAM_ACCESS_KEY_ID:-}
       ALIYUN_RAM_ACCESS_KEY_SECRET: ${ALIYUN_RAM_ACCESS_KEY_SECRET:-}
@@ -221,7 +222,11 @@ services:
       - user_files:/app/var/storage
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
-    healthcheck: *health
+    healthcheck:
+      <<: *health
+      # Probe promptly at startup; avoid spawning Node every 5s while idle.
+      interval: 30s
+      start_interval: 5s
     # DB drain budget controls exit; this ceiling must not kill a 60-minute drain early.
     stop_grace_period: 3630s
     mem_limit: ${WORKER_MEMORY_LIMIT:-1g}
@@ -243,7 +248,10 @@ services:
     volumes:
       - ./infra/certs:/app/certs:ro
     depends_on: *runtime-deps
-    healthcheck: *health
+    healthcheck:
+      <<: *health
+      interval: 30s
+      start_interval: 5s
     # DB drain budget controls exit; this ceiling must not kill a 60-minute drain early.
     stop_grace_period: 3630s
     mem_limit: ${SCHEDULER_MEMORY_LIMIT:-256m}

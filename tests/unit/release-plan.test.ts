@@ -43,6 +43,24 @@ describe('reviewed release plan', () => {
   it('permits a test health plan without interpreting it as production approval', async () => {
     plan.smoke = 'health'; expect((await validateReleasePlan(plan, root)).smoke).toBe('health');
   });
+  it('accepts an explicit Admin-only release without restarting unrelated roles', async () => {
+    plan.services = ['admin'];
+    expect(await validateReleasePlan(plan, root)).toMatchObject({ serviceCount: 1, migrationCount: 0 });
+  });
+  it('requires declared configuration changes to include their affected runtime roles', async () => {
+    plan.services = ['admin'];
+    plan.configuration.changes = [{ key: 'WORKER_OPTION', operation: 'add', roles: ['worker'], required: false, hasDefault: true }];
+    await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+  });
+  it('does not restart an unrelated role solely to remove an unused optional ENV key', async () => {
+    plan.services = ['admin'];
+    plan.configuration.changes = [{ key: 'RETIRED_OPTION', operation: 'remove', roles: ['worker'], required: false, hasDefault: false }];
+    expect(await validateReleasePlan(plan, root)).toMatchObject({ serviceCount: 1 });
+  });
+  it('keeps schema upgrades on the full-role handover path', async () => {
+    plan.services = ['admin']; plan.database.migrations = ['0002_schema.sql'];
+    await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+  });
   it('requires every cumulative migration since the deployed base, not just the latest commit', async () => {
     await put('migrations/0002_first.sql', 'SELECT 1;'); commit();
     await put('migrations/0003_second.sql', 'SELECT 2;'); await verifyFile(); commit();
