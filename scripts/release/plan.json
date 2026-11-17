@@ -39,27 +39,7 @@
         "hasDefault": true
       },
       {
-        "key": "STORAGE_ALIYUN_OSS_REGION",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "worker"
-        ],
-        "required": false,
-        "hasDefault": true
-      },
-      {
         "key": "STORAGE_ALIYUN_OSS_ENDPOINT",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "worker"
-        ],
-        "required": true,
-        "hasDefault": false
-      },
-      {
-        "key": "STORAGE_ALIYUN_OSS_BUCKET",
         "operation": "change",
         "roles": [
           "api-server",

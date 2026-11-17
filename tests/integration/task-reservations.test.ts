@@ -38,9 +38,9 @@ async function fixture(options: {
   await insertFixtureSession(root, userId, sessionId);
   await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'reservation fixture',true,$3)", [workspaceId, userId, randomUUID()]);
   const state = options.state ?? 'queued', attempt = options.attempt ?? 0;
-  await root.query(`INSERT INTO tasks(trace_id,id,user_id,workspace_id,kind,queue,state,attempt_no,max_attempts,
+  await root.query(`INSERT INTO tasks(available_at,trace_id,id,user_id,workspace_id,kind,queue,state,attempt_no,max_attempts,
     external_state,external_reference,lease_owner,lease_until,resume_count)
-    VALUES(gen_random_uuid()::text,$1,$2,$3,'demo.digest','content',$4,$5,$6,$7,$8,$9,$10,$11)`,
+    VALUES(clock_timestamp()-interval '1 minute',gen_random_uuid()::text,$1,$2,$3,'demo.digest','content',$4,$5,$6,$7,$8,$9,$10,$11)`,
   [id, userId, workspaceId, state, attempt, options.maxAttempts ?? 3, options.external ?? 'none', options.reference ?? null,
     attempt ? randomUUID() : null, attempt && !options.nullLease ? new Date(Date.now() - 1000) : null, options.resumeCount ?? 0]);
   if (attempt) await root.query(`INSERT INTO task_attempts(task_id,attempt_no,version,owner,state)

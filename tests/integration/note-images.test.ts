@@ -235,6 +235,16 @@ describe('canonical Note images with real isolated PostgreSQL and mocked OSS', (
     await workspaces.updateProfile(f.scope,{displayName:'Avatar',avatarResourceId:null},randomUUID());
     expect((await root.query("SELECT 1 FROM resource_refs WHERE user_id=$1 AND ref_kind='avatar'",[f.scope.userId])).rowCount).toBe(0);
   });
+  it('normalizes UUID case before avatar validation and reference counting',async()=>{
+    const f=await fixture(),document=await image(f,f.workspaceId,'text/plain'),picture=await image(f),workspaces=new WorkspaceService(pool,config.appTokenSecret!,claims);
+    await expect(workspaces.updateProfile(f.scope,{displayName:'Avatar',avatarResourceId:document.toUpperCase()},randomUUID())).rejects.toMatchObject({code:'AVATAR_RESOURCE_NOT_IMAGE'});
+    expect((await root.query('SELECT resource_id FROM resources WHERE resource_id=$1',[document])).rows).toEqual([]);
+    await workspaces.updateProfile(f.scope,{displayName:'Avatar',avatarResourceId:picture.toUpperCase()},randomUUID());
+    await workspaces.updateProfile(f.scope,{displayName:'Avatar',avatarResourceId:picture},randomUUID());
+    await workspaces.updateProfile(f.scope,{displayName:'Avatar',avatarResourceId:picture.toUpperCase()},randomUUID());
+    expect((await root.query('SELECT reference_count FROM resources WHERE resource_id=$1',[picture])).rows[0].reference_count).toBe('1');
+    expect((await root.query("SELECT resource_id FROM resource_refs WHERE user_id=$1 AND ref_kind='avatar'",[f.scope.userId])).rows).toEqual([{resource_id:picture}]);
+  });
   it('renders fresh URLs outside stored receipts and never reads image bytes to create a view', async () => {
     const f = await fixture(), id = await image(f), original = `![图](asset://${id})`, api = await buildApiServer({ config });
     try {

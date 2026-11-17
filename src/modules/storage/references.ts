@@ -33,7 +33,7 @@ export async function attachResource(tx:pg.PoolClient,userId:string,resourceId:s
 /** Replace one business object's complete reference set, including removals. */
 export async function replaceResourceRefs(tx:pg.PoolClient,userId:string,kind:string,externalId:string,ids:readonly string[],workspaceId?:string){
  await workspace(tx,userId,workspaceId);
- const wanted=[...new Set(ids)].sort();
+ const wanted=[...new Set(ids.map(id=>id.toLowerCase()))].sort();
  const previous=(await tx.query<{resource_id:string}>('SELECT resource_id FROM resource_refs WHERE user_id=$1 AND ref_kind=$2 AND ref_id_external=$3 AND workspace_id IS NOT DISTINCT FROM $4::uuid',[userId,kind,externalId,workspaceId??null])).rows.map(row=>row.resource_id);
  const all=[...new Set([...previous,...wanted])].sort();
  if(all.length){
