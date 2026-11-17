@@ -69,6 +69,10 @@ describe('native test deployment intent (read-only API fixtures)', () => {
     const f = fixture([{ filename: 'docs/release.md' }, { filename: '.github/CODEOWNERS' }, { filename: '.agents/skills/huahuo-release/SKILL.md' }, { filename: 'scripts/release/test-release-trigger.mjs' }]);
     await expect(testReleaseIntent(context(), f.read)).resolves.toEqual({ deploy: false, reason: 'no-application-change' });
   });
+  it('keeps host deployment-policy updates in control review without deploying the application', async () => {
+    const files = ['scripts/release/deployment-policy.py', 'tests/unit/deployment-policy.test.ts', 'src/release/plan.ts', 'tests/unit/release-plan.test.ts'].map(filename => ({ filename }));
+    await expect(testReleaseIntent(context(), fixture(files).read)).resolves.toEqual({ deploy: false, reason: 'no-application-change' });
+  });
   it.each(['src/business.ts', 'compose.yaml', '.env.example', 'migrations/0003_new.sql', 'scripts/release/unknown.mjs'])('requires an updated plan for %s', async filename => {
     await expect(testReleaseIntent(context(), fixture([{ filename }]).read)).rejects.toThrow('TEST_RELEASE_PLAN_UPDATE_REQUIRED');
   });
