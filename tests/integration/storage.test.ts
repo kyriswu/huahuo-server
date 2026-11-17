@@ -132,6 +132,10 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
       const playback = await restarted.playback(user.scope, upload.resourceId);
       expect(new URL(playback.url).pathname).toBe(`/uploads/${upload.resourceId}`);
       expect(new URL(playback.url).searchParams.get('versionId')).toBeTruthy();
+      expect(new URL(playback.url).searchParams.has('response-content-type')).toBe(false);
+      expect(new URL(playback.url).searchParams.get('response-content-encoding')).toBe('identity');
+      expect(new URL(playback.url).searchParams.get('response-content-disposition')).toMatch(/^inline; filename=/);
+      expect(playback.mimeType).toBe(metadata.mimeType);
       expect(head).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled();
     } finally { head.mockRestore(); read.mockRestore(); }
   });

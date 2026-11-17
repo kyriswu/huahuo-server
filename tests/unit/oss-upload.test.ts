@@ -164,19 +164,19 @@ it('rejects malformed upload arguments locally without issuing network requests 
   expect(request).not.toHaveBeenCalled();
 });
 
-it('signs public GET URLs locally with response headers and only actual object version IDs', async () => {
+it('signs public GET URLs without a MIME override, preserving encoding, disposition and actual version IDs', async () => {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-17T06:00:00Z'));
   const request = vi.spyOn(OSS.prototype, 'request').mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
   const storage = new AliyunOssStorageAdapter({ ...testOssConfig, endpoint: 'https://oss-cn-beijing-internal.aliyuncs.com', publicEndpoint: testOssConfig.endpoint });
-  const options = { contentType: 'application/json', contentDisposition: 'inline; filename="extraction.json"', contentEncoding: 'gzip', version: 'oss-version:real-object-version' };
+  const options = { contentDisposition: 'inline; filename="extraction.json"', contentEncoding: 'gzip', version: 'oss-version:real-object-version' };
   const signed = new URL(await storage.signUrl('extraction.json.gz', 300, options));
   expect(signed.origin).toBe('https://fixture-assets.oss-cn-beijing.aliyuncs.com');
-  expect(signed.searchParams.get('response-content-type')).toBe('application/json');
+  expect(signed.searchParams.has('response-content-type')).toBe(false);
   expect(signed.searchParams.get('response-content-disposition')).toBe(options.contentDisposition);
   expect(signed.searchParams.get('response-content-encoding')).toBe('gzip');
   expect(signed.searchParams.get('versionId')).toBe('real-object-version');
   const sdk = new OSS(testOssConfig);
-  const queries = Object.fromEntries(['response-content-type', 'response-content-disposition', 'response-content-encoding', 'versionId'].map(key => [key, signed.searchParams.get(key)!]));
+  const queries = Object.fromEntries(['response-content-disposition', 'response-content-encoding', 'versionId'].map(key => [key, signed.searchParams.get(key)!]));
   const signature = async (changed = queries) => new URL(await sdk.signatureUrlV4('GET', 300, { queries: changed }, 'uploads/extraction.json.gz')).searchParams.get('x-oss-signature');
   expect(await signature()).toBe(signed.searchParams.get('x-oss-signature'));
   expect(await signature({ ...queries, 'response-content-encoding': 'identity' })).not.toBe(signed.searchParams.get('x-oss-signature'));

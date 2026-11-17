@@ -69,7 +69,7 @@ export class AliyunOssStorageAdapter implements StoragePort {
     this.controlTimeoutMs=Math.min(config.timeoutMs,10000);
   }
   private async stage(key:string,input:Readable,mime:string,maxBytes:number){const directory=await mkdtemp(join(tmpdir(),'huahuo-oss-'));const {LocalStorageAdapter}=await import('../../modules/storage/port.js');const local=new LocalStorageAdapter(directory);try{return {directory,local,meta:await local.put(key,input,mime,Math.min(maxBytes,this.config.maxBytes))};}catch(error){await rm(directory,{recursive:true,force:true});throw error;}}
-  async put(key:string,input:Readable,mime:string,maxBytes:number):Promise<StoredObject>{const staged=await this.stage(key,input,mime,maxBytes);try{const result=await this.client.put(objectKey(this.config.keyPrefix,key),`${staged.directory}/${key}`);return {...staged.meta,version:String(result?.res?.headers?.etag??result?.etag??key)};}finally{await rm(staged.directory,{recursive:true,force:true});}}
+  async put(key:string,input:Readable,mime:string,maxBytes:number):Promise<StoredObject>{const staged=await this.stage(key,input,mime,maxBytes);try{const result=await this.client.put(objectKey(this.config.keyPrefix,key),`${staged.directory}/${key}`,{mime});return {...staged.meta,version:String(result?.res?.headers?.etag??result?.etag??key)};}finally{await rm(staged.directory,{recursive:true,force:true});}}
   async stat(key:string,mime:string):Promise<StoredObject>{const stagedDir=await mkdtemp(join(tmpdir(),'huahuo-oss-stat-'));const {LocalStorageAdapter}=await import('../../modules/storage/port.js');const local=new LocalStorageAdapter(stagedDir);try{const result=await this.client.getStream(objectKey(this.config.keyPrefix,key));const meta=await local.put(key,result.stream,mime,this.config.maxBytes);return {...meta,version:String(result?.res?.headers?.etag??key)};}finally{await rm(stagedDir,{recursive:true,force:true});}}
   /** Confirm OSS response metadata only. This does not inspect bytes, hash or media format. */
   async head(key:string):Promise<ObjectMetadata>{
@@ -129,7 +129,7 @@ export class AliyunOssStorageAdapter implements StoragePort {
   }
   signUrl(key:string, expiresSeconds=900, options:SignedObjectOptions={}):Promise<string>{
     const queries:Record<string,string>={};
-    for(const [name,value] of [['response-content-type',options.contentType],['response-content-disposition',options.contentDisposition],['response-content-encoding',options.contentEncoding]] as const){
+    for(const [name,value] of [['response-content-disposition',options.contentDisposition],['response-content-encoding',options.contentEncoding]] as const){
       if(value!==undefined){if(!value||invalidHeader(value))throw new Error('STORAGE_RESPONSE_HEADER_INVALID');queries[name]=value;}
     }
     const versionId=ossVersion(options.version);if(versionId)queries.versionId=versionId;

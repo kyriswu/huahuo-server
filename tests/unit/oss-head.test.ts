@@ -25,6 +25,30 @@ it('distinguishes an OSS version ID from an ETag', async () => {
   response({ ...valid, 'x-oss-version-id': 'real-object-version' });
   expect((await new AliyunOssStorageAdapter(testOssConfig).head('resource-id')).version).toBe('oss-version:real-object-version');
 });
+it.each([
+  {key:'opaque-resource-id',mime:'application/json'},
+  {key:'extraction.json.gz',mime:'application/json'},
+  {key:'picture.bin',mime:'image/png'},
+])('stores the supplied physical MIME through the real SDK, independent of the key extension: %s', async({key,mime})=>{
+  const bytes=Buffer.from('fixture-file-bytes');
+  // Preserve the real SDK's put/putStream/header/signature processing. Only the
+  // final HTTP boundary is a substitute, so no OSS request can leave the test.
+  const request=vi.spyOn(new OSS(testOssConfig).urllib,'request').mockImplementation(async(...args:unknown[])=>{
+    const [url,params]=args as [string,{method:string;headers:Record<string,string>;stream:Readable}];
+    expect(new URL(url).pathname).toBe(`/uploads/${key}`);
+    expect(params.method).toBe('PUT');
+    expect(params.headers['Content-Type']).toBe(mime);
+    expect(params.headers['Content-Length']).toBe(String(bytes.length));
+    const chunks:Buffer[]=[];
+    for await(const chunk of params.stream)chunks.push(Buffer.from(chunk));
+    expect(Buffer.concat(chunks)).toEqual(bytes);
+    const headers={etag:'"fixture-etag"'};
+    return {status:200,headers,res:{status:200,headers}};
+  });
+  const result=await new AliyunOssStorageAdapter(testOssConfig).put(key,Readable.from([bytes]),mime,100);
+  expect(result).toMatchObject({bytes:bytes.length,contentType:mime,version:'"fixture-etag"'});
+  expect(request).toHaveBeenCalledOnce();
+});
 it('deletes the exact signed OSS version instead of leaving it behind a delete marker', async () => {
   const request=vi.spyOn(OSS.prototype,'request').mockResolvedValue({status:204,res:{status:204}});
   const storage=new AliyunOssStorageAdapter(testOssConfig);

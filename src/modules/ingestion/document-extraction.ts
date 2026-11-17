@@ -128,7 +128,7 @@ export class ManagedDocumentExtractor {
     const version=row.object_version.startsWith('oss-version:')?row.object_version.slice('oss-version:'.length):null;
     const versions=new URL(source.url).searchParams.getAll('versionId');
     if(version?versions.length!==1||versions[0]!==version:versions.length!==0)throw new ManagedExtractionError('DOCUMENT_SOURCE_RESOURCE_MISMATCH');
-    const url=await this.storage.signUrl(row.object_key,3600,{contentType:row.mime_type,version:row.object_version});
+    const url=await this.storage.signUrl(row.object_key,3600,{version:row.object_version});
     return {url,fileName:row.file_name,mimeType:row.mime_type};
   }
   async parse(a:Attempt,source:DocumentSource,snapshot:DocumentParserSnapshot,

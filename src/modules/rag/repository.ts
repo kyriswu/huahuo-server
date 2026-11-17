@@ -144,7 +144,7 @@ export class RagIngestionRepository {
     if(this.appConfig.storageDriver!=='aliyun-oss'||!this.appConfig.storageAliyunOss||!storage.signUrl||!prefix
       ||!row.parse_artifact_uri.startsWith(prefix)||!/^[a-f\d]{64}\.json\.gz$/u.test(row.parse_artifact_uri.slice(prefix.length)))throw new DomainError(503,'DOCUMENT_EXTRACTION_STORAGE_UNAVAILABLE');
     const mimeType='application/json',contentEncoding='gzip' as const,expiresSeconds=900;
-    return {url:await storage.signUrl(row.parse_artifact_uri,expiresSeconds,{contentType:mimeType,contentEncoding}),
+    return {url:await storage.signUrl(row.parse_artifact_uri,expiresSeconds,{contentEncoding}),
       expiresAt:new Date(Date.now()+expiresSeconds*1000).toISOString(),mimeType,contentEncoding};
   }
   async asset(scope:Scope,jobId:string,resourceId:string,storage:Pick<StoragePort,'signUrl'>){
@@ -159,7 +159,7 @@ export class RagIngestionRepository {
     const key=prefix?String(row.object_key).slice(prefix.length+1):String(row.object_key);
     if(!/^[a-z\d][a-z\d._/-]{0,1023}$/iu.test(key)||key.includes('..')||key.includes('//'))throw new DomainError(503,'DOCUMENT_ASSET_STORAGE_UNAVAILABLE');
     const mimeType=String(row.mime_type),expiresSeconds=900;
-    return {url:await storage.signUrl(key,expiresSeconds,{contentType:mimeType}),
+    return {url:await storage.signUrl(key,expiresSeconds),
       expiresAt:new Date(Date.now()+expiresSeconds*1000).toISOString(),mimeType,sizeBytes:Number(row.byte_size)};
   }
   async section(scope: Scope, jobId: string, sectionId: string, storage: Pick<StoragePort, 'read'>) {

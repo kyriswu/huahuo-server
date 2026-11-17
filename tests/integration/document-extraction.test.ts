@@ -162,10 +162,10 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    const read=vi.fn(async()=>{throw new Error('DOWNLOAD_PROXY_FORBIDDEN');}),signUrl=vi.fn(async(key:string)=>`https://signed.test/${key}`),directStorage={read,signUrl};
    const imageLink=await assetRepository.asset(s.scope,created.jobId,assets[0].id,directStorage);
    expect(imageLink).toMatchObject({url:`https://signed.test/${assets[0].id}`,mimeType:assets[0].mime_type,sizeBytes:Number(assets[0].byte_size)});
-   expect(signUrl).toHaveBeenCalledExactlyOnceWith(assets[0].id,900,{contentType:assets[0].mime_type});
+   expect(signUrl).toHaveBeenCalledExactlyOnceWith(assets[0].id,900);
    const extractionLink=await assetRepository.extraction(s.scope,created.jobId,directStorage);
    expect(extractionLink).toMatchObject({url:`https://signed.test/${row.parse_artifact_uri}`,mimeType:'application/json',contentEncoding:'gzip'});
-   expect(signUrl).toHaveBeenLastCalledWith(row.parse_artifact_uri,900,{contentType:'application/json',contentEncoding:'gzip'});expect(read).not.toHaveBeenCalled();
+   expect(signUrl).toHaveBeenLastCalledWith(row.parse_artifact_uri,900,{contentEncoding:'gzip'});expect(read).not.toHaveBeenCalled();
    await expect(assetRepository.asset(s.scope,created.jobId,randomUUID(),directStorage)).rejects.toMatchObject({code:'RESOURCE_NOT_FOUND'});
    await expect(new RagIngestionRepository(s.apiPool,{...assetConfig,storageAliyunOss:{...assetConfig.storageAliyunOss,bucket:'other-bucket'}}).asset(s.scope,created.jobId,assets[0].id,directStorage)).rejects.toMatchObject({code:'DOCUMENT_ASSET_STORAGE_UNAVAILABLE'});
    await expect(new RagIngestionRepository(s.apiPool,{...assetConfig,storageAliyunOss:{...assetConfig.storageAliyunOss,keyPrefix:'other-prefix'}}).asset(s.scope,created.jobId,assets[0].id,directStorage)).rejects.toMatchObject({code:'DOCUMENT_ASSET_STORAGE_UNAVAILABLE'});
@@ -177,12 +177,13 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
     const response=await assetApi.inject({method:'GET',url:extractionPath,headers:fixtureScopeHeaders(s.bearer)});
     expect(response.statusCode,response.body).toBe(200);expect(response.headers['cache-control']).toBe('no-store');
     const data=response.json().data,signed=new URL(data.url);expect(data).toMatchObject({mimeType:'application/json',contentEncoding:'gzip'});
-    expect(signed.pathname).toBe(`/fixture-resources/${row.parse_artifact_uri}`);expect(signed.searchParams.get('response-content-type')).toBe('application/json');expect(signed.searchParams.get('response-content-encoding')).toBe('gzip');
+    expect(signed.pathname).toBe(`/fixture-resources/${row.parse_artifact_uri}`);expect(signed.searchParams.has('response-content-type')).toBe(false);expect(signed.searchParams.get('response-content-encoding')).toBe('gzip');
     expect(response.body).not.toContain('data_base64');expect(data).not.toHaveProperty('results');expect(Date.parse(data.expiresAt)).toBeGreaterThan(Date.now());
     const imageResponse=await assetApi.inject({method:'GET',url:assetPath,headers:fixtureScopeHeaders(s.bearer)});
     expect(imageResponse.statusCode,imageResponse.body).toBe(200);expect(imageResponse.headers['cache-control']).toBe('no-store');
     expect(imageResponse.json().data).toMatchObject({mimeType:assets[0].mime_type,sizeBytes:Number(assets[0].byte_size)});
     expect(new URL(imageResponse.json().data.url).pathname).toBe(`/fixture-resources/${assets[0].id}`);
+    expect(new URL(imageResponse.json().data.url).searchParams.has('response-content-type')).toBe(false);
     const other=await insertFixtureUser(root),otherToken=await insertFixtureSession(root,other,randomUUID());
     for(const url of [extractionPath,assetPath])expect((await assetApi.inject({method:'GET',url,headers:fixtureScopeHeaders(otherToken)})).statusCode).toBe(404);
     expect((await assetApi.inject({method:'GET',url:`/api/v1/rag/ingestions/${randomUUID()}/extraction`,headers:fixtureScopeHeaders(s.bearer)})).statusCode).toBe(404);
