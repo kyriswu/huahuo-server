@@ -30,14 +30,14 @@ describe('RAG object downloads use direct signed URLs', () => {
     const result = await repository.extraction(scope, 'job', storage);
     expect(result).toMatchObject({ url: `https://fixture-assets.test/private/${artifact}`, mimeType: 'application/json', contentEncoding: 'gzip' });
     expect(Date.parse(result.expiresAt)).toBeGreaterThan(Date.now());
-    expect(storage.signUrl).toHaveBeenCalledExactlyOnceWith(artifact, 900, { contentType: 'application/json', contentEncoding: 'gzip' });
+    expect(storage.signUrl).toHaveBeenCalledExactlyOnceWith(artifact, 900, { contentEncoding: 'gzip' });
     expect(storage.read).not.toHaveBeenCalled();
   });
   it('removes the configured root once and signs the scoped image without fetching its bytes', async () => {
     const { repository, storage } = fixture();
     const result = await repository.asset(scope, 'job', 'image', storage);
     expect(result).toMatchObject({ url: 'https://fixture-assets.test/private/images/picture.png', mimeType: 'image/png', sizeBytes: 512 });
-    expect(storage.signUrl).toHaveBeenCalledExactlyOnceWith('images/picture.png', 900, { contentType: 'image/png' });
+    expect(storage.signUrl).toHaveBeenCalledExactlyOnceWith('images/picture.png', 900);
     expect(storage.read).not.toHaveBeenCalled();
   });
   it.each([{ found: false }, { deleted: true }])('never signs missing, foreign or deleted versions: %j', async options => {

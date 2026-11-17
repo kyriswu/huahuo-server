@@ -1,92 +1,23 @@
 {
   "version": 1,
-  "id": "20261117-task-reservation-recovery",
-  "baseRevision": "085de227d606bc59e1390c12019d64e01e48b16a",
+  "id": "20261117-oss-native-content-type",
+  "baseRevision": "5af896d88eefb24c1173371276e9a9b55760f3f1",
   "services": [
     "api-server",
-    "admin",
-    "worker",
-    "scheduler"
+    "worker"
   ],
   "database": {
-    "migrations": [
-      "0004_task_reservation_recovery_permissions.sql",
-      "0005_task_trace_id.sql",
-      "0006_oss_direct_access.sql",
-      "0007_generic_direct_upload.sql",
-      "0008_user_storage_counters.sql",
-      "0009_retire_download_settings.sql",
-      "0010_note_current_parts.sql",
-      "0011_user_resource_identity.sql"
-    ],
-    "verifySql": "scripts/release/changes/20261117-task-reservation-recovery/verify-db.sql",
+    "migrations": [],
+    "verifySql": "scripts/release/changes/20261117-oss-native-content-type/verify-db.sql",
     "dataChange": {
-      "mode": "inline",
-      "reason": "Target read-only preflight on 2026-11-17 confirmed 2 users, 184 completed tasks, zero resources/upload sessions/storage reservations/references and no unfinished tasks or lock waits. Bounded inline changes under runner lock/statement budgets: 0004 grants Scheduler release-only privileges; 0005 initializes required task traces without runtime repair; 0006 retires inspection state/history; 0007 removes the old upload table and scene/duration fields after strict authorization/cleanup guards; 0008 initializes user used/reserved counters and grants Worker only those column updates; 0009 removes two retired downloader keys and increments the singleton revision; 0010 keeps only latest Note content in note_parts, removes archive image pins and enforces one row per note/part. 0011 removes resource business/soft-delete fields, initializes reference_count, indexes user files and grants Worker hard deletion plus a job completion receipt; user-scoped deletion tasks need no workspace. Uploads are UUID-based, with no content deduplication or client hashing. Target has zero note bodies; current IDs/content, ETags and current image references remain. Task history and current business data remain; obsolete Note body history is intentionally retired. New ordinary indexes support reference lookup and occupancy detail/reconciliation; requests use user counters, never SUM. Temporary uploads are Redis-only, valid for 24 hours, uncharged until the business transaction claims them; successful commit clears Redis. No remote object deletion or billing-policy changes are part of SQL. Drain old writers and recheck upload/task guards before DDL; old binaries are incompatible, so compatibility remains false until the reviewed maintenance handover. No shared-database reset, checksum rewrite or automatic rollback."
+      "mode": "none",
+      "reason": "No schema, query, persisted payload or existing object metadata changes. Signed GET uses original OSS Content-Type; new Server writes record MIME in OSS metadata."
     }
   },
   "configuration": {
-    "mode": "candidate",
-    "changes": [
-      {
-        "key": "STORAGE_DRIVER",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "worker"
-        ],
-        "required": true,
-        "hasDefault": true
-      },
-      {
-        "key": "STORAGE_ALIYUN_OSS_ENDPOINT",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "worker"
-        ],
-        "required": true,
-        "hasDefault": false
-      },
-      {
-        "key": "STORAGE_ALIYUN_OSS_PUBLIC_ENDPOINT",
-        "operation": "add",
-        "roles": [
-          "api-server",
-          "worker"
-        ],
-        "required": false,
-        "hasDefault": true
-      },
-      {
-        "key": "PROCESSING_NODES_ENABLED",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      }
-    ],
-    "reviewedFiles": [
-      "compose.yaml",
-      ".env.example",
-      "src/config/config.ts",
-      ".env.compose.cloud.example",
-      ".env.compose.local.example",
-      ".env.host.example",
-      ".env.gpu-spot.example",
-      "src/config/processing-nodes.ts",
-      "specs/backend-plan/examples/.env.compose.cloud.example",
-      "specs/backend-plan/examples/.env.compose.local.example",
-      "resources/processing-nodes/external-control.env.example",
-      "resources/processing-nodes/test-control.env.example",
-      "src/config/document-extraction.ts"
-    ],
-    "verifyFile": "scripts/release/changes/20261117-task-reservation-recovery/verify-config.mjs"
+    "mode": "reuse",
+    "changes": [],
+    "reviewedFiles": []
   },
   "dependencies": [],
   "backfill": {
@@ -94,10 +25,10 @@
     "reference": null
   },
   "compatibility": {
-    "database": false,
-    "api": false,
-    "tasks": false,
-    "configuration": false
+    "database": true,
+    "api": true,
+    "tasks": true,
+    "configuration": true
   },
   "smoke": "health"
 }

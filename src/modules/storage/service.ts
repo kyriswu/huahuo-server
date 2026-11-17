@@ -177,7 +177,7 @@ export class StorageService {
     &&upload.storageDriver==='aliyun-oss'&&upload.storageBucket===bucket));
   for(const upload of pending)rows.push({resource_id:upload.id,mime_type:upload.mimeType,file_name:upload.fileName,object_key:upload.id,object_version:upload.object!.version});
   const exp=Date.now()+15*60_000;
-  return Promise.all(rows.map(async row=>({resourceId:row.resource_id,url:await signUrl(row.object_key,900,{contentType:row.mime_type,contentDisposition:`inline; filename="${row.file_name.replace(/[^A-Za-z0-9._-]/gu,'_')}"`,contentEncoding:'identity',version:row.object_version}),mimeType:row.mime_type,fileName:row.file_name,expiresAt:new Date(exp).toISOString()})));
+  return Promise.all(rows.map(async row=>({resourceId:row.resource_id,url:await signUrl(row.object_key,900,{contentDisposition:`inline; filename="${row.file_name.replace(/[^A-Za-z0-9._-]/gu,'_')}"`,contentEncoding:'identity',version:row.object_version}),mimeType:row.mime_type,fileName:row.file_name,expiresAt:new Date(exp).toISOString()})));
  }
  async playback(scope:Scope,id:string){
   if(!uuid(id))throw new DomainError(404,'RESOURCE_NOT_FOUND');

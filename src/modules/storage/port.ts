@@ -11,7 +11,7 @@ export interface StoredObject { bytes:number; sha256:string; contentType:string;
 export interface ObjectMetadata { bytes:number; contentType:string; version:string; etag?:string; uploadSessionId?:string; }
 export interface UploadedPart { bytes:number; etag:string; }
 export interface SignedUpload { url:string; headers:Record<string,string>; }
-export interface SignedObjectOptions { contentType?:string; contentDisposition?:string; contentEncoding?:string; version?:string; }
+export interface SignedObjectOptions { contentDisposition?:string; contentEncoding?:string; version?:string; }
 export interface StoragePort {
  put(key:string,input:Readable,contentType:string,maxBytes:number):Promise<StoredObject>;
  stat(key:string,contentType:string):Promise<StoredObject>;
