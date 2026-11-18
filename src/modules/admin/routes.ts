@@ -10,6 +10,8 @@ import { AdminService, type AdminScope } from './service.js';
 import { Envelope, Text, Strict, Id } from '../identity/schemas.js';
 import { AdminUserList, AdminUserQuery } from './user-schemas.js';
 import {NodeSchema,ConfigurationResponse} from './configuration-schemas.js';
+import { registerAiTemplateAdminRoutes } from '../ai-templates/admin-routes.js';
+import type { AiTemplateCatalog } from '../ai-templates/catalog.js';
 import type {ProcessingNodes} from '../processing-nodes/service.js';
 import type {ProcessingNode} from '../processing-nodes/model.js';
 import type {RuntimeSettings} from '../runtime-settings/service.js';
@@ -27,7 +29,7 @@ export function registerAdminRoutes(
  service: AdminService,
  config: AppConfig,
  tasks: TaskService,
- configuration:{settings:RuntimeSettings;nodes:ProcessingNodes;nodeJobs:ProcessingNodeJobs;trials:AdminDocumentTrials},
+ configuration:{settings:RuntimeSettings;nodes:ProcessingNodes;nodeJobs:ProcessingNodeJobs;trials:AdminDocumentTrials;aiTemplates:AiTemplateCatalog},
  renderPage: (reply: FastifyReply) => FastifyReply,
 ){
  app.decorateRequest('adminScope');
@@ -36,6 +38,7 @@ export function registerAdminRoutes(
  const auth=async(req:FastifyRequest)=>{req.adminScope=await service.authenticate(sessionCookie(req));};
  const csrf=async(req:FastifyRequest)=>{origin(req);service.checkCsrf(sessionCookie(req)??'',req.headers['x-csrf-token']);};
  const scope=(req:FastifyRequest)=>{if(!req.adminScope)throw new DomainError(401,'ADMIN_UNAUTHORIZED');return req.adminScope;};
+ registerAiTemplateAdminRoutes(app,configuration.aiTemplates,{auth,csrf,scope});
  const adminSchema=Type.Object({adminId:Id,username:Type.String(),role:Type.Union([Type.Literal('operator'),Type.Literal('superadmin')])});
  const errors={400:ErrorSchema,401:ErrorSchema,403:ErrorSchema,404:ErrorSchema,409:ErrorSchema,429:ErrorSchema};
  app.post('/admin/api/v1/login',{

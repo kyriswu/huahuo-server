@@ -1,49 +1,25 @@
 {
   "version": 1,
-  "id": "20261117-observability-contract",
-  "baseRevision": "8b27e01c9ab78188e45573ff1fde98a04d699274",
-  "services": [
-    "api-server",
-    "admin",
-    "worker",
-    "scheduler"
-  ],
+  "id": "20261118-ai-templates",
+  "baseRevision": "7ef993ee03808db7fab3d09b56d390a6df1fa16f",
+  "services": ["api-server", "admin", "worker", "scheduler"],
   "database": {
-    "migrations": [
-      "0012_task_trace_context.sql"
-    ],
-    "verifySql": "scripts/release/changes/20261117-observability-contract/verify-db.sql",
+    "migrations": ["0013_ai_templates.sql"],
+    "verifySql": "scripts/release/changes/20261118-ai-templates/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": "Append one nullable tasks.trace_context JSONB metadata field with bounded W3C carrier validation. Existing tasks remain NULL, no history rewrite, no business-data backfill and no physical foreign keys. Producer context is captured with the original enqueue transaction; retries preserve it. All four roles are updated together after the migration. Old migration runners must never be used after this upgrade."
+      "reason": "Add isolated catalog, published versions and run storage, one read view and an outline lookup index. Initialize two new catalogs and their initial versions in the migration transaction. Existing records, tasks and published migration files are untouched. No historical backfill. All four runtime roles load the new migration history."
     }
   },
   "configuration": {
-    "mode": "reuse",
+    "mode": "candidate",
     "changes": [
       {
-        "key": "OTEL_SERVICE_VERSION",
+        "key": "HUAHUO_AGENT_BASE_URL",
         "operation": "add",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": true
-      },
-      {
-        "key": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        "operation": "add",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": true
+        "roles": ["api-server"],
+        "required": true,
+        "hasDefault": false
       }
     ],
     "reviewedFiles": [
@@ -53,19 +29,14 @@
       ".env.compose.local.example",
       ".env.host.example",
       "src/config/config.ts",
-      "src/config/telemetry.ts"
-    ]
+      "src/config/service-addresses.ts"
+    ],
+    "verifyFile": "scripts/release/changes/20261118-ai-templates/verify-config.mjs"
   },
-  "dependencies": [],
-  "backfill": {
-    "required": false,
-    "reference": null
-  },
-  "compatibility": {
-    "database": true,
-    "api": true,
-    "tasks": true,
-    "configuration": true
-  },
+  "dependencies": [
+    { "name": "agent", "checkFile": "scripts/release/changes/20261118-ai-templates/verify-external.mjs" }
+  ],
+  "backfill": { "required": false, "reference": null },
+  "compatibility": { "database": true, "api": true, "tasks": true, "configuration": true },
   "smoke": "health"
 }

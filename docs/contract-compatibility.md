@@ -413,3 +413,8 @@ Note索引依赖功能开关；只改outline/germination不会按raw变化重建
 - 验收覆盖：Note新建/修改/删除仍走Note；文本、TXT/Markdown和已支持的结构化文件接入同属File；File查询同时返回两种旧来源；Note与File互不串线；跨用户/工作区拒绝；正文/图片引用正确；旧版本不可见且清理不误删当前版本；重试不重复发布；存量索引可查且无新增孤儿点。真实PG/Redis与模拟模型/Milvus结果分别报告。
 
 本轮证据沿用 `.local/architecture-review/reproductions.log`，没有为此次文字梳理重复跑测试。现有最新200个来源的查询范围限制、内部RAG运行时配置漏接属于另列审计项，不能把该限制当作File来源统一后的完整检索验收。
+
+## AI 模板配置
+
+新增笔记纲要与编辑器润色目录、生成接口及纲要结果查询。生成接口通过 Accept 支持
+默认 JSON 和 SSE。接口和隔离验证见 [AI 模板配置与 App 契约](runbooks/ai-templates.md)。

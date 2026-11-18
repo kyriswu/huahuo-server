@@ -2,7 +2,7 @@ import type { QueueName } from '../modules/tasks/model.js';
 import { loadMetricsConfig, type MetricsConfig } from './metrics.js';
 import { loadTelemetryConfig, type TelemetryConfig } from './telemetry.js';
 import { packageVersion } from '../observability/identity.js';
-import { loadApiServiceBaseUrl } from './service-addresses.js';
+import { loadAgentBaseUrl, loadApiServiceBaseUrl } from './service-addresses.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
@@ -35,6 +35,7 @@ export interface AppConfig {
   storageDriver: 'local' | 's3' | 'aliyun-oss'; storageLocalRoot: string; maxUploadBytes: number;
   appPublicBaseUrl: string;
   apiServiceBaseUrl?: string;
+  agentBaseUrl?: string;
   storageQuotaBytes:number;
   tagExtractorProvider: 'deterministic' | 'disabled' | 'llm' | 'dify';
   storageS3?: { endpoint:string; region:string; bucket:string; accessKeyId:string; secretAccessKey:string; maxBytes:number };
@@ -216,6 +217,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if(env.TEST_TASK_DELAY_MS&&appEnv!=='test')fail('TEST_TASK_DELAY_MS');
   return scopedConfig({
     apiServiceBaseUrl: loadApiServiceBaseUrl(env),
+    agentBaseUrl: role === 'api-server' ? loadAgentBaseUrl(env) : undefined,
     metrics: loadMetricsConfig(role, env),
     telemetry: loadTelemetryConfig(env, packageVersion),
     processingNodes:loadProcessingNodesConfig(env),runtimeRevision:0,uploadHardMaxBytes,
