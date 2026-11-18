@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { AdminIdentity } from './session';
 import { UserManagement } from './users';
 import {ConfigurationPage} from './configuration';
+import { AiTemplatesPage } from './ai-templates';
 
 type SampleRecord = {
   id: string;
@@ -51,17 +52,22 @@ export function Brand({ compact = false }: { compact?: boolean }) {
   );
 }
 
-type AdminPage = 'workbench' | 'users' | 'configuration';
-const currentPage = (): AdminPage => window.location.hash === '#configuration'?'configuration':window.location.hash === '#users' ? 'users' : 'workbench';
+const pageLabels = { workbench: '工作台', users: '用户管理', configuration: '运行配置', 'ai-templates': 'AI 模板配置' } as const;
+type AdminPage = keyof typeof pageLabels;
+const currentPage = (): AdminPage => {
+  const hash = window.location.hash.slice(1);
+  if (hash === 'configuration' || hash === 'users' || hash === 'ai-templates') return hash;
+  return 'workbench';
+};
 
 function WorkspaceNavigation({ collapsed, page }: { collapsed: boolean; page: AdminPage }) {
   const navigationStyle = (active: boolean) => `flex min-h-10 items-center gap-2.5 rounded-[10px] py-2 text-sm font-semibold whitespace-nowrap focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-console-accent ${active ? 'bg-console-accent-soft text-console-accent' : 'text-console-muted hover:bg-console-canvas hover:text-console-ink'} ${collapsed ? 'justify-center px-2.5' : 'px-3'}`;
   return (
-    <aside id="workspace-sidebar" className="flex items-center justify-between gap-3 overflow-hidden border-b border-console-line bg-white px-4 py-3 md:sticky md:top-0 md:h-dvh md:flex-col md:items-stretch md:justify-start md:gap-0 md:border-r md:border-b-0 md:px-3 md:py-0">
+    <aside id="workspace-sidebar" className="flex items-center justify-between gap-3 overflow-hidden border-b max-sm:flex-col max-sm:items-stretch max-sm:gap-2 border-console-line bg-white px-4 py-3 md:sticky md:top-0 md:h-dvh md:flex-col md:items-stretch md:justify-start md:gap-0 md:border-r md:border-b-0 md:px-3 md:py-0">
       <div className={`md:flex md:h-16 md:items-center ${collapsed ? 'md:justify-center' : 'md:px-2'}`}>
         <Brand compact={collapsed} />
       </div>
-      <nav aria-label="管理后台导航" className="flex min-w-0 gap-1 overflow-x-auto md:mt-6 md:flex-col md:overflow-visible">
+      <nav aria-label="管理后台导航" className="flex min-w-0 gap-1 overflow-x-auto max-sm:flex-wrap md:mt-6 md:flex-col md:overflow-visible">
         {!collapsed && <div aria-hidden="true" className="mb-2 hidden px-3 text-xs font-medium text-console-muted md:block">导航</div>}
         <a href="#workbench" aria-current={page === 'workbench' ? 'page' : undefined} title="工作台" className={navigationStyle(page === 'workbench')}>
           <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0">
@@ -79,6 +85,12 @@ function WorkspaceNavigation({ collapsed, page }: { collapsed: boolean; page: Ad
         <a href="#configuration" aria-current={page==='configuration'?'page':undefined} title="运行配置" className={navigationStyle(page==='configuration')}>
           <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="8" cy="18" r="2" fill="currentColor"/></svg>
           <span className={collapsed?'sr-only':undefined}>运行配置</span>
+        </a>
+        <a href="#ai-templates" aria-current={page === 'ai-templates' ? 'page' : undefined} title="AI 模板配置" className={navigationStyle(page === 'ai-templates')}>
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" className="size-5 shrink-0">
+            <rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/>
+          </svg>
+          <span className={collapsed ? 'sr-only' : undefined}>AI 模板配置</span>
         </a>
       </nav>
     </aside>
@@ -169,7 +181,7 @@ export function Workbench({ admin, csrfToken, onLogout, loggingOut, error, onSes
             <span aria-hidden="true" className="mr-1 h-5 w-px bg-console-line" />
             <span className="hidden text-console-muted sm:inline">管理后台</span>
             <span aria-hidden="true" className="hidden text-slate-400 sm:inline">/</span>
-            <span className="font-medium">{page==='configuration'?'运行配置':page === 'users' ? '用户管理' : '工作台'}</span>
+            <span className="font-medium">{pageLabels[page]}</span>
           </div>
           <div className="flex min-w-0 items-center gap-2 sm:gap-4">
             {admin && (
@@ -187,7 +199,12 @@ export function Workbench({ admin, csrfToken, onLogout, loggingOut, error, onSes
 
         <main id={page} className="mx-auto grid max-w-7xl grid-cols-1 scroll-mt-16 gap-5 px-4 pt-5 pb-10 sm:px-8 sm:pt-8 lg:px-10">
           {error && <Alert type="error" showIcon title={error} />}
-          {page==='configuration'?<ConfigurationPage admin={admin} csrfToken={csrfToken} onSessionExpired={onSessionExpired}/>:page === 'users' ? <UserManagement onSessionExpired={onSessionExpired} /> : <>
+          {page === 'configuration' && <ConfigurationPage admin={admin} csrfToken={csrfToken} onSessionExpired={onSessionExpired} />}
+          {page === 'users' && <UserManagement onSessionExpired={onSessionExpired} />}
+          {page === 'ai-templates' && (csrfToken && onSessionExpired
+            ? <AiTemplatesPage csrfToken={csrfToken} onSessionExpired={onSessionExpired} />
+            : <Alert type="info" title="登录管理后台后可配置 AI 模板。" />)}
+          {page === 'workbench' && <>
           <WorkbenchHero />
           <Panel title="概况" titleId="overview-title">
             <dl aria-labelledby="overview-title" className="grid grid-cols-3 gap-2 p-3 sm:gap-4 sm:p-5">

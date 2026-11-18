@@ -4,10 +4,13 @@ import { constantEqual, hashPassword, mac, token, verifyPassword } from '../iden
 import { DomainError, lock, rateLimit, transaction } from '../identity/store.js';
 import type { AdminUserList, AdminUserQuery } from './user-schemas.js';
 export interface AdminScope { readonly adminId:string;readonly sessionId:string;readonly role:'operator'|'superadmin';readonly username:string; }
+export async function assertAdminSession(tx:pg.PoolClient,scope:AdminScope){
+ const active=await tx.query(`SELECT s.id FROM admin_sessions s JOIN admin_users a ON a.id=s.admin_id WHERE s.id=$1 AND s.admin_id=$2 AND s.revoked_at IS NULL AND s.expires_at>now() AND NOT a.disabled AND a.role=$3 FOR SHARE OF s,a`,[scope.sessionId,scope.adminId,scope.role]);
+ if(!active.rowCount)throw new DomainError(401,'ADMIN_UNAUTHORIZED');
+}
 export async function assertSuperadmin(tx:pg.PoolClient,scope:AdminScope){
  if(scope.role!=='superadmin')throw new DomainError(403,'ADMIN_FORBIDDEN');
- const active=await tx.query(`SELECT s.id FROM admin_sessions s JOIN admin_users a ON a.id=s.admin_id WHERE s.id=$1 AND s.admin_id=$2 AND s.revoked_at IS NULL AND s.expires_at>now() AND NOT a.disabled AND a.role='superadmin' FOR SHARE OF s,a`,[scope.sessionId,scope.adminId]);
- if(!active.rowCount)throw new DomainError(401,'ADMIN_UNAUTHORIZED');
+ await assertAdminSession(tx,scope);
 }
 export class AdminService {
  private dummy:Promise<string>;

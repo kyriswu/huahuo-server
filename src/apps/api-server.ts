@@ -24,6 +24,9 @@ import { RagImageLinks } from '../modules/rag/image-links.js';
 import {RuntimeSettings} from '../modules/runtime-settings/service.js';
 import {DocumentCallbacks} from '../modules/ingestion/document-callbacks.js';
 import { registerInternalRoutes } from '../http/internal-routes.js';
+import { AiTemplateAgentClient } from '../modules/ai-templates/agent-client.js';
+import { registerAiTemplateRoutes } from '../modules/ai-templates/routes.js';
+import { AiTemplateRuns } from '../modules/ai-templates/runs.js';
 export async function buildApiServer(options: BuildOptions & IdentityOptions & { ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
@@ -52,6 +55,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
  registerInternalRoutes(app,{identity,callbacks,ragQuery,settings});
+ registerAiTemplateRoutes(app, new AiTemplateRuns(pool), new AiTemplateAgentClient(options.config.agentBaseUrl));
  registerAssetRoutes(app,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService);
  registerRagRoutes(app,new RagIngestionRepository(pool,options.config,resourceClaims),storageService.storage,ragQuery);
  registerTaskRoutes(app,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
