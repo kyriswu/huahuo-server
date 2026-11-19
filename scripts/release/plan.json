@@ -16,7 +16,7 @@
     "verifySql": "scripts/release/changes/20261119-content-assets/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "Move ownership to the content asset and represent workspace visibility and folder placement as separate relations. Rename persisted asset identifiers, settings and task payloads in place. The test database preflight found no legacy assets, references, index builds or unfinished tasks, so no separate cleanup or backfill is scheduled. Stop all old Server roles and shared-database writers before the incompatible migrations."
+      "reason": "Move ownership to the content asset and represent workspace visibility and folder placement as separate relations. Rename persisted asset identifiers, settings and task payloads in place. The test database preflight found no legacy assets, references, index builds or unfinished tasks, so no separate cleanup or backfill is scheduled. Stop all old Server roles and shared-database writers before the incompatible migrations. Preflight validates the complete runtime settings under the pending key rename before writing."
     }
   },
   "configuration": {
