@@ -14,6 +14,7 @@ const controlFiles = new Set([
   'scripts/release/test-publish.mjs', 'tests/unit/test-publish.test.ts',
   'tests/unit/test-release-source.test.ts', 'tests/unit/release-events.test.ts',
   'tests/unit/test-release-trigger.test.ts', 'tests/unit/main-release-readiness.test.ts',
+  '.codex/config.toml', 'scripts/codegraph-worktree.sh',
 ]);
 const noApplicationChange = path => controlFiles.has(path) || path.startsWith('docs/') || path.startsWith('.agents/skills/')
   || ['.github/CODEOWNERS', '.gitignore', 'AGENTS.md'].includes(path);
