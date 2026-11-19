@@ -6,7 +6,7 @@ import { digest } from '../../src/lib/crypto.js';
 import type { HybridIndex, RecallHit, SearchOptions } from '../../src/lib/search-index/types.js';
 import { snapshotForSource } from '../../src/modules/kb/profile.js';
 import { RagQueryService } from '../../src/modules/rag/query-service.js';
-import { fuseRankedRecall } from '../../src/modules/rag/search.js';
+import { fuseRankedRecall, type RerankAdapter } from '../../src/modules/rag/search.js';
 import { config } from '../helpers.js';
 
 it('fuses global branch ranks across point windows and retains each branch candidate budget', async () => {
@@ -26,12 +26,11 @@ it('fuses global branch ranks across point windows and retains each branch candi
   content_hash:digest(content),snapshot,published:true,status:'ready',chunk_count:300,content_asset_revision_id:randomUUID(),cursor_created_at:'2026-01-01 00:00:00.000000+00'};
  const sql=vi.fn(async(query:string,values:unknown[]=[])=>{
   if(query.includes('FROM user_sessions'))return {rows:[{id:scope.sessionId}],rowCount:1};
-  if(query.includes('SELECT b.*'))return {rows:[build],rowCount:1};
+  if(query.includes('SELECT b.*'))return {rows:[query.includes('AS source_body')?{...build,source_body:content}:build],rowCount:1};
   if(query.includes('SELECT c.*')){
    const start=values[3]===null?0:Number(values[3])+1;
    return {rows:rows.slice(start,start+Number(values[4])),rowCount:Math.min(Number(values[4]),rows.length-start)};
   }
-  if(query.includes('FROM content_assets asset'))return {rows:[{revision,content,state:'active',processing_status:'ready'}],rowCount:1};
   if(['BEGIN','COMMIT','ROLLBACK'].includes(query))return {rows:[],rowCount:0};
   throw new Error(`UNEXPECTED_SQL: ${query}`);
  });
@@ -62,5 +61,58 @@ it('fuses global branch ranks across point windows and retains each branch candi
   expect(search.mock.calls.map(call=>call[1].limit)).toEqual([3,3]);
   expect(searchKeyword.mock.calls.map(call=>call[1].limit)).toEqual([4,4]);
   expect(hybridSearch).not.toHaveBeenCalled();
+ }finally{await service.close();}
+});
+
+it.each(['rerank','topK','refill'] as const)('hydrates only the ranked bodies needed for %s', async strategy => {
+ const settings=config();
+ settings.kb.indexLayout='sparse-v1';
+ const scope={userId:randomUUID(),sessionId:randomUUID(),traceId:randomUUID()},workspaceId=randomUUID();
+ const snapshot=snapshotForSource(settings,'content_asset','markdown');
+ const fixtures=['first','second','superseded'].map((pointId,index)=>{
+  const content=pointId+' candidate',source='🚀'+content;
+  const build={id:randomUUID(),source_type:'content_asset',source_id:randomUUID(),source_revision:randomUUID(),
+   user_id:scope.userId,workspace_id:workspaceId,content_hash:digest(source),snapshot,published:true,status:'ready',
+   chunk_count:1,content_asset_revision_id:randomUUID()};
+  const row={build_id:build.id,point_id:pointId,ordinal:0,source_start:'🚀'.length,source_end:source.length,content_hash:digest(content),chunk_count:1};
+  return {build,row,source,hit:{chunkKey:pointId,score:3-index}};
+ });
+ const sql=vi.fn(async(query:string,values:unknown[]=[])=>{
+  if(query.includes('FROM user_sessions'))return {rows:[{id:scope.sessionId}],rowCount:1};
+  if(query.includes('SELECT c.*'))return {rows:fixtures.map(f=>f.row)};
+  if(query.includes('SELECT b.*')){
+   const ids=values[6] as string[]|null;
+   const selected=ids?fixtures.filter(f=>ids.includes(f.build.id)):fixtures;
+   if(query.includes('AS source_body')){
+    // The database may return a different order, and a revision can disappear after recall.
+    return {rows:selected.filter(f=>f.row.point_id!=='superseded').reverse().map(f=>({...f.build,source_body:f.source}))};
+   }
+   return {rows:selected.filter(f=>!(ids&&strategy==='refill'&&f.row.point_id==='first')).map(f=>f.build)};
+  }
+  if(['BEGIN','COMMIT','ROLLBACK'].includes(query))return {rows:[],rowCount:0};
+  throw new Error(`UNEXPECTED_SQL: ${query}`);
+ });
+ const pool={connect:async()=>Object.assign(new EventEmitter(),{query:sql,release:vi.fn()})} as unknown as pg.Pool;
+ const recall=(options:SearchOptions)=>fixtures.filter(f=>options.scope.pointIds.includes(f.row.point_id)).map(f=>f.hit);
+ const index:HybridIndex={kind:'hybrid',ensureReady:async()=>{},upsert:async()=>{},deletePoints:async()=>{},close:async()=>{},
+  search:async(_vector,options)=>recall(options),searchKeyword:async(_query,options)=>recall(options),hybridSearch:async()=>[]};
+ const rerank=vi.fn<RerankAdapter['rerank']>(async(_query,candidates)=>candidates.map((candidate,i)=>({...candidate,rerankScore:i})));
+ const service=new RagQueryService(pool,settings,{index:()=>index,...(strategy==='rerank'?{rerank:{rerank}}:{}),
+  embedding:{model:snapshot.embedding!.model,dimensions:1024,embed:async()=>[Array<number>(1024).fill(0)]}});
+ try{
+  const result=await service.query(scope,{query:'candidate',mode:'hybrid',topK:1});
+  const bodyQueries=sql.mock.calls.filter(([query])=>query.includes('AS source_body'));
+  if(strategy==='rerank'){
+   expect(rerank.mock.calls[0]?.[1].map(c=>c.chunkKey)).toEqual(['first','second']);
+   expect(bodyQueries.map(call=>call[1]?.[6])).toEqual([fixtures.map(f=>f.build.id)]);
+  }else{
+   expect(rerank).not.toHaveBeenCalled();
+   expect(bodyQueries.map(call=>call[1]?.[6])).toEqual(
+    (strategy==='refill'?fixtures.slice(0,2):fixtures.slice(0,1)).map(f=>[f.build.id]),
+   );
+  }
+  const expected=strategy==='topK'?'first':'second';
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0]).toMatchObject({chunkKey:expected,content:expected+' candidate',sourceStart:'🚀'.length});
  }finally{await service.close();}
 });

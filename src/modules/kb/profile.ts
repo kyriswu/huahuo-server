@@ -1,3 +1,5 @@
+import type pg from 'pg';
+import { PgLexicalDictionary } from './lexical-dictionary.js';
 import { DEFAULT_CONTENT_ASSET_COLLECTION, type AppConfig } from '../../config/config.js';
 import type { TokenCounter } from '../../lib/document-processing/types.js';
 import { storeIdentity } from '../../plugins/store-identity.js';
@@ -20,6 +22,12 @@ export function snapshotForSource(config:AppConfig,sourceType:KbSourceType,forma
   snapshot.tokenizer={model:CONTENT_ASSET_EMBEDDING_MODEL,id:'utf8-byte-upper-bound-v1',maxInputTokens:CONTENT_ASSET_EMBEDDING_MAX_INPUT_TOKENS};
  }
  snapshot.configHash=indexIdentityHash(snapshot);
+ if(config.kb.indexLayout==='sparse-v1'){
+  snapshot.pointIdentityHash=snapshot.configHash;
+  snapshot.indexLayout='sparse-v1';
+  snapshot.target={...target,collection:target.collection+'_sparse_v1'};
+  snapshot.configHash=indexIdentityHash(snapshot);
+ }
  return snapshot;
 }
 function indexIdentityHash(snapshot:KbSnapshot):string {
@@ -48,16 +56,18 @@ export function kbEmbedding(config:AppConfig,snapshot:KbSnapshot){
  return new BailianEmbeddingClient({baseUrl:config.rag.embeddingBaseUrl,apiKey:config.rag.embeddingApiKey,model,dimensions,timeoutMs:snapshot.indexing.timeoutMs,maxRetries:0});
 }
 export type IndexFactory=(snapshot:KbSnapshot)=>KeywordIndex|HybridIndex;
-export function knowledgeIndex(config:AppConfig,snapshot:KbSnapshot,providers?:IndexFactories):KeywordIndex|HybridIndex{
+export function knowledgeIndex(config:AppConfig,snapshot:KbSnapshot,providers?:IndexFactories,pool?:pg.Pool):KeywordIndex|HybridIndex{
  if(snapshot.businessStore!==storeIdentity(config.databaseUrl)||!snapshot.target.database||!snapshot.target.collection)throw new Error('KB_TARGET_CHANGED');
+ if(snapshot.indexLayout==='sparse-v1'&&!pool&&!providers)throw new Error('KB_LEXICAL_DICTIONARY_REQUIRED');
+ const dictionary=snapshot.indexLayout==='sparse-v1'&&pool?new PgLexicalDictionary(pool):undefined;
  const defaultProviders:IndexFactories={
   keyword:binding=>{
    if(binding.connectionId!==connectionId(config))throw new Error('KB_TARGET_CHANGED');
-   return createMilvusKeywordIndex({...config.milvus,database:binding.namespace!,collection:binding.index,maxContentChars:snapshot.rules.maxChars});
+   return createMilvusKeywordIndex({...config.milvus,database:binding.namespace!,collection:binding.index,dictionary,maxContentChars:snapshot.rules.maxChars});
   },
   hybrid:binding=>{
    if(binding.connectionId!==connectionId(config))throw new Error('KB_TARGET_CHANGED');
-   return createMilvusHybridIndex({...config.milvus,database:binding.namespace!,collection:binding.index,maxContentChars:snapshot.rules.maxChars,dimensions:snapshot.embedding?.dimensions});
+   return createMilvusHybridIndex({...config.milvus,database:binding.namespace!,collection:binding.index,dictionary,maxContentChars:snapshot.rules.maxChars,dimensions:snapshot.embedding?.dimensions});
   },
  };
  return createSearchIndex(snapshot.mode,{

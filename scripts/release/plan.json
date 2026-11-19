@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261119-content-asset-terminology",
-  "baseRevision": "4b5dc0f3471027a14c85ea0a2b64a9946c6078af",
+  "id": "20261119-milvus-textless",
+  "baseRevision": "3f751ac04a885a6099c8fc7048346256f79b257b",
   "services": [
     "api-server",
     "admin",
@@ -10,19 +10,31 @@
   ],
   "database": {
     "migrations": [
-      "0021_content_asset_search_terminology.sql"
+      "0022_kb_sparse_lexical_terms.sql"
     ],
-    "verifySql": "scripts/release/changes/20261119-content-asset-terminology/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261119-milvus-textless/verify-db.sql",
     "dataChange": {
-      "mode": "inline",
-      "reason": "Rename index attributes in place and update saved search modes and the ContentAsset target name. The DDL takes exclusive locks on the affected indexes without rebuilding them. Preserve build, point and task IDs. Coordinate the Milvus rename and all runtime roles in one maintenance window."
+      "mode": "none",
+      "reason": ""
     }
   },
   "configuration": {
     "mode": "candidate",
     "changes": [
       {
-        "key": "KB_CONTENT_ASSET_HYBRID_COLLECTION",
+        "key": "KB_INDEX_LAYOUT",
+        "operation": "add",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": true,
+        "hasDefault": true
+      },
+      {
+        "key": "RAG_RERANK_PROVIDER",
         "operation": "change",
         "roles": [
           "api-server",
@@ -44,12 +56,12 @@
       "specs/backend-plan/examples/.env.compose.local.example",
       "specs/backend-plan/examples/.env.compose.cloud.example"
     ],
-    "verifyFile": "scripts/release/changes/20261119-content-asset-terminology/verify-config.mjs"
+    "verifyFile": "scripts/release/changes/20261119-milvus-textless/verify-config.mjs"
   },
   "dependencies": [
     {
-      "name": "content-asset-milvus-collection",
-      "checkFile": "scripts/release/changes/20261119-content-asset-terminology/verify-external.mjs"
+      "name": "milvus-textless-collections",
+      "checkFile": "scripts/release/changes/20261119-milvus-textless/verify-external.mjs"
     }
   ],
   "backfill": {
@@ -57,7 +69,7 @@
     "reference": null
   },
   "compatibility": {
-    "database": false,
+    "database": true,
     "api": true,
     "tasks": false,
     "configuration": false

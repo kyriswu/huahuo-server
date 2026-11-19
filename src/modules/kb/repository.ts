@@ -47,12 +47,16 @@ export async function sourceState(tx:pg.PoolClient,build:Pick<KbBuild,'source_ty
 export async function sourceContent(pool:pg.Pool,config:AppConfig,build:KbBuild):Promise<KbSource>{
  const state=await transaction(pool,tx=>sourceState(tx,build));
  if(state.deleted||state.revision!==build.source_revision)throw new DomainError(409,'KB_SOURCE_SUPERSEDED');
- let content=state.content;
+ const content=await readSourceBody(config,build.content_hash,state);
+ return {type:build.source_type,id:build.source_id,revision:build.source_revision,userId:build.user_id,workspaceId:build.workspace_id,content,format:build.snapshot.format};
+}
+export async function readSourceBody(config:AppConfig,expectedHash:string,state:{content?:string|null;uri?:string|null}):Promise<string>{
+ let content=state.content??undefined;
  if(content===undefined&&state.uri){
   const parts:Buffer[]=[];const stream=await storageFor(config).read(state.uri);
   let bytes=0;try{for await(const p of stream){const b=Buffer.isBuffer(p)?p:Buffer.from(p);bytes+=b.length;if(bytes>DOCUMENT_CANONICAL_MAX_BYTES)throw new Error('KB_BODY_TOO_LARGE');parts.push(b);}}finally{stream.destroy();}
   content=Buffer.concat(parts).toString('utf8');
  }
- if(content===undefined||digest(content)!==build.content_hash)throw new Error('KB_BODY_CHANGED');
- return {type:build.source_type,id:build.source_id,revision:build.source_revision,userId:build.user_id,workspaceId:build.workspace_id,content,format:build.snapshot.format};
+ if(content===undefined||digest(content)!==expectedHash)throw new Error('KB_BODY_CHANGED');
+ return content;
 }

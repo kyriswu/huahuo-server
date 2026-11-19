@@ -15,6 +15,7 @@ const REDIS_IMAGE = 'redis:7.4.8-bookworm';
 const MILVUS_IMAGE = 'milvusdb/milvus:v2.6.26';
 const withMilvus = process.argv.includes('--milvus');
 const withCloudMilvus = process.argv.includes('--milvus-cloud');
+const searchBenchmark = process.argv.includes('--search-benchmark');
 const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
 const runId = randomBytes(16).toString('hex');
 const database = `huahuo_test_${runId}`;
@@ -60,6 +61,7 @@ process.once('SIGINT', signalHandler);
 process.once('SIGTERM', signalHandler);
 
 try {
+  if (searchBenchmark && !withMilvus) throw new IntegrationError('TEST_SEARCH_BENCHMARK_REQUIRES_LOCAL_MILVUS');
   if (withMilvus && withCloudMilvus) throw new IntegrationError('TEST_MILVUS_MODES_CONFLICT');
   if (realpathSync(process.cwd()) !== root) throw new IntegrationError('SERVER_ROOT_REQUIRED');
   const endpoint = docker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], 'LOCAL_DOCKER_REQUIRED');
@@ -87,6 +89,7 @@ try {
     TEST_MILVUS_MODE: 'local', TEST_MILVUS_ADDRESS: `127.0.0.1:${boundPort(milvus, 19530)}`,
     TEST_MILVUS_USERNAME: 'root', TEST_MILVUS_PASSWORD: 'Milvus', TEST_MILVUS_TLS: 'false', TEST_MILVUS_DATABASE: 'default',
   });
+  if (searchBenchmark) testEnv.TEST_SEARCH_BENCHMARK = 'true';
   const milvusHealthUrl = milvus ? `http://127.0.0.1:${boundPort(milvus, 9091)}/healthz` : undefined;
 
   const deadline = Date.now() + 60_000;
