@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261119-server-ci-build-cache",
-  "baseRevision": "687f27fce09e8e293f3b76acd78794c116031589",
+  "id": "20261119-warm-cache-verification",
+  "baseRevision": "53e6b0897932939e516fd6a67514b177c2c2fe5c",
   "services": [
     "api-server",
     "admin",
@@ -10,17 +10,17 @@
   ],
   "database": {
     "migrations": [],
-    "verifySql": "scripts/release/changes/20261119-server-ci-build-cache/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261119-warm-cache-verification/verify-db.sql",
     "dataChange": {
       "mode": "none",
-      "reason": "CI scheduling and Docker dependency caching only. The database schema, migration history, data, Server code, task payloads and runtime configuration are identical to the deployed revision."
+      "reason": "Repeat the complete test release with warm Docker caches. Runtime code, dependencies, configuration and schema are unchanged."
     }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [],
     "reviewedFiles": [],
-    "verifyFile": "scripts/release/changes/20261119-server-ci-build-cache/verify-config.mjs"
+    "verifyFile": "scripts/release/changes/20261119-warm-cache-verification/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {
