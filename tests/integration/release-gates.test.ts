@@ -117,14 +117,25 @@ describe('release database gates on real isolated PostgreSQL', () => {
       expect((await pool.query('SELECT version FROM public.schema_migrations ORDER BY version')).rows).toEqual(expectedHistory);
     } finally { plan.database.migrations = []; await rm(path); }
   });
-  it('reads the drain budget even while the database holds the old release settings', async () => {
+  it('validates all persisted settings when the content asset key rename is pending', async () => {
+    const renamed = files.find(file => file.name === '0020_content_asset_naming.sql')!;
     const snapshot = (await pool.query('SELECT "values" FROM public.runtime_configuration WHERE singleton=true')).rows[0].values;
-    await pool.query(`UPDATE public.runtime_configuration SET "values"="values" || $1::jsonb WHERE singleton=true`,
-      [JSON.stringify({ 'rag.noteRerankBudgetMs': 200, 'deployment.drainTimeoutMs': 720_000 })]);
+    // Present a pre-rename history only in this isolated database fixture.
+    await pool.query(`ALTER TABLE public.schema_migrations RENAME TO ${historyBackup}`);
     try {
+      await pool.query(`CREATE TABLE public.schema_migrations AS
+        SELECT version, checksum FROM public.${historyBackup} WHERE version < $1`, [renamed.version]);
+      plan.database.migrations = files.filter(file => file.version >= renamed.version).map(file => file.name);
+      await pool.query(`UPDATE public.runtime_configuration SET "values"="values" || $1::jsonb WHERE singleton=true`,
+        [JSON.stringify({ 'rag.noteRerankBudgetMs': 200, 'features.noteIndexing': true, 'deployment.drainTimeoutMs': 720_000 })]);
       await expect(checkReleaseHistory(migrator, await loadFixture(), directory)).resolves.toMatchObject({ drainTimeoutMs: 720_000 });
+      await pool.query(`UPDATE public.runtime_configuration SET "values"="values" || '{"tasks.maxAttempts":0}'::jsonb WHERE singleton=true`);
+      await expect(checkReleaseHistory(migrator, await loadFixture(), directory)).rejects.toMatchObject({ code: 'CONFIGURATION_INVALID' });
     } finally {
+      plan.database.migrations = [];
       await pool.query('UPDATE public.runtime_configuration SET "values"=$1 WHERE singleton=true', [JSON.stringify(snapshot)]);
+      await pool.query('DROP TABLE IF EXISTS public.schema_migrations');
+      await pool.query(`ALTER TABLE public.${historyBackup} RENAME TO schema_migrations`);
     }
   });
   it('runs the fixed zero-foreign-key assertion and the declared SQL with the actual application account', async () => {
