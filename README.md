@@ -26,7 +26,7 @@ Server 进程本身不要求本机安装 CUDA 或 GPU；解析和模型服务按
 | 能力 | 依赖与配置边界 |
 | --- | --- |
 | 文件存储 | `StoragePort` 支持本地卷、阿里云 OSS、S3；同机 API/Worker 可共用本地卷，跨主机不能各用一份不共享的目录 |
-| 知识库 | 启用索引/检索时需要兼容的 Milvus；资料走 BM25，笔记使用 qwen3.7-text-embedding-flash 原生1024维/FP16与BM25，召回后由qwen3.7-text-rerank重排 |
+| 知识库 | 保留现有 Milvus 入库与查询实现、Note Embedding 和可选重排；搜索产品细节待定，现有技术参数不作为需求 |
 | PDF / Office | Xberg 解析服务；按后台节点配置调用常驻 API 或按需唤醒 ECS，内网地址须在实际运行环境可达 |
 | 短信登录 | 阿里云 SMS 的 RAM 凭据、已审核签名和模板；默认不因启动服务就发送短信 |
 | Agent 等服务 | 内部地址直连，传递可信用户/会话身份；不携带 JWT 或 ServiceKey |
@@ -54,7 +54,7 @@ flowchart LR
     Worker --> Index[Milvus]
     Worker -.笔记向量化.-> Models[Embedding / Rerank API]
     API --> Index
-    API -.笔记查询.-> Models
+    API -.现有查询实现.-> Models
 ```
 
 API 先在 PostgreSQL 事务中保存业务任务和 Outbox，Scheduler 再投递至 Redis/BullMQ，Worker 领取后通过 PG 租约执行并发布结果；Redis 不是业务结果的唯一存储。各角色使用自己的数据库账号，连接同一业务库与相应 Redis 逻辑库/命名空间。Admin 管理会话、配置和节点状态也依赖这些共享服务。
@@ -157,7 +157,7 @@ Admin 页面为 `http://127.0.0.1:3001/admin`，没有默认管理员或公开�
 ## 配置放在哪里
 
 - **ENV / 部署配置**：连接、凭据、监听、公开/内部服务地址、云控制开关、固定模型规格和集合绑定。
-- **Admin → 运行配置 / PostgreSQL**：业务功能、任务并发/重试、文件额度、RAG 预算及发布排空预算。修改业务参数不要再添加一条重复 ENV 覆盖路径。
+- **Admin → 运行配置 / PostgreSQL**：业务功能、任务并发/重试、文件额度、正文索引预算及发布排空预算。修改业务参数不要再添加一条重复 ENV 覆盖路径。
 - **处理节点**：已有节点的运行参数在后台修改，新增节点通过受审查的代码清单/迁移发布；登记后默认接收匹配任务，无单独启用开关。凭据保留在运行环境，不写进节点 JSON。
 
 环境按部署用途区分：`development` 是本地开发，`test` 是线上测试，`production` 是线上生产。分支名、Docker 的 NODE_ENV 和服务器是否能访问内网都不能代替 APP_ENV。
@@ -209,7 +209,7 @@ node --env-file=.env.host.worker --import tsx src/entrypoints/worker.ts
 # Admin / Scheduler 同理；不要将 API 数据库账号复用给其他角色。
 ```
 
-`.env.host` 需自行从模板准备；宿主直连 Redis/PG 还需实际可达地址或受控端口，不假定 Compose 已公开它们。仅预览 Admin UI 可运行 `pnpm dev:admin-ui`，默认 `http://127.0.0.1:4173/admin/` 是示例模式；真实管理操作使用运行中的 Admin 服务。
+`.env.host` 需自行从模板准备；宿主直连 Redis/PG 还需实际可达地址或受控端口，不假定 Compose 已公开它们。`pnpm dev:admin-ui` 启动 UI 开发服务，默认 `http://127.0.0.1:4173/admin/`；已删除示例登录绕过，登录及真实管理操作需使用有同源 API 的 Admin 服务。
 
 没有宿主 pnpm 时可用 `bash scripts/tooling.sh install --frozen-lockfile` 及 `bash scripts/tooling.sh typecheck` 等工具容器命令；容器只挂 Server。Compose 编排、隔离依赖和 App 参照脚本仍在宿主执行，不能给业务容器挂 Docker socket。
 
@@ -256,7 +256,7 @@ Docker JSON 日志继续交给现有 Dozzle。按角色、时间和路由找到 
 | [认证与 Admin](docs/runbooks/p02-identity.md) | 用户 JWT、会话、管理员初始化 |
 | [运行配置](docs/runbooks/runtime-configuration.md) | ENV/数据库边界、节点及业务参数 |
 | [文档提取](docs/runbooks/document-extraction.md) / [解析机](docs/runbooks/document-parser-machine.md) | 异步解析、稳定 UUID、云操作与协调 |
-| [知识库](docs/runbooks/milvus.md) / [文本入库](docs/runbooks/text-ingestion.md) | BM25、笔记混合检索及原文管理 |
+| [知识库](docs/runbooks/milvus.md) / [文本入库](docs/runbooks/text-ingestion.md) | 正文解析、入库、索引维护及原文管理 |
 | [短信](docs/runbooks/sms.md) / [对象存储](docs/runbooks/user-storage-layout.md) | 供应商配置与存储布局 |
 | [发布规范](docs/runbooks/standard-release.md) / [发布冒烟](docs/runbooks/release-smoke.md) | 候选、迁移、配置、退出及验收 |
 | [进度](docs/progress.md) / [验收记录](docs/acceptance/) | 当前实现和已知未验收事项 |

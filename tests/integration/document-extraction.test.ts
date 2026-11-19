@@ -116,7 +116,7 @@ async function setup(mode:'sync'|'async',state:Scenario='success',realKeyword=fa
  const documentApi={mode:'async' as const,parameters:serviceDefaults?null:extraction.parameters,timeoutSeconds:3120,pollMs:100,maxResponseBytes:67108864};
  await root.query('DELETE FROM processing_nodes');
  const nodeId=randomUUID(),nodePrefix=prefix+':processing-node:{'+nodeId+'}';
- await root.query('INSERT INTO processing_nodes(id,config) VALUES($1,$2)',[nodeId,JSON.stringify({documentApi,name:'loopback parser',capabilities:['document'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:baseUrl+'/node-'+prefix,healthPath:'',tokenEnv:null,eciFallback:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,enabled:true})]);
+ await root.query('INSERT INTO processing_nodes(id,config) VALUES($1,$2)',[nodeId,JSON.stringify({documentApi,name:'loopback parser',capabilities:['document'],resourceClass:'cpu',mode:'always-on',regionId:null,instanceId:null,privateIp:null,baseUrl:baseUrl+'/node-'+prefix,healthPath:'',tokenEnv:null,eciFallback:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600})]);
  apiConfig.rag.enabled=true;workerConfig.rag.enabled=true;
  const apiPool=poolFor(apiConfig),workerPool=poolFor(workerConfig),storage=new MockOssStorageAdapter(workerConfig.storageLocalRoot),memory=mockKnowledgeIndex();
  const deps={index:(snapshot:KbSnapshot)=>realKeyword?knowledgeIndex(apiConfig,snapshot):memory.keyword,

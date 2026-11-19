@@ -1,8 +1,7 @@
-import { createHash } from 'node:crypto';
+import { digest } from '../../lib/crypto.js';
 import { analyzeDocumentStructure } from '../../lib/document-processing/structure.js';
 import type { DocumentStructure, TokenCounter } from '../../lib/document-processing/types.js';
 
-export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 export interface KbDraft {
   ordinal: number; start: number; end: number; coreStart: number; coreEnd: number;
   sectionId: string | null; headingPath: string[]; content: string; embeddingText: string;

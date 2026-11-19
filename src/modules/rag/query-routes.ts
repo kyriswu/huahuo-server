@@ -7,7 +7,7 @@ import { Envelope, Strict, Text } from '../identity/schemas.js';
 import type { RagQueryService } from './query-service.js';
 import { NoteQueryTiming } from './query-timing.js';
 import { currentTelemetryFields, tracedOperation } from '../../observability/telemetry.js';
-const queryBody=Type.Object({query:Text(2000),sourceType:Type.Optional(Type.Union([Type.Literal('file'),Type.Literal('note'),Type.Literal('text')])),assetMode:Type.Optional(Type.Union([Type.Literal('ids'),Type.Literal('links')])),mode:Type.Optional(Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')])),topK:Type.Optional(Type.Integer({minimum:1,maximum:50})),documentKey:Type.Optional(Text(128)),},Strict);
+const queryBody=Type.Object({query:Text(2000),sourceType:Type.Optional(Type.Union([Type.Literal('file'),Type.Literal('note')])),assetMode:Type.Optional(Type.Union([Type.Literal('ids'),Type.Literal('links')])),mode:Type.Optional(Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')])),topK:Type.Optional(Type.Integer({minimum:1,maximum:50})),documentKey:Type.Optional(Text(128)),},Strict);
 const queryResult=Type.Object({mode:Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')]),query:Type.String(),results:Type.Array(Type.Any())},Strict);
 
 /** Public and service callers use identical query validation, execution and timing. */
@@ -15,7 +15,7 @@ export function createRagQueryRoute(queryService: RagQueryService, authorize: (r
   const timings = new WeakMap<FastifyRequest, NoteQueryTiming>();
   const sourceType=(request:FastifyRequest)=>{
     const value=(request.body as {sourceType?:unknown}|undefined)?.sourceType??'note';
-    return value==='note'||value==='file'||value==='text'?value:'other';
+    return value==='note'||value==='file'?value:'other';
   };
   const handler = async (request: FastifyRequest) => {
     if (!request.authScope) throw new DomainError(401,'UNAUTHORIZED');

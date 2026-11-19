@@ -46,7 +46,7 @@ export function registerIdentityRoutes(app:FastifyInstance,identity:IdentityServ
  route('PATCH','/api/v1/workspaces/:workspaceId',S.obj({displayName:S.Text(120)},S.Strict),S.Summary,r=>workspaces.update(scope(r),wid(r),'rename',(r.body as {displayName:string}).displayName,ifMatch(r),key(r)));
  for(const action of ['set-default','disable','restore'] as const)route('POST',`/api/v1/workspaces/:workspaceId/${action}`,undefined,S.Summary,r=>workspaces.update(scope(r),wid(r),action,undefined,ifMatch(r),key(r)));
  route('POST','/api/v1/workspace/retry-create',undefined,S.obj({status:Type.Literal('ready'),workspaceId:S.Id}),r=>workspaces.retry(scope(r),key(r)));
- route('GET','/api/v1/workspaces/current/profile',undefined,S.obj({workspaceId:S.Id,overview:Type.String(),selfDescription:Type.String(),positioning:Type.String(),conclusions:Type.Array(S.obj({profileKind:Type.String(),markdown:Type.String()})),creativePositioning:S.Nullable(S.Positioning)}),r=>workspaces.currentProfile(scope(r)));
+ route('GET','/api/v1/workspaces/current/profile',undefined,S.obj({workspaceId:S.Id,creativePositioning:S.Nullable(S.Positioning)}),r=>workspaces.currentProfile(scope(r)));
  route('POST','/api/v1/onboarding/creative-positioning',S.PositioningBody,S.obj({creativePositioning:S.Positioning,onboardingCompleted:Type.Literal(false)}),r=>workspaces.positioning(scope(r),r.body as PositioningInput,key(r)));
  route('GET','/api/v1/creative-positionings',undefined,S.obj({items:Type.Array(S.Positioning)}),r=>workspaces.positionings(scope(r)));
  route('GET','/api/v1/workspaces/:workspaceId/onboarding-draft',undefined,S.Draft,r=>workspaces.draft(scope(r),wid(r)));

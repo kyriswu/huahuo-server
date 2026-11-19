@@ -12,8 +12,6 @@ export interface JwtSettings {
   refreshTtlSeconds: number;
   privateKeyPem?: string;
   publicKeyPem?: string;
-  previousPublicKeyPem?: string;
-  previousKeyId?: string;
 }
 
 export interface AccessClaims {
@@ -21,25 +19,20 @@ export interface AccessClaims {
   jti: string;
   iss: string;
   aud: string | string[];
-  iat?: number;
-  exp?: number;
+  iat: number;
+  exp: number;
 }
 
 export interface LoadedJwtKeys {
   privateKey: KeyLike;
   publicKey: KeyLike;
   keyId: string;
-  previousPublicKey?: KeyLike;
-  previousKeyId?: string;
 }
 
 export async function loadEd25519Keys(settings: JwtSettings): Promise<LoadedJwtKeys> {
   if ((settings.privateKeyPem && !settings.publicKeyPem) || (!settings.privateKeyPem && settings.publicKeyPem)) {
     throw new Error('JWT_KEY_PAIR_INCOMPLETE');
   }
-  if (settings.previousPublicKeyPem && !settings.previousKeyId) throw new Error('JWT_PREVIOUS_KEY_ID_REQUIRED');
-  if (settings.previousKeyId && !settings.previousPublicKeyPem) throw new Error('JWT_PREVIOUS_PUBLIC_KEY_REQUIRED');
-  if (settings.previousKeyId === settings.keyId) throw new Error('JWT_KEY_ID_DUPLICATE');
   const pair = settings.privateKeyPem && settings.publicKeyPem
     ? { privateKey: await importPKCS8(settings.privateKeyPem, 'EdDSA'), publicKey: await importSPKI(settings.publicKeyPem, 'EdDSA') }
     : generateKeyPairSync('ed25519');
@@ -47,8 +40,6 @@ export async function loadEd25519Keys(settings: JwtSettings): Promise<LoadedJwtK
     privateKey: pair.privateKey,
     publicKey: pair.publicKey,
     keyId: settings.keyId,
-    ...(settings.previousPublicKeyPem ? { previousPublicKey: await importSPKI(settings.previousPublicKeyPem, 'EdDSA') } : {}),
-    ...(settings.previousKeyId ? { previousKeyId: settings.previousKeyId } : {}),
   };
 }
 
@@ -74,11 +65,7 @@ export async function signAccessToken(
 export async function verifyAccessToken(keys: LoadedJwtKeys, settings: JwtSettings, token: string): Promise<AccessClaims> {
   const header = decodeProtectedHeader(token);
   if (header.alg !== 'EdDSA' || typeof header.kid !== 'string' || !header.kid) throw new Error('JWT_HEADER_INVALID');
-  const publicKey = header.kid === keys.keyId
-    ? keys.publicKey
-    : header.kid === keys.previousKeyId
-      ? keys.previousPublicKey
-      : undefined;
+  const publicKey = header.kid === keys.keyId ? keys.publicKey : undefined;
   if (!publicKey) throw new Error('JWT_KEY_UNKNOWN');
   const result = await jwtVerify(token, publicKey, {
     algorithms: ['EdDSA'],
@@ -96,10 +83,6 @@ export async function verifyAccessToken(keys: LoadedJwtKeys, settings: JwtSettin
 export async function publicJwks(keys: LoadedJwtKeys): Promise<{ keys: JWK[] }> {
   const current = await exportJWK(keys.publicKey);
   const entries: JWK[] = [{ ...current, kid: keys.keyId, alg: 'EdDSA', use: 'sig', key_ops: ['verify'] }];
-  if (keys.previousPublicKey && keys.previousKeyId) {
-    const previous = await exportJWK(keys.previousPublicKey);
-    entries.push({ ...previous, kid: keys.previousKeyId, alg: 'EdDSA', use: 'sig', key_ops: ['verify'] });
-  }
   return { keys: entries };
 }
 

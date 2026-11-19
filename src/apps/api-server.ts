@@ -27,6 +27,8 @@ import { registerInternalRoutes } from '../http/internal-routes.js';
 import { AiTemplateAgentClient } from '../modules/ai-templates/agent-client.js';
 import { registerAiTemplateRoutes } from '../modules/ai-templates/routes.js';
 import { AiTemplateRuns } from '../modules/ai-templates/runs.js';
+import { BearerCache } from '../modules/identity/bearer-cache.js';
+import { PgEvents } from '../lib/pg-events.js';
 export async function buildApiServer(options: BuildOptions & IdentityOptions & { ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
@@ -39,7 +41,26 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  const uploads=new RedisTemporaryUploads(options.config);
  const resourceClaims=new ResourceClaims(options.config,uploads);
  app.addHook('onClose',async()=>{await uploads.close();});
- const identity=new IdentityService(pool,options.config,options);
+ let nextCacheWarning = 0;
+ const cacheWarning = () => {
+  if (Date.now() < nextCacheWarning) return;
+  nextCacheWarning = Date.now() + 60_000;
+  app.log.warn({ event: 'auth.bearer_cache_unavailable' }, 'Bearer session cache unavailable');
+ };
+ const bearerCache = dependencies.bearerCache &&
+  new BearerCache(dependencies.bearerCache, options.config.queuePrefix, options.config.jwt.keyId, cacheWarning);
+ const identity=new IdentityService(pool,options.config,options,bearerCache);
+ if (bearerCache) {
+  const eventPool = poolFor({ ...options.config, poolMax: 1 });
+  eventPool.on('error', cacheWarning);
+  const events = new PgEvents(eventPool, ['bearer_auth_cache']);
+  app.addHook('onReady', async () => {
+   await events.subscribe('bearer_auth_cache', null, payload => {
+    if (payload) void identity.invalidateBearerEvent(payload).catch(cacheWarning);
+   });
+  });
+  app.addHook('preClose', async () => { await events.close(); await eventPool.end(); });
+ }
  registerIdentityRoutes(app,identity,new WorkspaceService(pool,options.config.appTokenSecret!,resourceClaims));
  const billing=new BillingService(pool,options.config);
  if (options.config.billingMode !== 'disabled') registerBillingRoutes(app,billing);

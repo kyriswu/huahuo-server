@@ -6,7 +6,7 @@ import { schemaMigrations } from '../db/schema.js';
 import { isMigrationHistoryReady, loadMigrationFiles } from '../db/migration-files.js';
 import type { AppConfig } from '../config/config.js';
 export interface DependencyHealth { postgres: boolean; schema: boolean; redisCache: boolean; redisQueue: boolean; }
-export interface Dependencies { pool?: pg.Pool; check(): Promise<DependencyHealth>; close(): Promise<void>; }
+export interface Dependencies { pool?: pg.Pool; bearerCache?: Redis; check(): Promise<DependencyHealth>; close(): Promise<void>; }
 export const isReady = (h: DependencyHealth) => Object.values(h).every(Boolean);
 export function poolFor(config: AppConfig) {
   return new pg.Pool({ connectionString: config.databaseUrl, ssl: config.ssl, max: config.poolMax,
@@ -26,9 +26,15 @@ export function createDependencies(config: AppConfig, migrationDirectory = resol
     return client;
   };
   const cache = redis(config.redisCacheUrl), queue = redis(config.redisQueueUrl);
+  const bearerCache = config.role === 'api-server' ? new Redis(config.redisCacheUrl, {
+    enableOfflineQueue: false, autoResendUnfulfilledCommands: false, maxRetriesPerRequest: 0,
+    connectTimeout: 500, commandTimeout: 100, retryStrategy: times => Math.min(times * 200, 2000),
+  }) : undefined;
+  bearerCache?.on('error', () => undefined);
   let pending: Promise<DependencyHealth> | undefined;
   return {
     pool,
+    ...(bearerCache ? { bearerCache } : {}),
     check() {
       // Coalesce probes to avoid opening many simultaneous pool queries during outages.
       pending ??= (async () => {
@@ -45,6 +51,6 @@ export function createDependencies(config: AppConfig, migrationDirectory = resol
       })().finally(() => { pending = undefined; });
       return pending;
     },
-    async close() { cache.disconnect(); queue.disconnect(); await pool.end(); },
+    async close() { bearerCache?.disconnect(); cache.disconnect(); queue.disconnect(); await pool.end(); },
   };
 }

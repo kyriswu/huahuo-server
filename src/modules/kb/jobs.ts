@@ -1,13 +1,14 @@
+import {digest} from '../../lib/crypto.js';
 import pg from 'pg';
 import type { AppConfig } from '../../config/config.js';
-import type { Attempt } from '../tasks/engine.js';
+import type { Attempt } from '../tasks/execution.js';
 import { DomainError,transaction } from '../identity/store.js';
 import { indexChunks, type BoundVectorStoreAdapter } from '../../lib/rag-indexing/index.js';
 import type { EmbeddingAdapter } from '../../lib/rag-indexing/index.js';
 import { indexKeywordChunks } from '../../lib/search-index/keyword-indexing.js';
 import { requireIndexKind } from '../../lib/search-index/factory.js';
 import type { HybridIndex, KeywordIndex } from '../../lib/search-index/types.js';
-import { splitKnowledgeContent,digest,type KbDraft } from './split.js';
+import { splitKnowledgeContent,type KbDraft } from './split.js';
 import { kbTokenizer,kbEmbedding,knowledgeIndex,type IndexFactory } from './profile.js';
 import { createBuild,sourceContent,sourceState,modeForSource } from './repository.js';
 import { tablesFor,type KbBuild,type KbSource,type KbSnapshot,type KbSourceType } from './types.js';
@@ -15,6 +16,7 @@ import type { TokenCounter } from '../../lib/document-processing/types.js';
 export class KbJobError extends Error{constructor(readonly code:string,readonly retryable=true){super(code);}}
 export interface KbDependencies {index?:IndexFactory;embedding?:(snapshot:KbSnapshot)=>EmbeddingAdapter;tokenizer?:(snapshot:KbSnapshot)=>Promise<TokenCounter>;}
 interface StoredChunk{ordinal:number;point_id:string;source_start:number;source_end:number;content_hash:string;index_status:string;}
+const chunkWriteBatchSize=256;
 export class KnowledgeIndexJobs {
  constructor(readonly pool:pg.Pool,readonly config:AppConfig,readonly dependencies:KbDependencies={}){}
  async close():Promise<void>{}
@@ -52,13 +54,23 @@ export class KnowledgeIndexJobs {
       drafts=plan.chunks;
       const occurrences=new Map<string,number>();
       await transaction(this.pool,async tx=>{await check(tx);
-       for(const draft of plan.chunks){
-        const k=draft.contentHash+draft.inputHash;const occurrence=occurrences.get(k)??0;occurrences.set(k,occurrence+1);
-        const pointId=digest(JSON.stringify([source.type,source.id,build.config_hash,k,occurrence]));
-        // Only exactly identical model input, rules and bound target can reuse a ready point.
-        const reusable=mode==='note-hybrid'&&(await tx.query(`SELECT 1 FROM ${chunks} c JOIN ${builds} b ON b.id=c.build_id WHERE c.point_id=$1 AND c.index_status='ready' AND b.source_id=$2 AND b.user_id=$3 AND b.config_hash=$4 AND b.cleanup_status<>'ready' LIMIT 1`,[pointId,source.id,source.userId,build.config_hash])).rowCount;
-        await tx.query(`INSERT INTO ${chunks}(build_id,ordinal,point_id,source_start,source_end,content_hash,char_count,index_status${mode==='note-hybrid'?',core_start,core_end,section_id,input_hash,token_count':''}) VALUES($1,$2,$3,$4,$5,$6,$7,$8${mode==='note-hybrid'?',$9,$10,$11,$12,$13':''}) ON CONFLICT(build_id,ordinal) DO NOTHING`,
-         [id,draft.ordinal,pointId,draft.start,draft.end,draft.contentHash,draft.charCount,reusable?'ready':'pending',...(mode==='note-hybrid'?[draft.coreStart,draft.coreEnd,draft.sectionId,draft.inputHash,draft.tokenCount]:[])]);
+       for(let offset=0;offset<plan.chunks.length;offset+=chunkWriteBatchSize){
+        const batch=plan.chunks.slice(offset,offset+chunkWriteBatchSize).map(draft=>{
+         const k=draft.contentHash+draft.inputHash;const occurrence=occurrences.get(k)??0;occurrences.set(k,occurrence+1);
+         return {draft,pointId:digest(JSON.stringify([source.type,source.id,build.config_hash,k,occurrence]))};
+        });
+        // EXISTS keeps both the lookup input and result bounded even when many
+        // historical builds reference the same reusable point.
+        const reusable=new Set(mode==='note-hybrid'?(await tx.query<{point_id:string}>(`SELECT requested.point_id FROM unnest($1::text[]) AS requested(point_id)
+         WHERE EXISTS(SELECT 1 FROM ${chunks} c JOIN ${builds} b ON b.id=c.build_id
+          WHERE c.point_id=requested.point_id AND c.index_status='ready' AND b.source_id=$2 AND b.user_id=$3 AND b.config_hash=$4 AND b.cleanup_status<>'ready')`,
+         [batch.map(row=>row.pointId),source.id,source.userId,build.config_hash])).rows.map(row=>row.point_id):[]);
+        const values:unknown[]=[];
+        const records=batch.map(({draft,pointId})=>{
+         const fields=[id,draft.ordinal,pointId,draft.start,draft.end,draft.contentHash,draft.charCount,reusable.has(pointId)?'ready':'pending',...(mode==='note-hybrid'?[draft.coreStart,draft.coreEnd,draft.sectionId,draft.inputHash,draft.tokenCount]:[])];
+         const start=values.length;values.push(...fields);return '('+fields.map((_,i)=>'$'+(start+i+1)).join(',')+')';
+        });
+        await tx.query(`INSERT INTO ${chunks}(build_id,ordinal,point_id,source_start,source_end,content_hash,char_count,index_status${mode==='note-hybrid'?',core_start,core_end,section_id,input_hash,token_count':''}) VALUES ${records.join(',')} ON CONFLICT(build_id,ordinal) DO NOTHING`,values);
        }
        await tx.query(`UPDATE ${builds} SET planned=true,chunk_count=$2,status='indexing',toc=$3::jsonb,toc_status='ready',updated_at=now() WHERE id=$1`,[id,plan.chunks.length,JSON.stringify(plan.structure?.toc??[])]);
       });
@@ -73,7 +85,8 @@ export class KnowledgeIndexJobs {
      try{
       if(mode==='note-hybrid'){
        const hybrid=requireIndexKind(index,'hybrid');
-       const records=rows.map(row=>{const draft=drafts!.find(c=>c.ordinal===row.ordinal)!;if(draft.contentHash!==row.content_hash)throw new KbJobError('KB_PLAN_CHANGED',false);return {id:row.point_id,embeddingText:draft.embeddingText,metadata:{content:draft.content}};});
+       const draftsByOrdinal=new Map(drafts?.map(draft=>[draft.ordinal,draft]));
+       const records=rows.map(row=>{const draft=draftsByOrdinal.get(row.ordinal)!;if(draft.contentHash!==row.content_hash)throw new KbJobError('KB_PLAN_CHANGED',false);return {id:row.point_id,embeddingText:draft.embeddingText,metadata:{content:draft.content}};});
        const store:BoundVectorStoreAdapter={target:build.snapshot.target,upsert:async(vs,o)=>write(hybrid.upsert(vs.map(v=>({id:v.id,sourceId:source.id,sourceType:source.type,userId:source.userId,workspaceId:source.workspaceId,content:String(v.metadata.content),embedding:v.embedding})),o)),delete:async selector=>{if(!selector.ids)throw new Error('KB_POINT_IDS_REQUIRED');await index.deletePoints(selector.ids);}};
        items=(await indexChunks(records,{embeddingAdapter:embedder!,tokenizer:tokenizer!,vectorStoreAdapter:store,options:{...build.snapshot.indexing,maxEmbeddingTokens:tokenizer!.maxInputTokens}})).items;
       }else{

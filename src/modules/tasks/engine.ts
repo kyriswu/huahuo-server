@@ -7,16 +7,26 @@ import { type TaskRow, hash, event, enqueueIntent, retryDelay,parserRequestId } 
 import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 import type {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
 import { UnavailableTagExtractor, extractBoundedTags, validateTagLabels, type TagExtractor } from '../assets/tag-extractor.js';
-import type { RagIngestionJobs } from '../rag/jobs.js';
+import type { Attempt, TaskExecutor, TaskStepOutcome } from './execution.js';
 import type { NoteIndexJobs } from '../ingestion/jobs.js';
 import { withApplicationMetrics, type TaskMetrics, type TaskResult } from '../../plugins/metrics.js';
 import { finalizeTaskTx, lockOwnedAttemptTx } from './lifecycle.js';
 import { finalizeUnsuccessfulTaskTx } from './reservations.js';
 import type { BillingService } from '../billing/service.js';
-export type TaskStepOutcome='recorded'|'deferred'|'stale'|'retry_scheduled'|'reconciling';
-export interface Attempt {task:TaskRow;owner:string;version:number;attempt:number;signal?:AbortSignal;stepOutcome?:TaskStepOutcome;}
+export type { Attempt, TaskStepOutcome } from './execution.js';
 export class TaskEngine {
- constructor(readonly pool:pg.Pool,readonly leaseMs=15000,readonly billing?:BillingService,readonly storage?:StorageJobs,readonly tagExtractor:TagExtractor=new UnavailableTagExtractor('disabled'),readonly rag?:RagIngestionJobs,readonly noteIndex?:NoteIndexJobs,readonly textIngestion?:TextIngestionJobs,readonly nodeJobs?:ProcessingNodeJobs,readonly metrics?:TaskMetrics){}
+ constructor(
+  readonly pool: pg.Pool,
+  readonly leaseMs = 15000,
+  readonly billing?: BillingService,
+  readonly storage?: StorageJobs,
+  readonly tagExtractor: TagExtractor = new UnavailableTagExtractor('disabled'),
+  readonly rag?: TaskExecutor,
+  readonly noteIndex?: NoteIndexJobs,
+  readonly textIngestion?: TextIngestionJobs,
+  readonly nodeJobs?: ProcessingNodeJobs,
+  readonly metrics?: TaskMetrics,
+ ){}
  private transaction<T>(operation:(tx:pg.PoolClient)=>Promise<T>){return withApplicationMetrics(this.metrics,()=>transaction(this.pool,operation));}
  private recordAttempt(kind:string,result:TaskResult){try{this.metrics?.recordTaskAttempt(kind,result);}catch{/* Diagnostics cannot replace a committed attempt result. */}}
  async claim(id:string,owner:string):Promise<Attempt|null>{return this.transaction(async tx=>{
@@ -100,7 +110,8 @@ export class TaskEngine {
    if(!await this.heartbeat(a))return false;
    const input=(await this.pool.query('SELECT body FROM task_inputs WHERE id=$1 AND user_id=$2 AND workspace_id=$3',[a.task.input_id,a.task.user_id,a.task.workspace_id])).rows[0];
    if(!input)return this.fail(a,'INPUT_UNAVAILABLE',false);
-   const spec=JSON.parse(String(input.body)) as {noteId:string;revisionId:string;tagSetVersion?:number};
+   const spec=JSON.parse(String(input.body)) as {noteId:string;revisionId:string;tagSetVersion:number};
+   if(!Number.isSafeInteger(spec.tagSetVersion)||spec.tagSetVersion<0)return this.fail(a,'TAG_INPUT_INVALID',false);
    const n=(await this.pool.query(`SELECT n.*,p.content_markdown FROM notes n
      JOIN workspaces w ON w.id=n.workspace_id AND w.user_id=$3 AND w.state='ready'
      LEFT JOIN note_parts p ON p.note_id=n.note_id AND p.part='raw'
@@ -120,8 +131,7 @@ export class TaskEngine {
        WHERE note_id=$1 AND workspace_id=$2 FOR UPDATE OF n`,[spec.noteId,a.task.workspace_id,a.task.user_id])).rows[0];
      let status='stale';
      if(locked?.state==='active' && locked.note_revision_id===spec.revisionId){
-       // Only the first automatic extraction may write the effective set. Legacy
-       // tasks without a captured tag version are never allowed to overwrite it.
+       // Only the first automatic extraction may write the effective set.
        const automatic=spec.tagSetVersion===0 && Number(locked.tag_set_version)===0 && !locked.tag_manual_override;
        if(automatic){
          await tx.query("DELETE FROM note_tags WHERE note_id=$1 AND source='extracted'",[spec.noteId]);

@@ -5,7 +5,8 @@ import { poolFor } from '../../src/plugins/dependencies.js';
 import { migrate } from '../../src/db/migrate.js';
 import { TaskService } from '../../src/modules/tasks/service.js';
 import { QueuePublisher } from '../../src/modules/tasks/publisher.js';
-import { TaskWorkers } from '../../src/modules/tasks/queue.js';
+import { createTaskWorkers } from '../../src/apps/worker.js';
+import type { TaskWorkers } from '../../src/modules/tasks/queue.js';
 import { insertFixtureUser, insertFixtureSession, testJwtEnv } from './jwt-fixture.js';
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
@@ -54,7 +55,7 @@ async function until(check: () => Promise<boolean>) {
 it('drains one worker with live lease renewal while a replacement finishes new work', async () => {
   // Deliberately longer than the retired ten-second exit deadline; no provider calls.
   workerConfig.testTaskDelayMs = 11000;
-  const old = new TaskWorkers(workerPool, workerConfig);
+  const old = createTaskWorkers(workerPool, workerConfig);
   let replacement: TaskWorkers | undefined;
   try {
     const first = await publish();
@@ -73,7 +74,7 @@ it('drains one worker with live lease renewal while a replacement finishes new w
     expect(await state(first)).toMatchObject({ state: 'running', leased: true, attempt_no: 1 });
     expect(await state(second)).toMatchObject({ state: 'queued', attempt_no: 0 });
     const nextConfig = loadConfig('worker', { ...env, DATABASE_URL: process.env.TEST_DATABASE_WORKER_URL });
-    replacement = new TaskWorkers(workerPool, nextConfig);
+    replacement = createTaskWorkers(workerPool, nextConfig);
     await until(async () => (await state(second)).state === 'succeeded');
     expect(closed).toBe(false);
     await closing;
@@ -92,7 +93,7 @@ it('updates all shared-queue consumers before API handover, including late reque
   });
   const oldApi = await buildApiServer({ config: roleConfig('api-server') });
   const nextApi = await buildApiServer({ config: roleConfig('api-server') });
-  const oldWorkers = [new TaskWorkers(workerPool, roleConfig('worker')), new TaskWorkers(workerPool, roleConfig('worker'))];
+  const oldWorkers = [createTaskWorkers(workerPool, roleConfig('worker')), createTaskWorkers(workerPool, roleConfig('worker'))];
   const nextConfig = roleConfig('worker');
   // Shorten only the fixture's delivery repair interval. Production remains 30s.
   const nextScheduler = new TaskScheduler(schedulerPool, publisher, randomUUID(), 50);
@@ -109,7 +110,7 @@ it('updates all shared-queue consumers before API handover, including late reque
     const backlog = await accept(oldApi, text, key);
     expect(await state(backlog)).toMatchObject({ state: 'queued', attempt_no: 0 });
 
-    next = new TaskWorkers(workerPool, nextConfig);
+    next = createTaskWorkers(workerPool, nextConfig);
     await until(async () => next!.healthy());
     await Promise.all(oldWorkers.map(worker => worker.drain()));
     expect(oldWorkers.every(worker => !worker.healthy())).toBe(true);

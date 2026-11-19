@@ -3,7 +3,7 @@ import { buildApiServer } from '../../src/apps/api-server.js';
 import { buildAdminServer } from '../../src/apps/admin.js';
 import { buildBase } from '../../src/apps/base.js';
 import { config, dependencies } from '../helpers.js';
-describe('P01 routes and App-compatible base envelope (no Dart runtime)',()=>{
+describe('HTTP routes and response envelope (no Dart runtime)',()=>{
  it('trusts only the adjacent proxy hop when explicitly configured',async()=>{
   for(const hops of [0,1]){
    const app=await buildBase({config:{...config(),httpTrustProxyHops:hops},dependencies:dependencies()});
@@ -32,8 +32,9 @@ describe('P01 routes and App-compatible base envelope (no Dart runtime)',()=>{
   const app=await buildApiServer({config:config(),dependencies:dependencies()});
   try {
    const r=await app.inject({method:'GET',url:'/health/ready',headers:{'x-trace-id':'trace_docs_fixture'}});
-   expect(r.statusCode).toBe(200);expect(r.json()).toEqual({success:true,data:{service:'api-server',status:'ready',stage:'P06',mode:'asset-knowledge'},traceId:'trace_docs_fixture'});
+   expect(r.statusCode).toBe(200);expect(r.json()).toEqual({success:true,data:{service:'api-server',status:'ready',version:config().telemetry.version},traceId:'trace_docs_fixture'});
    expect(r.headers['x-trace-id']).toBe('trace_docs_fixture');
+   expect(app.swagger().info.version).toBe(config().telemetry.version);
    for(const url of ['/admin','/admin/api/v1','/admin/api/v1/users','/api/v1/home']) expect((await app.inject(url)).statusCode).toBe(404);
    expect(Object.keys(app.swagger().paths ?? {})).toContain('/api/v1/auth/login');
    expect(Object.keys(app.swagger().paths ?? {}).some(p=>p.startsWith('/admin'))).toBe(false);
@@ -56,10 +57,10 @@ describe('P01 routes and App-compatible base envelope (no Dart runtime)',()=>{
    const fail=await app.inject('/test-error');expect(fail.statusCode).toBe(500);expect(fail.body).not.toContain('secret');
   }finally{await app.close();}
  });
- it('supports App empty JSON POST while requiring login fields and rejecting malformed JSON',async()=>{
+ it('rejects empty and malformed JSON bodies and requires login fields',async()=>{
   const app=await buildApiServer({config:config(),dependencies:dependencies()});
   try{
-   expect((await app.inject({method:'POST',url:'/api/v1/auth/logout',headers:{'content-type':'application/json'}})).statusCode).toBe(401);
+   expect((await app.inject({method:'POST',url:'/api/v1/auth/logout',headers:{'content-type':'application/json'}})).statusCode).toBe(400);
    expect((await app.inject({method:'POST',url:'/api/v1/auth/login',headers:{'content-type':'application/json'}})).statusCode).toBe(400);
    expect((await app.inject({method:'POST',url:'/api/v1/auth/login',headers:{'content-type':'application/json'},payload:'{broken'})).statusCode).toBe(400);
   }finally{await app.close();}

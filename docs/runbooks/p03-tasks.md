@@ -2,6 +2,8 @@
 
 P03 使用 `tasks`、`task_attempts`、`task_outbox`、`task_results`、`task_events` 和 `task_schedule_windows` 作为 PostgreSQL 权威记录。Redis/BullMQ 只保存投递 job，payload 只有 `taskId`。Scheduler 是唯一 Outbox 投递入口；Worker 只消费队列并以 attempt/version/lease CAS 写结果。
 
+2026-11-18 本地候选：周期投递修复复用最近的 sent Outbox 行和 jobId；已有 waiting/active/delayed job 保留，completed/failed job 重新入队，丢失则重建。真实 retry/continuation 仍是新的业务投递意图。0016 仅禁用无业务动作的默认 maintenance-check-v1，不删除历史，也不影响 Worker 的临时上传清理或通用调度。见[写入优化验收](../acceptance/pg-row-growth-optimization-20261118.md)，未应用到实际环境。
+
 本地完成迁移后启动：
 
 ```bash

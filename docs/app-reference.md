@@ -1,3 +1,7 @@
+## Bearer 会话缓存参照（2026-11-19）
+
+只读核对 App 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`。App 在 `lib/core/network/api_client.dart` 发出 `Authorization: Bearer <accessToken>`，在 `lib/features/auth/data/http_auth_repository.dart` 调用原 `POST /api/v1/auth/refresh` 并读取轮换后的令牌。共享缓存只改变服务端鉴权路径，App 请求、响应和刷新协议沿用现有契约。[鉴权契约](runbooks/gateway-auth.md)
+
 ## 用户资源与当前笔记参照（2026-11-17）
 
 沿用本轮只读核对的 App 提交 `bf23c1b14d847de5561c1ba66bd4192dc308b356`；`lib` 未发现上传 HTTP、contentMd5/uploadRequired 或 Note 历史正文的消费者。当前改动只在 Server：资源只按用户归属、同一资源 ID 多处引用及计数、零引用自动硬删除、Note 只存当前正文；旧 part 修订入参不再接受。按用户最终要求不做内容去重，客户端不计算 MD5/SHA；接线时以幂等键重试同次上传、用 resourceId 复用文件，按 uploadRequired 决定是否直传，并用 If-Match 编辑当前 Note，不将修订 ID 当历史正文查询键。本轮不写 App、不运行 Flutter，不宣称移动端上传已联调。参见[当前协议与验证](acceptance/user-resources-and-current-notes.md)。

@@ -11,7 +11,7 @@ export interface PositioningInput { name:string;industry:string;accountGoal:stri
 export interface DraftInput { mode:''|'business'|'no_business';stepIndex:number;answers:Record<string,string|string[]>;deferred:boolean;expectedVersion:number; }
 export const workspaceEtag=(row:WorkspaceRow)=>`"workspace-${row.id}-${row.revision}"`;
 export const workspaceDto=(row:WorkspaceRow)=>({workspaceId:row.id,displayName:row.display_name,state:row.state,isDefault:row.is_default,etag:workspaceEtag(row)});
-function profileDto(p:ProfileRow,isDefault:boolean){return {creativePositioningId:p.id,contentLineId:p.id,name:p.name,industry:p.industry,accountGoal:p.account_goal,targetAudience:p.target_audience,commonExpressions:p.common_expressions,status:'active',version:p.version,isDefault,isPlaceholder:false};}
+function profileDto(p:ProfileRow,isDefault:boolean){return {creativePositioningId:p.id,name:p.name,industry:p.industry,accountGoal:p.account_goal,targetAudience:p.target_audience,commonExpressions:p.common_expressions,status:'active',version:p.version,isDefault};}
 async function workspace(tx:pg.PoolClient,scope:Scope,id:string) {
  const r=await tx.query<WorkspaceRow>('SELECT * FROM workspaces WHERE id=$1 AND user_id=$2',[id,scope.userId]);
  if(!r.rows[0])throw new DomainError(404,'WORKSPACE_NOT_FOUND');return r.rows[0];
@@ -51,7 +51,8 @@ export class WorkspaceService {
  });}
  list(scope:Scope){return this.read(scope,async tx=>({items:(await tx.query<WorkspaceRow>('SELECT * FROM workspaces WHERE user_id=$1 ORDER BY created_at,id',[scope.userId])).rows.map(workspaceDto)}));}
  detail(scope:Scope,id:string){return this.read(scope,async tx=>{
-  const w=await workspace(tx,scope,id);return {...workspaceDto(w),bootstrapReceiptId:w.bootstrap_receipt_id,bootstrapContentCursor:'0',contentCursor:'0'};
+  const w=await workspace(tx,scope,id);const current=(await tx.query<{next_cursor:string}>('SELECT next_cursor FROM workspace_content_state WHERE workspace_id=$1',[id])).rows[0];
+  return {...workspaceDto(w),bootstrapReceiptId:w.bootstrap_receipt_id,bootstrapContentCursor:'0',contentCursor:String(current?.next_cursor??0)};
  });}
  create(scope:Scope,input:{displayName:string;setAsDefault:boolean},key:string){return this.write(scope,'workspace.create',key,input,async tx=>{
   if(input.setAsDefault)await tx.query('UPDATE workspaces SET is_default=false,revision=revision+1,updated_at=now() WHERE user_id=$1 AND is_default',[scope.userId]);
@@ -78,7 +79,7 @@ export class WorkspaceService {
   const r=await tx.query<{id:string}>('SELECT id FROM workspaces WHERE user_id=$1 AND is_default',[scope.userId]);
   if(!r.rows[0])throw new DomainError(409,'WORKSPACE_NOT_READY');
   const p=await tx.query<ProfileRow>('SELECT * FROM workspace_profiles WHERE workspace_id=$1',[r.rows[0].id]);
-  return {workspaceId:r.rows[0].id,overview:'',selfDescription:'',positioning:'',conclusions:[],creativePositioning:p.rows[0]?profileDto(p.rows[0],true):null};
+  return {workspaceId:r.rows[0].id,creativePositioning:p.rows[0]?profileDto(p.rows[0],true):null};
  });}
  positionings(scope:Scope){return this.read(scope,async tx=>{
   const r=await tx.query<ProfileRow & {is_default:boolean}>('SELECT p.*,w.is_default FROM workspace_profiles p JOIN workspaces w ON w.id=p.workspace_id WHERE w.user_id=$1 AND w.state=\'ready\' ORDER BY w.created_at',[scope.userId]);

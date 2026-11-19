@@ -177,17 +177,16 @@ describe('gateway admission and Studio refresh', () => {
       expect(id.logout).toHaveBeenCalledWith(scope);
       const invalid = await app.inject({ method: 'POST', url: '/internal/v1/gateway/logout', headers: { origin: studio.origin, cookie: `huahuo-studio-access=${expired}` } });
       expect(invalid.statusCode).toBe(200);
-      expect(invalid.headers['set-cookie']).toHaveLength(4);
+      expect(invalid.headers['set-cookie']).toHaveLength(2);
       expect((invalid.headers['set-cookie'] as string[]).every(value => value.includes('Max-Age=0'))).toBe(true);
       const foreign = await app.inject({ method: 'POST', url: '/internal/v1/gateway/logout', headers: { origin: 'https://other.test' } });
       expect(foreign.statusCode).toBe(403); expect(foreign.headers['set-cookie']).toBeUndefined();
     } finally { await app.close(); }
   });
-  it('uses scoped secure cookies and retires legacy root-path cookies', () => {
+  it('uses only current scoped secure cookies', () => {
     const cookies = studioCookies(studio, pair);
-    expect(cookies).toHaveLength(4);
-    expect(cookies.slice(0, 2).every(value => value.includes('Path=/;') && value.includes('Max-Age=0'))).toBe(true);
-    expect(cookies.slice(2).every(value => value.includes('Path=/agent; HttpOnly; SameSite=Lax; Secure'))).toBe(true);
+    expect(cookies).toHaveLength(2);
+    expect(cookies.every(value => value.includes('Path=/agent; HttpOnly; SameSite=Lax; Secure'))).toBe(true);
   });
   it('validates Studio gateway configuration without any service keys', () => {
     expect(loadConfig('api-server', { ...env, HUAHUO_STUDIO_AUTH_ENABLED: 'true' }).gatewayStudio).toEqual({ enabled: true, origin: 'http://localhost:3000', publicPath: '/agent' });

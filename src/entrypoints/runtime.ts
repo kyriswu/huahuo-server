@@ -84,5 +84,5 @@ export async function serve(app: FastifyInstance, config: AppConfig, shutdownOpt
     await app.listen({ host: config.host, port: config.port });
     if (config.metrics.enabled) metricsServer = await listenMetrics(app.metrics, config.metrics.host, config.metrics.port);
   } catch (error) { controller.dispose(); try { await app.close(); } finally { detachSignals(); } throw error; }
-  app.log.info({ stage: 'P03', role: config.role }, 'Role started');
+  app.log.info({ event: 'service.started', role: config.role, version: config.telemetry.version }, 'Role started');
 }

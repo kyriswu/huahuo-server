@@ -17,11 +17,7 @@ def selected_roles(services, known_roles):
 
 
 def successful_images(state, roles):
-    # Existing successful records have one image for all roles. New records add
-    # per-role identities so an unchanged role can keep its successful image.
     images = state.get("roleImages")
-    if images is None:
-        images = {role: {"image": state.get("image"), "imageId": state.get("imageId")} for role in roles}
     if not isinstance(images, dict) or set(images) != set(roles):
         raise ReleasePolicyError("RELEASE_IMAGE_RECORD_INVALID")
     for image in images.values():

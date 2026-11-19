@@ -37,10 +37,8 @@ export async function enqueueIntent(tx:pg.PoolClient,id:string,delayMs=0) {
   ) INSERT INTO task_outbox(id,task_id,available_at) VALUES($1,$2,now()+$3*interval '1 millisecond')
   ON CONFLICT(task_id) WHERE status IN ('pending','delivering') DO UPDATE SET available_at=least(task_outbox.available_at,excluded.available_at)`,[randomUUID(),id,delayMs,carrier.traceparent?JSON.stringify(carrier):null]);
 }
-// WorkAiTaskInfo only treats succeeded/failed as terminal. Preserve raw state separately.
 export function taskDto(t:TaskRow) {
- const status=t.state==='cancelled'?'failed':t.state==='retry_scheduled'?'queued':['waiting_external','reconciling','cancel_requested'].includes(t.state)?'running':t.state;
- return {taskId:t.id,taskType:t.kind,status,state:t.state,workspaceId:t.workspace_id,version:t.version,
+ return {taskId:t.id,taskType:t.kind,state:t.state,workspaceId:t.workspace_id,version:t.version,
   attempt:t.attempt_no-t.resume_count,resultId:t.result_id,createdAt:t.created_at.toISOString(),updatedAt:t.updated_at.toISOString(),
   ...(t.error_code||t.state==='cancelled'?{error:{code:t.error_code??'TASK_CANCELLED',userMessage:t.state==='cancelled'?'任务已取消':'任务暂未完成',retryable:t.retryable}}:{})};
 }

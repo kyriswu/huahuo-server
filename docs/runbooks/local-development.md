@@ -1,10 +1,10 @@
 # 本地开发
 
-所有命令在 Server 根目录执行。App `../huahuo-app` 只读；不在父目录创建 workspace，不运行 Flutter build/pub get/test。项目通过 Volta 固定宿主 Node 26.11.0 和 pnpm 10.15.1；编译、测试和运行的 Docker 工具镜像固定为 `node:26.12.1-bookworm-slim`。
+所有命令在 Server 根目录执行。App `../huahuo-ai` 只读；不在父目录创建 workspace，不运行 Flutter build/pub get/test。项目通过 Volta 固定宿主 Node 26.11.0 和 pnpm 10.15.1；编译、测试和运行的 Docker 工具镜像固定为 `node:26.12.1-bookworm-slim`。
 
 ## 初始化与启动
 
-远程开发数据库为阿里云 `huahuo`。2026-11-07 已将上一套 `public` 归档至 `initialization_backup_20261107_note_delta`，新 `public` 使用唯一初始化基线，包含 Note 块级增量索引。运行服务使用 `huahuo-server:note-delta-init`，队列前缀为 `huahuo-dev-note-delta-20261107`。日常迁移重放仅面向当前 `public`。
+日常开发与测试服务器当前共用数据库及云资源。应用镜像和队列配置以目标成功记录与现行 `.env` 为准；历史初始化镜像不作为当前启动依据。新环境从 `0001` 按编号顺序建立，已有环境只追加待执行迁移；已执行 SQL 与 checksum 冻结。
 
 1. `node scripts/preflight-local.mjs` 检查目录与本地 daemon；`bash scripts/ensure-docker-local.sh` 默认不启动、不切 context。Desktop 未运行时可显式 `--start`；现有 Colima 不可达时脚本拒绝启动另一运行时。
 2. `docker build --target tooling -t huahuo-server-tooling:p01 .` 创建工具镜像；仅 Server 挂载的 `bash scripts/tooling.sh install --frozen-lockfile` 安装依赖（工具标签沿用 P01，不代表业务镜像版本）。
@@ -34,7 +34,7 @@ docker compose --env-file .env run --rm migrate
 docker compose --env-file .env up -d --no-build
 ```
 
-确认新迁移成功后才启动新代码。四常驻入口从不自动迁移。P01 `db:seed:dev` 需要 APP_ENV=development + ALLOW_DEV_SEED=true，当前没有业务 fixture，明确输出 seeded=0。
+确认新迁移成功后才启动新代码。四常驻入口从不自动迁移。测试数据由隔离测试自身创建和清理，不提供空操作的开发 seed 命令。
 
 `compose:down` 不带 `-v`，保留卷；`infra:up` / `infra:down` 仅启动/停止本项目 Redis。禁止 prune、down -v、重置凭据或操作未知旧卷。PG 初始化仅空卷运行；修改 env 不会轮换库密码。
 

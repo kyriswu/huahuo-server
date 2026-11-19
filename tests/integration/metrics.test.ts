@@ -7,7 +7,7 @@ import { poolFor } from '../../src/plugins/dependencies.js';
 import { ApplicationMetrics, listenMetrics, closeMetrics } from '../../src/plugins/metrics.js';
 import { TaskEngine } from '../../src/modules/tasks/engine.js';
 import { QueuePublisher } from '../../src/modules/tasks/publisher.js';
-import { TaskWorkers } from '../../src/modules/tasks/queue.js';
+import { createTaskWorkers } from '../../src/apps/worker.js';
 import { hash, queues, type QueueName } from '../../src/modules/tasks/model.js';
 import { insertFixtureUser } from './jwt-fixture.js';
 
@@ -24,7 +24,9 @@ const total = (body: string, kind: string, result: string) => body.split('\n')
 const terminalTotal=(body:string,state:string)=>body.split('\n').filter(line=>line.startsWith('task_terminal_total{')&&line.includes(`state="${state}"`)).reduce((sum,line)=>sum+Number(line.split(' ').at(-1)),0);
 async function queued(kind = 'maintenance.check', queue: QueueName = 'maintenance') {
   const id = randomUUID();
-  await root.query("INSERT INTO tasks(trace_id,id,kind,queue,state,user_id,workspace_id) VALUES(gen_random_uuid()::text,$1,$2,$3,'queued',$4,$5)", [id, kind, queue, userId, workspaceId]); return id;
+  await root.query(`INSERT INTO tasks(trace_id,id,kind,queue,state,user_id,workspace_id,created_at)
+    VALUES(gen_random_uuid()::text,$1,$2,$3,'queued',$4,$5,now()-interval '1 second')`, [id, kind, queue, userId, workspaceId]);
+  return id;
 }
 beforeAll(async () => {
   await migrate(migrator); await insertFixtureUser(root, userId);
@@ -70,8 +72,8 @@ it('counts committed attempt results once, excluding rollback, expired leases, d
 
 it('scrapes every BullMQ consumer across two worker runtimes without merging away either worker', async () => {
   const firstMetrics = new ApplicationMetrics(cfg), secondMetrics = new ApplicationMetrics(cfg);
-  const first = new TaskWorkers(workerPool, { ...cfg, instanceId: randomUUID(), workerQueues: ['content', 'ai'] }, firstMetrics);
-  const second = new TaskWorkers(workerPool, { ...cfg, instanceId: randomUUID(), workerQueues: ['commercial', 'maintenance'] }, secondMetrics);
+  const first = createTaskWorkers(workerPool, { ...cfg, instanceId: randomUUID(), workerQueues: ['content', 'ai'] }, firstMetrics);
+  const second = createTaskWorkers(workerPool, { ...cfg, instanceId: randomUUID(), workerQueues: ['commercial', 'maintenance'] }, secondMetrics);
   const publisher = new QueuePublisher(cfg);
   const one = await listenMetrics(firstMetrics, '127.0.0.1', 0), two = await listenMetrics(secondMetrics, '127.0.0.1', 0);
   const read = async (server: typeof one) => (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/metrics`)).text();

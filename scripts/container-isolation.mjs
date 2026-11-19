@@ -10,7 +10,7 @@ const assert=(condition,message)=>{if(!condition)throw new Error(message);};
 const baseline=Object.fromEntries(roles.map(r=>[r,inspect(r)]));
 assert(new Set(Object.values(baseline).map(c=>c.Id)).size===4,'ROLES_NOT_INDEPENDENT');
 for(const role of roles){
- const c=baseline[role];assert(c.Config.User==='node','NONROOT_REQUIRED');assert(c.Config.Cmd[1]===`dist/entrypoints/${role}.js`,'WRONG_ENTRYPOINT');
+ const c=baseline[role];assert(c.Config.User==='node','NONROOT_REQUIRED');assert(JSON.stringify(c.Config.Cmd)===JSON.stringify(['node','--enable-source-maps',`dist/entrypoints/${role}.js`]),'WRONG_ENTRYPOINT');
  const vars=Object.fromEntries(c.Config.Env.map(x=>{const i=x.indexOf('=');return [x.slice(0,i),x.slice(i+1)];}));
  assert(!vars.DATABASE_MIGRATION_URL && !vars.POSTGRES_BOOTSTRAP_PASSWORD,'MIGRATION_SECRET_EXPOSED');
  assert(new URL(vars.DATABASE_URL).username===`huahuo_${role==='api-server'?'api':role}`,'ROLE_DATABASE_MISMATCH');

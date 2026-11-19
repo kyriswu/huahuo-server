@@ -1,8 +1,8 @@
 # P02 身份运行与验证
 
-本页契约已部署至现有阿里云 `huahuo` 数据库的新 `public`。旧Schema原样封存为 `initialization_backup`，未删除旧行，也未复制产品用户或会话；新 `users/user_sessions` 均为0。四角色healthy，API readiness与`EdDSA/Ed25519/server-current` JWKS真实验证通过；本轮未调用短信或模型。原JWT私钥和数据库凭据未变，旧产品会话不在新 `public` 生效。
+身份与会话使用当前 `users` / `user_sessions` 契约；历史初始化和迁移记录保留在验收文档中。当前目标版本与部署状态以实际成功记录为准。
 
-当前业务启动以根目录 `.env` 和 [本地开发手册](local-development.md) 为准，数据库以 `migrations/0001_initial_schema.sql` 为唯一初始化基线，不依赖历史迁移链。`node scripts/verify.mjs` 包括类型/lint/build、unit/contract、真实临时 PG/Redis 集成测试。`node scripts/e2e-p02.mjs` 启动两个临时 HTTP 容器和随机测试数据库，运行两用户与 Admin 会话流程，finally 仅删除这些测试资源。`node scripts/container-isolation.mjs` 验证四角色独立性和依赖恢复。上述 E2E 入口仅供独立本地测试栈；当前 API 连接云 PG 时会拒绝执行。
+当前业务启动以根目录 `.env` 和 [本地开发手册](local-development.md) 为准，新环境从 `migrations/0001_initial_schema.sql` 顺序执行全部编号迁移，已有环境只执行新增迁移；已执行文件及 checksum 冻结。`node scripts/verify.mjs` 包括类型/lint/build、unit/contract、真实临时 PG/Redis 集成测试。`node scripts/e2e-p02.mjs` 启动两个临时 HTTP 容器和随机测试数据库，运行两用户与 Admin 会话流程，finally 仅删除这些测试资源。`node scripts/container-isolation.mjs` 验证四角色独立性和依赖恢复。上述 E2E 入口仅供独立本地测试栈；当前 API 连接云 PG 时会拒绝执行。
 
 ## 真实短信验证码
 
@@ -27,15 +27,15 @@
 
 `users` 是用户资料与状态的唯一主表，保存 display_name、time_zone、avatar_resource_id；仅 `status='active'` 的用户可以访问用户业务接口。手机号身份、摘要和掩码保存在 `user_identities`，响应中的 phoneMasked 从身份记录读取。会话保存在 `user_sessions`，记录 client_type 和 client_id；协议接受记录保存在 `user_agreement_acceptances`。这些表使用普通关联 ID 和业务校验，不建立物理外键。
 
-Access 为 Ed25519 签名的 JWT Bearer，默认 15 分钟，包含 `sub`、`iss`、`aud=["huahuo-server","huahuo-agent"]`、`iat`、`exp`、`jti`，并带有 `kid` 以支持公钥轮换；Server 校验自己的 audience `huahuo-server`，Agent 应校验 `huahuo-agent`。Token 绑定数据库会话；refresh 为至少 256 bit 的随机值，默认 30 天绝对期限，哈希存储、单次轮转，复用旧值撤销对应客户端 session。token/OTP 表只存摘要；为了安全重试，登录幂等响应使用 AES-GCM 加密且仅保留 5 分钟重放有效期。
+Access 为 Ed25519 签名的 JWT Bearer，默认 15 分钟，包含 `sub`、`iss`、`aud=["huahuo-server","huahuo-agent"]`、`iat`、`exp`、`jti`，并带有当前公钥的 `kid`；Server 校验自己的 audience `huahuo-server`，Agent 应校验 `huahuo-agent`。Token 绑定数据库会话；refresh 为至少 256 bit 的随机值，默认 30 天绝对期限，哈希存储、单次轮转，复用旧值撤销对应客户端 session。token/OTP 表只存摘要；为了安全重试，登录幂等响应使用 AES-GCM 加密且仅保留 5 分钟重放有效期。
 
-Server 在 `GET /.well-known/jwks.json` 发布 Ed25519 公钥。`APP_JWT_PRIVATE_KEY` 只在 Server 配置，`APP_JWT_PUBLIC_KEY` 可分发给 Agent；轮换时设置新的 `APP_JWT_KEY_ID`，并在过渡期提供 `APP_JWT_PREVIOUS_PUBLIC_KEY` 与 `APP_JWT_PREVIOUS_KEY_ID`。
+Server 在 `GET /.well-known/jwks.json` 仅发布当前 Ed25519 公钥。`APP_JWT_PRIVATE_KEY` 只在 Server 配置，`APP_JWT_PUBLIC_KEY` 可分发给受信验证方；只接受当前 `APP_JWT_KEY_ID`，更换密钥后旧 Access Token 立即失效，客户端需重新登录。
 
 `POST /api/v1/auth/logout` 撤销当前客户端 session；`POST /api/v1/auth/logout-all` 撤销该用户全部 session。普通用户 Token 可以访问其 audience 声明的 Server 和 Agent，不能作为管理员凭证。
 
 ## 会话活动记录（2026-11-17，待发布）
 
-每次网关鉴权仍验证JWT并读取当前已提交的用户/会话状态，不缓存授权结果。普通鉴权中的`last_seen_at`最多每60秒更新，行锁忙则跳过，由后续请求补记；登录与刷新仍沿用原活动记录。该字段是近似活跃时间，不参与当前token/session有效期或闲置自动过期。
+Bearer 会话按[入口鉴权契约](gateway-auth.md#bearer-会话缓存)缓存至 Redis。首次鉴权或缓存失效时读取已提交的用户/会话状态，Studio Cookie 鉴权仍逐次检查。查库时的 `last_seen_at` 最多每 60 秒更新，行锁忙则由后续请求补记。登录与刷新沿用原活动记录。该字段是近似活跃时间，不参与令牌或会话有效期。
 
 鉴权读取与可选更新在同一条主库SQL中完成，业务`assertScope FOR SHARE`不变。注销或封禁提交后的新鉴权拒绝；撤销尚未提交、鉴权快照已经开始的在途请求可能通过，不承诺撤回已放行请求。本项无新表、缓存或ENV；验证见[会话活动验收](../acceptance/session-activity.md)。
 

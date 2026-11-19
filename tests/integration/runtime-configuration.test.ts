@@ -10,7 +10,7 @@ import {hashPassword} from '../../src/modules/identity/crypto.js';
 import {ProcessingNodes} from '../../src/modules/processing-nodes/service.js';
 import type {ProcessingNode} from '../../src/modules/processing-nodes/model.js';
 import {RuntimeSettings,currentRuntimeConfig} from '../../src/modules/runtime-settings/service.js';
-import {RUNTIME_CONFIGURATION_SCHEMA_KEY,RUNTIME_CONFIGURATION_SCHEMA_VERSION} from '../../src/modules/runtime-settings/registry.js';
+import {validateValues} from '../../src/modules/runtime-settings/registry.js';
 import {ParserExecutionError,DocumentParserMachine,ParserMachineRedis} from '../../src/lib/document-parser-machine/index.js';
 import {ParserMachineIdleMonitor,type MonitorEvents} from '../../src/lib/document-parser-machine/monitor.js';
 import {ProcessingNodeJobs} from '../../src/modules/processing-nodes/jobs.js';
@@ -48,7 +48,7 @@ async function save(category:string,values:Record<string,unknown>,revision?:numb
 }
 async function nodeSave(node:ProcessingNode,revision=0){return app.inject({method:'PUT',url:'/admin/api/v1/processing-nodes/'+node.id,headers:headers(),payload:{node,revision}});}
 // Test-only equivalent of publishing a reviewed catalog row; Admin cannot create nodes.
-async function publishTestNode(node:ProcessingNode){const {id,revision,...config}=node;await root.query('INSERT INTO processing_nodes(id,config,revision) VALUES($1,$2,$3)',[id,JSON.stringify({...config,enabled:true}),revision]);}
+async function publishTestNode(node:ProcessingNode){const {id,revision,...config}=node;await root.query('INSERT INTO processing_nodes(id,config,revision) VALUES($1,$2,$3)',[id,JSON.stringify(config),revision]);}
 let originalNodes:Record<string,unknown>[]=[];
 beforeAll(async()=>{
  await migrate(loadConfig('migrate',{DATABASE_URL:database}));await redis.connect();originalNodes=(await root.query('SELECT * FROM processing_nodes')).rows;
@@ -119,9 +119,8 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   expect(audits).toHaveLength(1);expect(JSON.parse(audits[0].reason)).toMatchObject({category:'tasks',before:{'tasks.maxAttempts':3}});
   const view=await get();expect(view.definitions.map((d:{category:string})=>d.category)).toEqual(expect.arrayContaining(['tasks','rag','storage','billing','features']));
   expect(JSON.stringify(view)).not.toContain('password_hash');
-  // An ordinary edit must not add metadata unknown to pre-compatibility binaries
-  // or persist this Admin version's complete set of defaults.
-  expect((await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values).toEqual({'tasks.maxAttempts':view.values['tasks.maxAttempts']});
+  // Persist only the current validated registry, including its explicit defaults.
+  expect((await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values).toEqual(view.values);
  });
  it('keeps a consistent per-request snapshot across concurrent edits and refreshes subsequent work',async()=>{
   await save('tasks',{'tasks.maxAttempts':4});const settings=new RuntimeSettings(workerPool,workerConfig);
@@ -131,67 +130,41 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   const second=await settings.run(async()=>{expect(workerConfig.taskPolicy.maxAttempts).toBe(6);return workerConfig.runtimeRevision;});
   release();expect(await first).toBeLessThan(second);expect(currentRuntimeConfig()).toBeUndefined();expect(workerConfig.taskPolicy.maxAttempts).toBe(3);
  });
- it('edits the database drain budget in the existing deployment category and preserves future fields',async()=>{
+ it('edits the database drain budget and persists the validated current registry',async()=>{
   const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
-  const future={'deployment.futureOptional':{enabled:false}};
   try{
-   await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify({...original,...future})]);
    const response=await save('deployment',{'deployment.drainTimeoutMs':900000});expect(response.statusCode,response.body).toBe(200);
    expect(app.drainTimeoutSnapshotMs()).toBe(900000);
    expect(await app.readDrainTimeoutMs()).toBe(900000);
-   expect((await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values).toEqual({...original,...future,'deployment.drainTimeoutMs':900000});
+   expect((await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values).toEqual(validateValues({...original,'deployment.drainTimeoutMs':900000},adminConfig));
    expect((await save('deployment',{'deployment.drainTimeoutMs':599999})).statusCode).toBe(400);
    expect((await save('deployment',{'deployment.drainTimeoutMs':600000},undefined,{cookie:operatorCookie,origin:env.ADMIN_PUBLIC_BASE_URL,'x-csrf-token':operatorCsrf})).statusCode).toBe(403);
   }finally{await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(original)]);}
  });
- it('reads future optional fields safely and preserves them through a strict older Admin edit',async()=>{
+ it.each(['tasks.futureOptional','$schemaVersion','tasks.downloadTimeoutMs','storage.maxSourceBytes'])('rejects unknown stored key %s without executing work or overwriting it',async key=>{
   const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
-  const stored={[RUNTIME_CONFIGURATION_SCHEMA_KEY]:RUNTIME_CONFIGURATION_SCHEMA_VERSION,'tasks.futureOptional':{enabled:false,weights:[1,2]},'tasks.maxAttempts':4};
-  const settings=new RuntimeSettings(workerPool,workerConfig);
-  try{
-   await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(stored)]);
-   const state=await get();expect(state.values['tasks.maxAttempts']).toBe(4);
-   expect(Object.hasOwn(state.values,'tasks.futureOptional')).toBe(false);expect(state.values).not.toHaveProperty(RUNTIME_CONFIGURATION_SCHEMA_KEY);
-   expect((await app.inject('/health/ready')).statusCode).toBe(200);
-   await settings.run(async()=>{expect(workerConfig.taskPolicy.maxAttempts).toBe(4);});
-   const result=await save('tasks',{'tasks.maxAttempts':6},state.revision);expect(result.statusCode,result.body).toBe(200);
-   expect(Object.hasOwn(result.json().data.values,'tasks.futureOptional')).toBe(false);
-   expect(result.json().data.values).not.toHaveProperty(RUNTIME_CONFIGURATION_SCHEMA_KEY);
-   const persisted=(await root.query('SELECT revision,"values" FROM runtime_configuration WHERE singleton=true')).rows[0];
-   expect(persisted.values).toEqual({...stored,'tasks.maxAttempts':6});
-   for(const patch of [{'tasks.futureOptional':{enabled:true}},{[RUNTIME_CONFIGURATION_SCHEMA_KEY]:2}]){
-    expect((await save('tasks',patch,Number(persisted.revision))).statusCode).toBe(400);
-   }
-   expect((await save('tasks',{'tasks.maxAttempts':5},state.revision)).statusCode).toBe(409);
-   const unchanged=(await root.query('SELECT revision,"values" FROM runtime_configuration WHERE singleton=true')).rows[0];
-   expect(unchanged).toEqual(persisted);
-   await settings.run(async()=>{expect(workerConfig.taskPolicy.maxAttempts).toBe(6);});
-  }finally{await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(original)]);}
- });
- it('refuses an incompatible configuration contract without executing work or overwriting it',async()=>{
-  const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
-  const stored={...original,[RUNTIME_CONFIGURATION_SCHEMA_KEY]:RUNTIME_CONFIGURATION_SCHEMA_VERSION+1};
+  const stored={...original,[key]:1};
   const settings=new RuntimeSettings(workerPool,workerConfig),execute=vi.fn(async()=>undefined);
   try{
    const state=(await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true RETURNING revision',[JSON.stringify(stored)])).rows[0];
-   await expect(settings.load()).rejects.toMatchObject({code:'CONFIGURATION_VERSION_UNSUPPORTED',statusCode:503});
-   await expect(settings.run(execute)).rejects.toMatchObject({code:'CONFIGURATION_VERSION_UNSUPPORTED'});expect(execute).not.toHaveBeenCalled();
+   await expect(settings.load()).rejects.toMatchObject({code:'CONFIGURATION_KEY_UNKNOWN'});
+   await expect(settings.run(execute)).rejects.toMatchObject({code:'CONFIGURATION_KEY_UNKNOWN'});expect(execute).not.toHaveBeenCalled();
    expect((await app.inject('/health/ready')).statusCode).toBe(503);expect((await app.inject('/health/live')).statusCode).toBe(200);
-   const view=await app.inject({url:'/admin/api/v1/configuration',headers:{cookie:superCookie}});expect(view.statusCode,view.body).toBe(503);
-   const rejected=await save('tasks',{'tasks.maxAttempts':5},Number(state.revision));expect(rejected.statusCode,rejected.body).toBe(503);
-   expect(rejected.json().error.code).toBe('CONFIGURATION_VERSION_UNSUPPORTED');
+   const view=await app.inject({url:'/admin/api/v1/configuration',headers:{cookie:superCookie}});expect(view.statusCode,view.body).toBe(400);
+   const rejected=await save('tasks',{'tasks.maxAttempts':5},Number(state.revision));expect(rejected.statusCode,rejected.body).toBe(400);
+   expect(rejected.json().error.code).toBe('CONFIGURATION_KEY_UNKNOWN');
    const unchanged=(await root.query('SELECT revision,"values" FROM runtime_configuration WHERE singleton=true')).rows[0];
    expect(unchanged).toEqual({revision:state.revision,values:stored});
    expect((await root.query("SELECT count(*)::int AS n FROM admin_audit_events WHERE action='configuration.update' AND trace_id=$1",[rejected.json().traceId])).rows[0].n).toBe(0);
   }finally{await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify(original)]);}
   expect((await app.inject('/health/ready')).statusCode).toBe(200);
  });
- it('fails readiness for invalid known values and forbidden secrets even alongside compatible future fields',async()=>{
+ it('fails readiness for invalid known values and forbidden secrets',async()=>{
   const original=(await root.query('SELECT "values" FROM runtime_configuration WHERE singleton=true')).rows[0].values;
   const settings=new RuntimeSettings(workerPool,workerConfig),execute=vi.fn(async()=>undefined);
   try{
    for(const [patch,code] of [[{'tasks.maxAttempts':99},'CONFIGURATION_INVALID'],[{'tasks.futureOptional':{apiKey:'must-not-persist'}},'CONFIGURATION_SECRET_FORBIDDEN']] as const){
-    await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify({...original,'tasks.futureOptional':false,...patch})]);
+    await root.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1 WHERE singleton=true',[JSON.stringify({...original,...patch})]);
     await expect(settings.run(execute)).rejects.toMatchObject({code});
     const response=await app.inject('/health/ready');expect(response.statusCode,response.body).toBe(503);expect(response.body).not.toContain('must-not-persist');
     expect((await app.inject('/health/live')).statusCode).toBe(200);
@@ -221,9 +194,9 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   finally{release();await first;await save('rag',{'rag.rrfK':60,'rag.embeddingBatchSize':32});}
   expect(workerConfig.milvus.rrfK).toBe(60);
  });
- it('admits registered nodes regardless of the retired toggle and rejects it as an editable API field',async()=>{
+ it('admits canonical registered nodes and rejects the retired toggle in API and storage',async()=>{
   await root.query('DELETE FROM processing_nodes');const node=baseNode();await publishTestNode(node);
-  await root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false') WHERE id=$1`,[node.id]);
+  await expect(root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{enabled}','false') WHERE id=$1`,[node.id])).rejects.toMatchObject({code:'23514'});
   const id=randomUUID();expect((await nodes.bind(id,'document')).id).toBe(node.id);await nodes.settle(id);
   expect((await nodes.list())[0]).not.toHaveProperty('enabled');
   const response=await app.inject({method:'PUT',url:'/admin/api/v1/processing-nodes/'+node.id,headers:headers(),payload:{node:{...node,enabled:false},revision:1}});
@@ -268,8 +241,8 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   const next=await nodeSave({...first.json().data,name:'Shared document/audio CPU'},2);expect(next.statusCode,next.body).toBe(200);
   const rows=(await root.query('SELECT * FROM processing_nodes WHERE id=$1',[node.id])).rows;
   expect(rows).toHaveLength(1);expect(Object.keys(rows[0]).sort()).toEqual(['config','created_at','id','revision','updated_at']);
-  expect(rows[0].revision).toBe(3);expect(rows[0].config).toMatchObject({name:'Shared document/audio CPU',capabilities:['document','audio'],enabled:true});
-  expect(rows[0].config).not.toHaveProperty('revision');expect(rows[0].config).not.toHaveProperty('id');
+  expect(rows[0].revision).toBe(3);expect(rows[0].config).toMatchObject({name:'Shared document/audio CPU',capabilities:['document','audio']});
+  expect(rows[0].config).not.toHaveProperty('enabled');expect(rows[0].config).not.toHaveProperty('revision');expect(rows[0].config).not.toHaveProperty('id');
   expect((await nodes.list()).find(n=>n.id===node.id)).toMatchObject({...node,name:'Shared document/audio CPU',revision:3});
   expect((await nodeSave({...node,name:'Stale edit'},1)).statusCode).toBe(409);
   await expect(root.query(`UPDATE processing_nodes SET config=jsonb_set(config,'{concurrency}','0') WHERE id=$1`,[node.id])).rejects.toMatchObject({code:'23514'});
@@ -354,7 +327,7 @@ describe('manual startup: durable tasks, event notifications and mock cloud only
    expect((await live.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:superCookie}})).json().data.parserEnabled).toBe(true);
    expect((await root.query('SELECT state,attempt_no,resume_count FROM tasks WHERE id=$1',[taskId])).rows[0]).toMatchObject({state:'succeeded',attempt_no:3,resume_count:2});
    expect((await root.query('SELECT settled FROM processing_node_assignments WHERE request_id=$1',['manual:'+taskId])).rows[0].settled).toBe(true);
-   expect((await root.query("SELECT config->'enabled' AS enabled FROM processing_nodes WHERE id=$1",[node.id])).rows[0].enabled).toBe(true);
+   expect((await root.query("SELECT config->'enabled' AS enabled FROM processing_nodes WHERE id=$1",[node.id])).rows[0].enabled).toBe(null);
    expect(cloud.start).toHaveBeenCalledTimes(1);expect(cloud.stopEconomically).not.toHaveBeenCalled();
    // Manual boots are monitored independently of private API reachability.
    await controlled.startMonitors(error=>monitorErrors.push(error));

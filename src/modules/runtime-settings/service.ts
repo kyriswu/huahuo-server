@@ -3,7 +3,7 @@ import {AsyncLocalStorage} from 'node:async_hooks';
 import {randomUUID} from 'node:crypto';
 import type {AppConfig} from '../../config/config.js';
 import {DomainError,transaction} from '../identity/store.js';
-import {applyValues,settings,validateValues,validateStoredValues,DEFAULT_DRAIN_TIMEOUT_MS,DRAIN_TIMEOUT_KEY,type Values,type Category} from './registry.js';
+import {applyValues,settings,validateValues,DEFAULT_DRAIN_TIMEOUT_MS,DRAIN_TIMEOUT_KEY,type Values,type Category} from './registry.js';
 import {assertSuperadmin,type AdminScope} from '../admin/service.js';
 const context=new AsyncLocalStorage<AppConfig>();
 const bases=new WeakMap<AppConfig,AppConfig>();
@@ -37,7 +37,7 @@ export class RuntimeSettings {
  async load(){
   const row=(await this.pool.query('SELECT revision,"values",updated_at FROM runtime_configuration WHERE singleton=true')).rows[0];
   if(!row)throw new DomainError(503,'CONFIGURATION_UNAVAILABLE');
-  const values=validateStoredValues(row.values,this.base);
+  const values=validateValues(row.values,this.base);
   rememberDrainSnapshot(this.base,values,Number(row.revision));
   return {revision:Number(row.revision),values,updatedAt:(row.updated_at as Date).toISOString()};
  }
@@ -56,15 +56,11 @@ export class RuntimeSettings {
    await assertSuperadmin(tx,scope);
    const row=(await tx.query('SELECT * FROM runtime_configuration WHERE singleton=true FOR UPDATE')).rows[0];
    if(!row||Number(row.revision)!==expectedRevision)throw new DomainError(409,'CONFIGURATION_CONFLICT');
-   const previous=validateStoredValues(row.values,this.base);
+   const previous=validateValues(row.values,this.base);
    const values=validateValues({...previous,...patch},this.base);
    const policy=(await tx.query('SELECT mode FROM billing_policies WHERE policy_version=$1',[values['billing.policyVersion']])).rows[0];
    if(!policy||this.base.billingMode!=='disabled'&&policy.mode!==this.base.billingMode)throw new DomainError(400,'CONFIGURATION_BILLING_POLICY_INVALID');
-   // Preserve fields owned by newer compatible binaries, without persisting
-   // this binary's defaults or allowing Admin input to change schema metadata.
-   // Leave implicit v1 implicit: pre-compatibility binaries reject new metadata.
-   const stored={...row.values,...patch};
-   const result=await tx.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1,updated_by=$2,updated_at=now() WHERE singleton=true RETURNING revision,updated_at',[JSON.stringify(stored),scope.adminId]);
+   const result=await tx.query('UPDATE runtime_configuration SET "values"=$1,revision=revision+1,updated_by=$2,updated_at=now() WHERE singleton=true RETURNING revision,updated_at',[JSON.stringify(values),scope.adminId]);
    const before=Object.fromEntries(Object.keys(patch).map(key=>[key,previous[key]]));
    await tx.query('INSERT INTO admin_audit_events(id,admin_id,action,reason,trace_id) VALUES($1,$2,$3,$4,$5)',[randomUUID(),scope.adminId,'configuration.update',JSON.stringify({category,before,after:patch,revision:result.rows[0].revision}),traceId]);
    return {revision:Number(result.rows[0].revision),values,updatedAt:result.rows[0].updated_at.toISOString()};

@@ -1,5 +1,7 @@
 # P06 标签化补充修订
 
+当前候选（2026-11-18）：`features.tagProvider=disabled` 时保存/编辑 Note 跳过自动标签任务；显式提取在权限/归属校验后返回 `503 TAG_PROVIDER_UNAVAILABLE`，已有成功幂等 key 仍可重放。启用后对新操作恢复调度，不批量补提旧素材；手动标签、内容保存和索引照常。见[写入优化验收](../acceptance/pg-row-growth-optimization-20261118.md)。以下早期阶段实现描述保留为历史依据。
+
 正文/资源/不可变 revision 延续 P05/P06。有效 `note_tags` 是唯一标签关联事实；`note_relations` 仍用于来源引用，不混入图谱。没有向量服务或持久图谱副本。
 
 ## HTTP 接口

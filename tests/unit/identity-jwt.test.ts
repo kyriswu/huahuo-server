@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import type { KeyObject } from 'node:crypto';
 import { loadEd25519Keys, publicJwks, signAccessToken, verifyAccessToken } from '../../src/modules/identity/jwt.js';
 
 describe('JWT access tokens', () => {
@@ -44,14 +43,12 @@ describe('JWT access tokens', () => {
     await expect(verifyAccessToken(keys, settings, noKid)).rejects.toThrow();
   });
 
-  it('accepts a previous public key during a key rotation window', async () => {
-    const current = { issuer: 'huahuo-server', audience: ['huahuo-server', 'huahuo-agent'], serverAudience: 'huahuo-server', keyId: 'current', accessTtlSeconds: 900, refreshTtlSeconds: 2_592_000 };
-    const previous = await loadEd25519Keys({ ...current, keyId: 'previous' });
-    const previousPublic = (previous.publicKey as KeyObject).export({ format: 'pem', type: 'spki' }).toString();
-    const keys = await loadEd25519Keys({ ...current, previousPublicKeyPem: previousPublic, previousKeyId: 'previous' });
-    const oldToken = await signAccessToken(previous.privateKey, { ...current, keyId: 'previous' }, '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002');
-    await expect(verifyAccessToken(keys, current, oldToken.token)).resolves.toMatchObject({ sub: '00000000-0000-0000-0000-000000000001' });
-    expect((await publicJwks(keys)).keys.map(key => key.kid)).toEqual(['current', 'previous']);
+  it('rejects tokens from a retired key', async () => {
+    const settings = { issuer: 'huahuo-server', audience: ['huahuo-server'], serverAudience: 'huahuo-server', keyId: 'current', accessTtlSeconds: 900, refreshTtlSeconds: 2_592_000 };
+    const keys = await loadEd25519Keys(settings);
+    const retired = await loadEd25519Keys({ ...settings, keyId: 'retired' });
+    const signed = await signAccessToken(retired.privateKey, { ...settings, keyId: 'retired' }, 'user', 'session');
+    await expect(verifyAccessToken(keys, settings, signed.token)).rejects.toThrow('JWT_KEY_UNKNOWN');
+    expect((await publicJwks(keys)).keys.map(key => key.kid)).toEqual(['current']);
   });
 });
-

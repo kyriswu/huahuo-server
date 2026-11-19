@@ -2,7 +2,7 @@ import { Alert, Button, ConfigProvider, Form, Input, Spin } from 'antd';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AdminApiError, getSession, login, logout, type AdminSession, type Credentials } from './session';
-import { Workbench } from './workbench';
+import { AdminConsole } from './console';
 import './style.css';
 
 function SignInFrame({ children }: { children: ReactNode }) {
@@ -93,7 +93,7 @@ function AdminApp() {
   }
 
   if (state.kind === 'signed-in') {
-    return <Workbench admin={state.session.admin} csrfToken={state.session.csrfToken} onLogout={() => void signOut(state.session)} loggingOut={loggingOut} error={error} onSessionExpired={sessionExpired} />;
+    return <AdminConsole admin={state.session.admin} csrfToken={state.session.csrfToken} onLogout={() => void signOut(state.session)} loggingOut={loggingOut} error={error} onSessionExpired={sessionExpired} />;
   }
   if (state.kind === 'signed-out') {
     return <SignIn onSignedIn={session => setState({ kind: 'signed-in', session })} />;
@@ -112,7 +112,6 @@ function AdminApp() {
   return <SignInFrame><p role="status" className="flex items-center gap-3 text-sm text-slate-600"><Spin size="small" />正在检查登录状态</p></SignInFrame>;
 }
 
-const preview = import.meta.env.DEV && import.meta.env.MODE === 'demo';
 const root = document.getElementById('root');
 if (!root) throw new Error('Admin UI root is missing');
 
@@ -121,6 +120,6 @@ createRoot(root).render(
     token: { colorPrimary: '#171717', colorText: '#171717', colorTextSecondary:'#575757', colorTextPlaceholder: '#575757', colorBorder: '#d4d4d4', colorBgLayout:'#fafafa', borderRadius: 8, controlHeight:40, controlHeightLG:48, controlHeightSM:32, fontSize:14, fontFamily: 'inherit' },
     components:{Button:{primaryShadow:'none',defaultShadow:'none',primaryColor:'#fafafa',colorPrimaryHover:'#373737',colorPrimaryActive:'#171717'},Input:{activeBorderColor:'#565656',hoverBorderColor:'#565656'}},
   }}>
-    {preview ? <Workbench /> : <AdminApp />}
+    <AdminApp />
   </ConfigProvider>,
 );

@@ -22,7 +22,17 @@ export class QueuePublisher implements TaskPublisher {
   }
 
   async publish(delivery: Delivery) {
-    await this.queues.get(delivery.queue)!.add('execute', { taskId: delivery.task_id }, {
+    const queue = this.queues.get(delivery.queue)!;
+    const existing = await queue.getJob(delivery.id);
+    if (existing) {
+      const state = await existing.getState();
+      // A fetched job can finish during drain without claiming the PG task.
+      // BullMQ completion/failure therefore cannot suppress durable PG repair.
+      if (state === 'completed' || state === 'failed') await existing.retry(state);
+      else if (state === 'unknown') throw new Error('QUEUE_JOB_UNAVAILABLE');
+      return;
+    }
+    await queue.add('execute', { taskId: delivery.task_id }, {
       jobId: delivery.id, attempts: 1,
       removeOnComplete: { age: 3600, count: 1000 },
       removeOnFail: { age: 86400, count: 1000 },

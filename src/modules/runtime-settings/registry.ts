@@ -31,8 +31,6 @@ export const settings:SettingDefinition[]=[
  {key:'features.tagProvider',category:'features',label:'标签提取提供器',description:'生产禁用 deterministic；LLM/Dify 适配器尚未接入，选择后仍会明确失败。',type:'select',options:['disabled','llm','dify','deterministic'],default:'disabled',effect:'新执行批次'},
 ];
 export type Values=Record<string,unknown>;
-export const RUNTIME_CONFIGURATION_SCHEMA_KEY='$schemaVersion';
-export const RUNTIME_CONFIGURATION_SCHEMA_VERSION=1;
 export const defaults=():Values=>Object.fromEntries(settings.map(d=>[d.key,structuredClone(d.default)]));
 export function rejectSecrets(value:unknown):void{
  if(!value||typeof value!=='object')return;
@@ -59,18 +57,6 @@ export function validateValues(values:Values,base:AppConfig):Values{
  if(Number(all['tasks.retryBaseMs'])>Number(all['tasks.retryMaxMs'])||Number(all['storage.maxUploadBytes'])>base.uploadHardMaxBytes)throw new DomainError(400,'CONFIGURATION_INVALID');
  if(base.appEnv==='production'&&all['features.tagProvider']==='deterministic')throw new DomainError(400,'CONFIGURATION_TEST_PROVIDER_FORBIDDEN');
  return all;
-}
-// Only optional, additive fields may share a schema version. Changes to existing
-// semantics or safety requirements must bump the stored contract before use.
-// Missing metadata always means v1, even when a future reader supports v2.
-export function validateStoredValues(values:Values,base:AppConfig):Values{
- if(!values||typeof values!=='object'||Array.isArray(values))throw new DomainError(400,'CONFIGURATION_INVALID');
- const version=Object.hasOwn(values,RUNTIME_CONFIGURATION_SCHEMA_KEY)?values[RUNTIME_CONFIGURATION_SCHEMA_KEY]:1;
- if(version!==RUNTIME_CONFIGURATION_SCHEMA_VERSION)throw new DomainError(503,'CONFIGURATION_VERSION_UNSUPPORTED');
- rejectSecrets(values);
- // Unknown persisted fields are opaque: never apply or expose them through an
- // older Admin. Known fields keep the same validation as strict Admin input.
- return validateValues(Object.fromEntries(Object.entries(values).filter(([key])=>settings.some(d=>d.key===key))),base);
 }
 export function applyValues(base:AppConfig,values:Values,revision:number):AppConfig{
  const v=validateValues(values,base);

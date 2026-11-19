@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { RuntimeSettings } from '../../src/modules/runtime-settings/service.js';
-import { DEFAULT_DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_KEY, validateStoredValues, validateValues } from '../../src/modules/runtime-settings/registry.js';
+import { DEFAULT_DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_KEY, validateValues } from '../../src/modules/runtime-settings/registry.js';
 import { config } from '../helpers.js';
 
 const row = (values: Record<string, unknown>) => ({ rows: [{ revision: 1, values, updated_at: new Date('2026-11-15T00:00:00Z') }] });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 describe('database-owned drain settings and bounded fallback', () => {
   it('defaults missing configuration to ten minutes and rejects budgets below ten or above sixty minutes', () => {
-    expect(validateStoredValues({}, config())[DRAIN_TIMEOUT_KEY]).toBe(DEFAULT_DRAIN_TIMEOUT_MS);
+    expect(validateValues({}, config())[DRAIN_TIMEOUT_KEY]).toBe(DEFAULT_DRAIN_TIMEOUT_MS);
     expect(validateValues({ [DRAIN_TIMEOUT_KEY]: 3600000 }, config())[DRAIN_TIMEOUT_KEY]).toBe(3600000);
     for (const invalid of [0, 300000, 599999, 3600001, 600000.5, '600000']) {
       expect(() => validateValues({ [DRAIN_TIMEOUT_KEY]: invalid }, config())).toThrow('CONFIGURATION_INVALID');
@@ -16,7 +16,7 @@ describe('database-owned drain settings and bounded fallback', () => {
   });
 
   it('reads a validated database value and shares that valid snapshot between settings readers for the same process config', async () => {
-    const base = config(), query = vi.fn().mockResolvedValue(row({ [DRAIN_TIMEOUT_KEY]: 900000, 'deployment.futureOptional': { enabled: false } }));
+    const base = config(), query = vi.fn().mockResolvedValue(row({ [DRAIN_TIMEOUT_KEY]: 900000 }));
     const pool = { query } as unknown as pg.Pool;
     const first = new RuntimeSettings(pool, base), second = new RuntimeSettings(pool, base);
     expect(first.drainTimeoutSnapshotMs()).toBe(600000);

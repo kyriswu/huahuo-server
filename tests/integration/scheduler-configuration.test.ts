@@ -28,7 +28,7 @@ const env = {
   REDIS_CACHE_URL: process.env.REDIS_CACHE_URL, REDIS_QUEUE_URL: redisUrl,
   REDIS_KEY_PREFIX: 'scheduler_config_' + randomUUID().replaceAll('-', ''),
   PROCESSING_NODES_CLOUD_CONTROL_ENABLED: 'false',
-  PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled',
+  RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled',
   BILLING_MODE: 'disabled', ENABLE_DEMO_TASKS: 'true', METRICS_ENABLED: 'false',
 };
 const config = loadConfig('scheduler', { ...env, DATABASE_URL: process.env.TEST_DATABASE_SCHEDULER_URL });
@@ -221,7 +221,7 @@ it('uses the runtime creation policy for an Admin node-start request without exe
   await root.query('INSERT INTO processing_nodes(id,config,revision) VALUES($1,$2,1)', [nodeId, JSON.stringify({
     name: 'fixture node', capabilities: ['document'], resourceClass: 'cpu', mode: 'ecs',
     regionId: 'cn-beijing', instanceId: 'i-fixture123456', privateIp: '172.18.0.2', baseUrl: 'http://172.18.0.2:8000',
-    healthPath: '/health', tokenEnv: null, concurrency: 1, idleSeconds: 60, startupSeconds: 60, queueSeconds: 60, enabled: true,
+    healthPath: '/health', tokenEnv: null, concurrency: 1, idleSeconds: 60, startupSeconds: 60, queueSeconds: 60,
   })]);
   const admin = await buildAdminServer({ config: loadConfig('admin', { ...env, PROCESSING_NODES_CLOUD_CONTROL_ENABLED: 'true', DATABASE_URL: process.env.TEST_DATABASE_ADMIN_URL }) });
   try {
