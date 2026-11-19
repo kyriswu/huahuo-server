@@ -10,8 +10,8 @@ import { requireIndexKind } from '../../lib/search-index/factory.js';
 import type { HybridIndex, KeywordIndex } from '../../lib/search-index/types.js';
 import { splitKnowledgeContent,type KbDraft } from './split.js';
 import { kbTokenizer,kbEmbedding,knowledgeIndex,type IndexFactory } from './profile.js';
-import { createBuild,sourceContent,sourceState,modeForSource } from './repository.js';
-import { tablesFor,type KbBuild,type KbSource,type KbSnapshot,type KbSourceType } from './types.js';
+import { createBuild,sourceContent,sourceState } from './repository.js';
+import { tablesForSource,type KbBuild,type KbSource,type KbSnapshot,type KbSourceType } from './types.js';
 import type { TokenCounter } from '../../lib/document-processing/types.js';
 export class KbJobError extends Error{constructor(readonly code:string,readonly retryable=true){super(code);}}
 export interface KbDependencies {index?:IndexFactory;embedding?:(snapshot:KbSnapshot)=>EmbeddingAdapter;tokenizer?:(snapshot:KbSnapshot)=>Promise<TokenCounter>;}
@@ -34,12 +34,13 @@ export class KnowledgeIndexJobs {
   const build=await transaction(this.pool,async tx=>{const s=await sourceState(tx,{source_type:source.type,source_id:source.id,user_id:source.userId,workspace_id:source.workspaceId},true);await this.lease(tx,attempt);
    if(s.deleted||s.revision!==source.revision)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);
    return createBuild(tx,source,attempt.task.id,snapshot);});
-  return this.executeBuild(build.id,attempt,snapshot.mode);
+  return this.executeBuild(build.id,attempt,source.type);
  }
- async executeBuild(id:string,attempt:Attempt,mode:'content-asset-hybrid'|'document-keyword'){
-  const {builds,chunks}=tablesFor(mode);
-  const build=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE id=$1 AND user_id=$2 AND workspace_id=$3 AND task_id=$4`,[id,attempt.task.user_id,attempt.task.workspace_id,attempt.task.id])).rows[0];
+ async executeBuild(id:string,attempt:Attempt,sourceType:KbSourceType){
+  const {builds,chunks}=tablesForSource(sourceType);
+  const build=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE id=$1 AND user_id=$2 AND workspace_id=$3 AND task_id=$4 AND source_type=$5`,[id,attempt.task.user_id,attempt.task.workspace_id,attempt.task.id,sourceType])).rows[0];
   if(!build)throw new KbJobError('KB_BUILD_NOT_FOUND',false);
+  const {mode}=build.snapshot;
   return this.lock(build.source_type,build.source_id,async()=>{
    let source:KbSource;
    try{source=await sourceContent(this.pool,this.config,build);}catch(e){if(e instanceof DomainError)throw new KbJobError(e.code,false);throw e;}
@@ -47,7 +48,7 @@ export class KnowledgeIndexJobs {
    const check=async(tx:pg.PoolClient)=>{const state=await sourceState(tx,build,true);await this.lease(tx,attempt);const owner=(await tx.query(`SELECT task_id FROM ${builds} WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(owner?.task_id!==attempt.task.id)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);const newer=await tx.query(`SELECT 1 FROM ${builds} WHERE source_type=$1 AND source_id=$2 AND source_revision=$4 AND (created_at,id)>(SELECT created_at,id FROM ${builds} WHERE id=$3) LIMIT 1`,[build.source_type,build.source_id,id,build.source_revision]);if(state.deleted||state.revision!==build.source_revision||newer.rowCount)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);};
    try{
     if(!build.published){
-     const tokenizer=mode==='content-asset-hybrid'?await(this.dependencies.tokenizer?.(build.snapshot)??kbTokenizer(build.snapshot)):undefined;
+     const tokenizer=mode==='hybrid'?await(this.dependencies.tokenizer?.(build.snapshot)??kbTokenizer(build.snapshot)):undefined;
      let drafts:KbDraft[]|undefined;
      if(!build.planned){
       const plan=await splitKnowledgeContent(source.content,mode,{format:source.format,...(tokenizer?{tokenizer}:{})});
@@ -61,29 +62,29 @@ export class KnowledgeIndexJobs {
         });
         // EXISTS keeps both the lookup input and result bounded even when many
         // historical builds reference the same reusable point.
-        const reusable=new Set(mode==='content-asset-hybrid'?(await tx.query<{point_id:string}>(`SELECT requested.point_id FROM unnest($1::text[]) AS requested(point_id)
+        const reusable=new Set(mode==='hybrid'?(await tx.query<{point_id:string}>(`SELECT requested.point_id FROM unnest($1::text[]) AS requested(point_id)
          WHERE EXISTS(SELECT 1 FROM ${chunks} c JOIN ${builds} b ON b.id=c.build_id
           WHERE c.point_id=requested.point_id AND c.index_status='ready' AND b.source_id=$2 AND b.user_id=$3 AND b.config_hash=$4 AND b.cleanup_status<>'ready')`,
          [batch.map(row=>row.pointId),source.id,source.userId,build.config_hash])).rows.map(row=>row.point_id):[]);
         const values:unknown[]=[];
         const records=batch.map(({draft,pointId})=>{
-         const fields=[id,draft.ordinal,pointId,draft.start,draft.end,draft.contentHash,draft.charCount,reusable.has(pointId)?'ready':'pending',...(mode==='content-asset-hybrid'?[draft.coreStart,draft.coreEnd,draft.sectionId,draft.inputHash,draft.tokenCount]:[])];
+         const fields=[id,draft.ordinal,pointId,draft.start,draft.end,draft.contentHash,draft.charCount,reusable.has(pointId)?'ready':'pending',...(sourceType==='content_asset'?[draft.coreStart,draft.coreEnd,draft.sectionId,draft.inputHash,draft.tokenCount]:[])];
          const start=values.length;values.push(...fields);return '('+fields.map((_,i)=>'$'+(start+i+1)).join(',')+')';
         });
-        await tx.query(`INSERT INTO ${chunks}(build_id,ordinal,point_id,source_start,source_end,content_hash,char_count,index_status${mode==='content-asset-hybrid'?',core_start,core_end,section_id,input_hash,token_count':''}) VALUES ${records.join(',')} ON CONFLICT(build_id,ordinal) DO NOTHING`,values);
+        await tx.query(`INSERT INTO ${chunks}(build_id,ordinal,point_id,source_start,source_end,content_hash,char_count,index_status${sourceType==='content_asset'?',core_start,core_end,section_id,input_hash,token_count':''}) VALUES ${records.join(',')} ON CONFLICT(build_id,ordinal) DO NOTHING`,values);
        }
        await tx.query(`UPDATE ${builds} SET planned=true,chunk_count=$2,status='indexing',toc=$3::jsonb,toc_status='ready',updated_at=now() WHERE id=$1`,[id,plan.chunks.length,JSON.stringify(plan.structure?.toc??[])]);
       });
      }
      const rows=(await this.pool.query<StoredChunk>(`SELECT * FROM ${chunks} WHERE build_id=$1 AND index_status<>'ready' ORDER BY ordinal`,[id])).rows;
-     const embedder=mode==='content-asset-hybrid'?(this.dependencies.embedding?.(build.snapshot)??kbEmbedding(this.config,build.snapshot)):undefined;
-     if(mode==='content-asset-hybrid'&&rows.length&&!drafts)drafts=(await splitKnowledgeContent(source.content,mode,{format:source.format,tokenizer:tokenizer!})).chunks;
+     const embedder=mode==='hybrid'?(this.dependencies.embedding?.(build.snapshot)??kbEmbedding(this.config,build.snapshot)):undefined;
+     if(mode==='hybrid'&&rows.length&&!drafts)drafts=(await splitKnowledgeContent(source.content,mode,{format:source.format,tokenizer:tokenizer!})).chunks;
      await transaction(this.pool,check);
      const writes=new Set<Promise<void>>();
      const write=(p:Promise<void>)=>{writes.add(p);void p.finally(()=>writes.delete(p)).catch(()=>{});return p;};
      let items:import('../../lib/rag-indexing/index.js').IndexItemResult[];
      try{
-      if(mode==='content-asset-hybrid'){
+      if(mode==='hybrid'){
        const hybrid=requireIndexKind(index,'hybrid');
        const draftsByOrdinal=new Map(drafts?.map(draft=>[draft.ordinal,draft]));
        const records=rows.map(row=>{const draft=draftsByOrdinal.get(row.ordinal)!;if(draft.contentHash!==row.content_hash)throw new KbJobError('KB_PLAN_CHANGED',false);return {id:row.point_id,embeddingText:draft.embeddingText,metadata:{content:draft.content}};});
@@ -111,7 +112,7 @@ export class KnowledgeIndexJobs {
  }
  async cleanup(type:KbSourceType,id:string,attempt:Attempt){return this.lock(type,id,async()=>{await this.cleanupLocked(type,id,attempt);return {digest:digest(type+id),bytes:0};});}
  private async cleanupLocked(type:KbSourceType,id:string,attempt:Attempt){
-  const {builds,chunks}=tablesFor(modeForSource(type));
+  const {builds,chunks}=tablesForSource(type);
   const scope={source_type:type,source_id:id,user_id:attempt.task.user_id!,workspace_id:attempt.task.workspace_id!};
   const state=await transaction(this.pool,async tx=>{const s=await sourceState(tx,scope,true);await this.lease(tx,attempt);
    await tx.query(`UPDATE ${builds} SET published=false,status=$4 WHERE source_type=$1 AND source_id=$2 AND user_id=$3 AND (source_revision<>$5 OR $6)`,[type,id,scope.user_id,s.deleted?'deleted':'superseded',s.revision,s.deleted]);return s;});

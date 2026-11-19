@@ -198,7 +198,7 @@ describe('canonical ContentAsset images with real isolated PostgreSQL and mocked
     let titleLocked=false,imageWaiting=false,resumeTitle!:()=>void;
     const gate=new Promise<void>(resolve=>{resumeTitle=resolve;}),titleQueries:string[]=[];
     const titleClient=await pool.connect(),imageClient=await pool.connect();
-    const locksContentAsset=(sql:string)=>sql.startsWith('SELECT n.* FROM content_assets n')&&sql.endsWith('FOR UPDATE OF n');
+    const locksContentAsset=(sql:string)=>sql.startsWith('SELECT asset.* FROM content_assets asset')&&sql.endsWith('FOR UPDATE OF asset');
     function observedPool(client:pg.PoolClient,afterQuery:(sql:string)=>Promise<void>,beforeQuery?:(sql:string)=>void):pg.Pool {
       const proxy=new Proxy(client,{get(target,property){
         if(property==='query')return async (sql:string,params?:unknown[])=>{beforeQuery?.(sql);const result=await target.query(sql,params);await afterQuery(sql);return result;};

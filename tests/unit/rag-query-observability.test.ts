@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { ContentAssetQueryTiming } from '../../src/modules/rag/query-timing.js';
+import { SearchQueryTiming } from '../../src/modules/rag/query-timing.js';
 import { createRagQueryRoute } from '../../src/modules/rag/query-routes.js';
 import type { RagQueryService, RagQueryInput } from '../../src/modules/rag/query-service.js';
 import { ApplicationMetrics } from '../../src/plugins/metrics.js';
@@ -15,7 +15,7 @@ describe('RAG duration and count semantics',()=>{
  it('keeps embedding attempt counts out of Server-Timing duration fields and counts fallback once per request',async()=>{
   const metrics=new ApplicationMetrics(config());
   for(let query=0;query<2;query++){
-   const timing=new ContentAssetQueryTiming();
+   const timing=new SearchQueryTiming();
    await timing.measure('embedding',async()=>{await new Promise(resolve=>setTimeout(resolve,2));});
    timing.embeddingAttempts.push({attempt:0,durationMs:10,succeeded:false,status:503},{attempt:1,durationMs:20,succeeded:true,status:200});
    timing.fallback='timeout';
@@ -33,7 +33,7 @@ describe('RAG duration and count semantics',()=>{
   expect(total(body,'rag_operation_duration_seconds_sum',['operation="embedding_attempt"'])).toBeCloseTo(0.06);
  });
  it('retains stage duration on failures and never lets diagnostic failure replace a query result',async()=>{
-  const timing=new ContentAssetQueryTiming(),failure=Error('private provider text');
+  const timing=new SearchQueryTiming(),failure=Error('private provider text');
   expect(timing.serverTiming()).toBe('embedding_attempts;desc="0", rerank_fallback;desc="0"');
   await expect(timing.measure('index_search',async()=>{throw failure;})).rejects.toBe(failure);
   expect(timing.snapshot().stages.index_search).toBeGreaterThanOrEqual(0);
@@ -44,7 +44,7 @@ describe('RAG duration and count semantics',()=>{
 it('defaults sourceType to content_asset and emits safe metrics/logs for successes and failures',async()=>{
  const lines:string[]=[],stream=new Writable({write(chunk,_encoding,done){lines.push(String(chunk));done();}});
  const app=await buildBase({config:{...config(),logLevel:'info'},dependencies:dependencies(),loggerStream:stream});
- const query=vi.fn(async(_scope:Scope,input:RagQueryInput,timing?:ContentAssetQueryTiming)=>{
+ const query=vi.fn(async(_scope:Scope,input:RagQueryInput,timing?:SearchQueryTiming)=>{
   await timing!.measure('pg_scope',async()=>undefined);
   if(input.query==='failing-private-query')throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE');
   timing!.embeddingAttempts.push({attempt:0,durationMs:3,succeeded:true,status:200});

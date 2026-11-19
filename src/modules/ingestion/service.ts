@@ -3,7 +3,7 @@ import {randomUUID} from 'node:crypto';
 import type {AppConfig} from '../../config/config.js';
 import {transaction,assertScope,DomainError,type Scope} from '../identity/store.js';
 import {enqueueIntent,event,newTaskMaxAttempts} from '../tasks/model.js';
-import {kbSnapshot} from '../kb/profile.js';
+import {snapshotForSource} from '../kb/profile.js';
 import {createBuild,sourceState} from '../kb/repository.js';
 import {digest} from '../../lib/crypto.js';
 import type {KbBuild} from '../kb/types.js';
@@ -16,7 +16,7 @@ export class ContentAssetIndexService {
   const state=await sourceState(tx,{source_type:'content_asset',source_id:contentAssetId,user_id:scope.userId,workspace_id:workspaceId},true);
   if(state.deleted||!state.revision){await this.scheduleCleanup(tx,scope,workspaceId,contentAssetId);return;}
   if(Array.from(state.content!).length>this.config.rag.plainTextMaxChars)throw new DomainError(413,'RAG_PLAIN_TEXT_TOO_LARGE');
-  const snapshot=kbSnapshot(this.config,'content-asset-hybrid','markdown');
+  const snapshot=snapshotForSource(this.config,'content_asset','markdown');
   const old=(await tx.query<KbBuild>('SELECT * FROM kb_content_asset_hybrid_builds WHERE source_id=$1 AND source_revision=$2 AND config_hash=$3',[contentAssetId,state.revision,snapshot.configHash])).rows[0];
   if(old&&old.status!=='deleted'&&old.status!=='failed')return old;
   const taskId=randomUUID(),inputId=randomUUID();

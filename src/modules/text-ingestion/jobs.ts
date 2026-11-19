@@ -25,7 +25,7 @@ export class TextIngestionJobs {
  async execute(a:Attempt){
   const input=(await this.pool.query('SELECT body FROM task_inputs WHERE id=$1 AND user_id=$2 AND workspace_id=$3',[a.task.input_id,a.task.user_id,a.task.workspace_id])).rows[0];if(!input)throw new TextIngestionError('TEXT_INGESTION_INPUT_MISSING');
   const {jobId,snapshot}=JSON.parse(String(input.body)) as {jobId:string;snapshot:FileProcessingSnapshot};
-  if(snapshot?.keyword?.mode!=='document-keyword')throw new TextIngestionError('TEXT_INGESTION_SNAPSHOT_INVALID');
+  if(snapshot?.keyword?.mode!=='keyword')throw new TextIngestionError('TEXT_INGESTION_SNAPSHOT_INVALID');
   try{
    let job=await transaction(this.pool,tx=>this.current(tx,jobId,a));
    if(job.raw_content===null){

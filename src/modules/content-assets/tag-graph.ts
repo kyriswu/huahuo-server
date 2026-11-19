@@ -21,23 +21,23 @@ export async function tagGraph(tx:pg.PoolClient,userId:string,wid:string,map:str
  }
  if(input.tagId && !(await tx.query('SELECT 1 FROM asset_tags WHERE tag_id=$1 AND workspace_id=$2',[input.tagId,wid])).rowCount)throw new DomainError(404,'TAG_NOT_FOUND');
  if(input.contentAssetId && !(await tx.query(
-  `SELECT 1 FROM content_assets n JOIN content_asset_workspaces w ON w.content_asset_id=n.content_asset_id AND w.workspace_id=$2
-   WHERE n.content_asset_id=$1 AND n.user_id=$3 AND n.state='active'`,[input.contentAssetId,wid,userId],
+  `SELECT 1 FROM content_assets asset JOIN content_asset_workspaces w ON w.content_asset_id=asset.content_asset_id AND w.workspace_id=$2
+   WHERE asset.content_asset_id=$1 AND asset.user_id=$3 AND asset.state='active'`,[input.contentAssetId,wid,userId],
  )).rowCount)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
  const contentAssetBudget=Math.max(1,Math.floor(maxNodes/2));
- const filter=`n.user_id=$4 AND n.state='active'
-  AND EXISTS(SELECT 1 FROM content_asset_workspaces w WHERE w.content_asset_id=n.content_asset_id AND w.workspace_id=$1)
-  AND ($2::uuid IS NULL OR EXISTS(SELECT 1 FROM content_asset_tags m WHERE m.content_asset_id=n.content_asset_id AND m.tag_id=$2))
-  AND ($3::uuid IS NULL OR n.content_asset_id=$3 OR EXISTS(SELECT 1 FROM content_asset_tags a JOIN content_asset_tags b ON a.tag_id=b.tag_id WHERE a.content_asset_id=$3 AND b.content_asset_id=n.content_asset_id))`;
+ const filter=`asset.user_id=$4 AND asset.state='active'
+  AND EXISTS(SELECT 1 FROM content_asset_workspaces w WHERE w.content_asset_id=asset.content_asset_id AND w.workspace_id=$1)
+  AND ($2::uuid IS NULL OR EXISTS(SELECT 1 FROM content_asset_tags m WHERE m.content_asset_id=asset.content_asset_id AND m.tag_id=$2))
+  AND ($3::uuid IS NULL OR asset.content_asset_id=$3 OR EXISTS(SELECT 1 FROM content_asset_tags a JOIN content_asset_tags b ON a.tag_id=b.tag_id WHERE a.content_asset_id=$3 AND b.content_asset_id=asset.content_asset_id))`;
  const values=[wid,input.tagId??null,input.contentAssetId??null,userId];
- const totalContentAssets=Number((await tx.query(`SELECT count(*) FROM content_assets n WHERE ${filter}`,values)).rows[0].count);
- const page=await tx.query<{content_asset_id:string;title:string;content_asset_revision_id:string;source_kind:string;updated_at:Date}>(`SELECT n.content_asset_id,n.title,n.content_asset_revision_id,n.source_kind,n.updated_at FROM content_assets n WHERE ${filter} AND ($5::uuid IS NULL OR (n.content_asset_id>$5 AND ($3::uuid IS NULL OR n.content_asset_id<>$3))) ORDER BY (n.content_asset_id=$3) DESC NULLS LAST,n.content_asset_id LIMIT $6`,[...values,after,contentAssetBudget+1]);
- const contentAssets=page.rows.slice(0,contentAssetBudget),ids=contentAssets.map(n=>n.content_asset_id),hasMore=page.rows.length>contentAssetBudget;
+ const totalContentAssets=Number((await tx.query(`SELECT count(*) FROM content_assets asset WHERE ${filter}`,values)).rows[0].count);
+ const page=await tx.query<{content_asset_id:string;title:string;content_asset_revision_id:string;source_kind:string;updated_at:Date}>(`SELECT asset.content_asset_id,asset.title,asset.content_asset_revision_id,asset.source_kind,asset.updated_at FROM content_assets asset WHERE ${filter} AND ($5::uuid IS NULL OR (asset.content_asset_id>$5 AND ($3::uuid IS NULL OR asset.content_asset_id<>$3))) ORDER BY (asset.content_asset_id=$3) DESC NULLS LAST,asset.content_asset_id LIMIT $6`,[...values,after,contentAssetBudget+1]);
+ const contentAssets=page.rows.slice(0,contentAssetBudget),ids=contentAssets.map(asset=>asset.content_asset_id),hasMore=page.rows.length>contentAssetBudget;
  const tagBudget=maxNodes-contentAssets.length;
  // Counts are over all active authorized contentAssets, not just the returned page.
  const topicRows=await tx.query<{tag_id:string;display_name:string;count:number}>(`SELECT t.tag_id,t.display_name,
-  (SELECT count(*)::int FROM content_asset_tags m JOIN content_assets n ON n.content_asset_id=m.content_asset_id AND n.user_id=$4 AND n.state='active'
-   JOIN content_asset_workspaces w ON w.content_asset_id=n.content_asset_id AND w.workspace_id=$1 WHERE m.tag_id=t.tag_id) count
+  (SELECT count(*)::int FROM content_asset_tags m JOIN content_assets asset ON asset.content_asset_id=m.content_asset_id AND asset.user_id=$4 AND asset.state='active'
+   JOIN content_asset_workspaces w ON w.content_asset_id=asset.content_asset_id AND w.workspace_id=$1 WHERE m.tag_id=t.tag_id) count
   FROM asset_tags t WHERE t.workspace_id=$1 AND EXISTS(SELECT 1 FROM content_asset_tags m WHERE m.tag_id=t.tag_id AND m.content_asset_id=ANY($2::uuid[]))
   ORDER BY t.tag_id LIMIT $3`,[wid,ids,tagBudget+1,userId]);
  const tags=topicRows.rows.slice(0,tagBudget),tagIds=tags.map(t=>t.tag_id);
@@ -52,11 +52,11 @@ export async function tagGraph(tx:pg.PoolClient,userId:string,wid:string,map:str
  const remaining=maxEdges-edges.length;
  const memberships=await tx.query<{content_asset_id:string;tag_id:string;display_name:string}>(`SELECT m.content_asset_id,m.tag_id,t.display_name FROM content_asset_tags m JOIN asset_tags t ON t.tag_id=m.tag_id AND t.workspace_id=$1 WHERE m.content_asset_id=ANY($2::uuid[]) AND m.tag_id=ANY($3::uuid[]) ORDER BY m.content_asset_id,m.tag_id LIMIT $4`,[wid,ids,tagIds,remaining+1]);
  for(const m of memberships.rows.slice(0,remaining))edges.push({id:`tagged:${m.content_asset_id}:${m.tag_id}`,source:m.content_asset_id,target:m.tag_id,kind:'membership',relationType:'tagged_with',origin:'tag',label:m.display_name,directed:false,evidence:{tagId:m.tag_id,tagName:m.display_name}});
- const nodes=[...contentAssets.map(n=>({id:n.content_asset_id,kind:'content_asset',entityType:'content_asset',contentId:n.content_asset_id,label:n.title,revisionId:n.content_asset_revision_id,sourceKind:n.source_kind})),...tags.map(t=>({id:t.tag_id,kind:'tag',entityType:'Topic',label:t.display_name,count:t.count}))];
+ const nodes=[...contentAssets.map(asset=>({id:asset.content_asset_id,kind:'content_asset',entityType:'content_asset',contentId:asset.content_asset_id,label:asset.title,revisionId:asset.content_asset_revision_id,sourceKind:asset.source_kind})),...tags.map(t=>({id:t.tag_id,kind:'tag',entityType:'Topic',label:t.display_name,count:t.count}))];
  // Current App overview mapper requires relative unique logical paths and one
  // revisionId OR version. It currently ignores supplied edges; no fake paths
  // are invented to make the client infer arbitrary semantic relationships.
- const items=[...contentAssets.map(n=>({ownerRef:{workspaceId:wid,kind:'content_asset',id:n.content_asset_id},path:`content-assets/${n.content_asset_id}.md`,title:n.title,revisionId:n.content_asset_revision_id})),...tags.map(t=>({ownerRef:{workspaceId:wid,kind:'tag',id:t.tag_id},path:`tags/${t.tag_id}`,title:t.display_name,version:Number(contentCursor)}))];
+ const items=[...contentAssets.map(asset=>({ownerRef:{workspaceId:wid,kind:'content_asset',id:asset.content_asset_id},path:`content-assets/${asset.content_asset_id}.md`,title:asset.title,revisionId:asset.content_asset_revision_id})),...tags.map(t=>({ownerRef:{workspaceId:wid,kind:'tag',id:t.tag_id},path:`tags/${t.tag_id}`,title:t.display_name,version:Number(contentCursor)}))];
  const edgesTruncated=pairs.rows.length>maxEdges||memberships.rows.length>remaining;
  return {map,workspaceId:wid,graphId:`workspace:${wid}:${map}`,contentCursor,items,nodes,edges,totalContentAssets,hasMore,
   truncated:hasMore||topicRows.rows.length>tagBudget||edgesTruncated,edgesTruncated,

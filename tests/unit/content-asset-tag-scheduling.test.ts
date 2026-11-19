@@ -13,7 +13,7 @@ it('rejects explicit extraction while disabled after checking ownership, without
   let rows:Record<string,unknown>[]=[];
   if(sql.includes('FROM user_sessions'))rows=session?[{id}]:[];
   else if(sql.startsWith('SELECT id FROM workspaces'))rows=workspace?[{id}]:[];
-  else if(sql.startsWith('SELECT n.* FROM content_assets'))rows=contentAsset?[{content_asset_revision_id:id,state:'active'}]:[];
+  else if(sql.startsWith('SELECT asset.* FROM content_assets'))rows=contentAsset?[{content_asset_revision_id:id,state:'active'}]:[];
   else if(!['BEGIN','ROLLBACK'].includes(sql)&&!sql.startsWith('SELECT pg_advisory_xact_lock')&&!sql.startsWith('SELECT request_hash'))throw Error('UNEXPECTED_QUERY:'+sql);
   return {rows,rowCount:rows.length};
  });

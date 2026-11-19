@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { digest } from '../../src/lib/crypto.js';
+import { snapshotForSource } from '../../src/modules/kb/profile.js';
+import { config } from '../helpers.js';
 
 const examples = ['.env.example', '.env.compose.local.example', '.env.compose.cloud.example', '.env.host.example',
   'specs/backend-plan/examples/.env.compose.local.example', 'specs/backend-plan/examples/.env.compose.cloud.example'];
 const contract = {
   RAG_EMBEDDING_MODEL: 'qwen3.7-text-embedding-flash', RAG_EMBEDDING_DIMENSIONS: '1024', RAG_EMBEDDING_PROFILE: 'qwen3.7-text-embedding-flash-1024-fp16',
-  KB_CONTENT_ASSET_HYBRID_COLLECTION: 'huahuo_kb_note_hybrid_chunks',
+  KB_CONTENT_ASSET_HYBRID_COLLECTION: 'huahuo_kb_content_asset_hybrid_chunks',
   KB_DOCUMENT_KEYWORD_COLLECTION: 'huahuo_kb_keyword_chunks',
 };
 const retired = new Set(['BILLING_POLICY_VERSION','TAG_EXTRACTOR_PROVIDER','MAX_UPLOAD_BYTES','STORAGE_QUOTA_BYTES',
@@ -28,5 +31,21 @@ describe('knowledge deployment configuration contract', () => {
     expect(Object.keys(env).some(key => key === 'MILVUS_COLLECTION' || key === 'RAG_INDEX_BUILD_ID'
       || key === 'RAG_EMBEDDING_SEND_DIMENSIONS' || retired.has(key)
       || /^(?:MANUAL_TEXT_|RAG_CHILD_|RAG_PARENT_|DOCUMENT_PARSER_|DOCUMENT_EXTRACTION_|TASK_RETRY_|WORKER_CONCURRENCY_)/.test(key))).toBe(false);
+  });
+
+  it('keeps the prior build and point identity inputs across index terminology changes', () => {
+    const settings = config();
+    const asset = snapshotForSource(settings, 'content_asset', 'markdown');
+    const document = snapshotForSource(settings, 'file', 'markdown');
+    expect(asset.mode).toBe('hybrid');
+    expect(document.mode).toBe('keyword');
+    expect(asset.configHash).toBe(digest(JSON.stringify({
+      ...asset, mode: 'content-asset-hybrid',
+      target: { ...asset.target, collection: 'huahuo_kb_note_hybrid_chunks' }, configHash: '',
+    })));
+    expect(document.configHash).toBe(digest(JSON.stringify({
+      ...document, mode: 'document-keyword', configHash: '',
+    })));
+    expect(snapshotForSource(settings, 'text', 'markdown')).toEqual(document);
   });
 });

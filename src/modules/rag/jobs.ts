@@ -66,7 +66,7 @@ export class RagIngestionJobs {
 
     try {
       const snapshot = version.processing_snapshot as FileProcessingSnapshot | null;
-      if(!snapshot || snapshot.version!=='file-processing' || snapshot.keyword?.mode!=='document-keyword')throw new RagJobError('RAG_PROFILE_UNAVAILABLE','Processing snapshot is unavailable');
+      if(!snapshot || snapshot.version!=='file-processing' || snapshot.keyword?.mode!=='keyword')throw new RagJobError('RAG_PROFILE_UNAVAILABLE','Processing snapshot is unavailable');
       let canonical:string;
       let canonicalHash:string;
       const storedBytes=Number(version.source_size??0);

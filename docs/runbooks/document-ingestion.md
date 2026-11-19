@@ -1,11 +1,16 @@
-# 资产 正文入库
+# 资产正文入库
 
-仅对已存在的真实 资产 原文建立混合索引。用户保存 `parts.raw` 后，业务事务固定真实 raw part 修订和授权归属，并创建 `kb_content_asset_hybrid_builds`、Task 与 Outbox。标题等不改变 raw 正文的编辑不重新向量化。来源可以是手写、ASR、图片识别或链接解析，但必须先由业务创建 资产；未产生 资产 的导入资料使用关键词流程。
+内容资产的当前原文保存在 `content_asset_parts`。保存或修改 `parts.raw` 时，如果已启用 `features.contentAssetIndexing`，业务事务固定原文修订和授权归属，并创建 `kb_content_asset_hybrid_builds`、Task 与 Outbox。仅改标题、纲要或其他原文之外的字段时复用当前原文索引。
 
-在Admin「功能开关」启用 `features.contentAssetIndexing` 后，后续正文变更创建索引任务；旧KB_NOTE_INDEXING_ENABLED环境项已移除。旧的“单独提交任意content覆盖Note索引”接口和MANUAL_TEXT配置已删除。正文只保留在note_part_revisions，不复制到索引任务或chunk表。
+Worker 使用 `hybrid` 规则按 H1–H6 或自然段切分，上限为 500 Unicode 码点，同范围目标重叠 50 码点。Embedding 使用 `qwen3.7-text-embedding-flash`，输入预算按 UTF-8 字节数加 16 保守估计。`kb_content_asset_hybrid_chunks` 保存范围、哈希和点 ID。只召回当前已发布构建，编辑后复用未变点，在构建保存的目标中清理失效点。 [模块化文档处理](modular-document-processing.md)
 
-Worker 使用 H1–H6 或自然段临时范围切分，上限 500 Unicode 码点，同范围重叠目标约 50 字，最终输入由固定 BGE-M3 tokenizer 校验。`kb_content_asset_hybrid_chunks` 仅保存范围、核心范围、哈希和点 ID。完整构建发布前不可召回；编辑后旧正文立即退出查询，未变点可复用，失效点在准确目标中清理。
+请求以 `/api/v1/workspaces/{workspaceId}/content-assets/{contentAssetId}` 为基础路径。
 
-`GET /api/v1/workspaces/{workspaceId}/content-assets/{contentAssetId}/ingestions` 返回当前可授权的构建任务概况。搜索与精确读取使用已有 App 路径，搜索命中包含 `part=raw`、整篇 资产 `revisionId`，RAG 详细结果另含 `partRevisionId`/`sourceRevision`。请求 `GET notes/{id}?revisionId=...` 时不符当前整篇版本返回 409；`GET notes/{id}/parts/raw?partRevisionId=...` 按真实 part 修订读取，仍执行用户/归属/删除校验。
+| 方法及路径 | 结果 |
+| --- | --- |
+| `GET` 基础路径 | 资产详情。可用 `revisionId` 验证整篇资产的当前修订，版本不符返回 409。 |
+| `GET /parts/{part}` | 当前部分的正文和 `partRevisionId`。 |
+| `PUT /parts/{part}` | 携带 `If-Match` 和幂等键更新当前部分。 |
+| `GET /ingestions` | 当前工作区内可见的构建任务概况。 |
 
-没有 Parent 表、父 chunk 外键或章节向量。章节、切分、独立入库核心和薄 Tool 见 [模块化文档处理](modular-document-processing.md)，完整集合与发布策略见 [知识库手册](milvus.md)。
+工作区搜索返回 `part=raw` 和整篇资产的 `revisionId`。RAG 详细结果还返回原文修订、命中范围和正文。索引依照资产的当前可见范围与原文版本查找。 [资产与入口](../content-assets.md) · [索引配置与维护](milvus.md)

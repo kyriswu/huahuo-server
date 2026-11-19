@@ -54,11 +54,11 @@ export class ContentAssetService {
  // fence so independent account/resource and contentAsset row locks retain their order.
  private async lockTree(tx:pg.PoolClient,wid:string,shared=false){await tx.query(`SELECT ${shared?'pg_advisory_xact_lock_shared':'pg_advisory_xact_lock'}(hashtextextended($1,0))`,[`asset-tree:${wid}`]);}
  private async findContentAsset(tx: pg.PoolClient, scope: Scope, workspaceId: string, contentAssetId: string,
-  lock: '' | 'FOR SHARE OF n' | 'FOR UPDATE OF n' = '') {
+  lock: '' | 'FOR SHARE OF asset' | 'FOR UPDATE OF asset' = '') {
   const { rows: [contentAsset] } = await tx.query<ContentAssetRow>(
-   `SELECT n.* FROM content_assets n
-    JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$2
-    WHERE n.content_asset_id=$1 AND n.user_id=$3 ${lock}`,
+   `SELECT asset.* FROM content_assets asset
+    JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
+    WHERE asset.content_asset_id=$1 AND asset.user_id=$3 ${lock}`,
    [contentAssetId, workspaceId, scope.userId],
   );
   return contentAsset;
@@ -98,9 +98,9 @@ export class ContentAssetService {
   );
   const currentParts = new Map(savedParts.rows.map(part => [part.part, part]));
   const refs = await tx.query(
-   `SELECT r.resource_id,r.sha256,r.mime_type,n.ref_order,n.usage,n.anchor,n.alt
-    FROM content_asset_resource_refs n JOIN resources r ON r.resource_id=n.resource_id AND r.user_id=$2
-    WHERE n.content_asset_id=$1 ORDER BY n.ref_order`, [contentAssetId, scope.userId],
+   `SELECT r.resource_id,r.sha256,r.mime_type,ref.ref_order,ref.usage,ref.anchor,ref.alt
+    FROM content_asset_resource_refs ref JOIN resources r ON r.resource_id=ref.resource_id AND r.user_id=$2
+    WHERE ref.content_asset_id=$1 ORDER BY ref.ref_order`, [contentAssetId, scope.userId],
   );
   const { rows: [cursor] } = await tx.query<{ next_cursor: string }>(
    'SELECT next_cursor FROM workspace_content_state WHERE workspace_id=$1', [workspaceId],
@@ -160,7 +160,7 @@ export class ContentAssetService {
   return transaction(this.pool, async tx => {
    await assertScope(tx, scope);
    await this.workspace(tx, scope, wid);
-   const contentAsset = await this.findContentAsset(tx, scope, wid, id, 'FOR SHARE OF n');
+   const contentAsset = await this.findContentAsset(tx, scope, wid, id, 'FOR SHARE OF asset');
    if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
    if (revisionId && (contentAsset.content_asset_revision_id !== revisionId || contentAsset.state !== 'active')) {
     throw new DomainError(409, 'CONTENT_ASSET_REVISION_MISMATCH');
@@ -196,12 +196,12 @@ export class ContentAssetService {
   return result;
  }
  private async tagDto(tx:pg.PoolClient,scope:Scope,wid:string,contentAssetId:string){
-  const n=await this.findContentAsset(tx,scope,wid,contentAssetId);
-  if(!n)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
-  const tags=await tx.query(`SELECT t.tag_id,t.display_name,t.normalized_name,nt.source FROM content_asset_tags nt JOIN asset_tags t ON t.tag_id=nt.tag_id AND t.workspace_id=$2 WHERE nt.content_asset_id=$1 ORDER BY t.normalized_name,t.tag_id`,[contentAssetId,wid]);
-  const suggestions=await tx.query(`SELECT suggestion_id,content_asset_revision_id,labels,provider,status,created_at FROM content_asset_tag_suggestions WHERE content_asset_id=$1 AND workspace_id=$2 AND status='pending' AND content_asset_revision_id=$3 AND expected_tag_set_version=$4 ORDER BY created_at DESC LIMIT 10`,[contentAssetId,wid,n.content_asset_revision_id,n.tag_set_version]);
+  const asset=await this.findContentAsset(tx,scope,wid,contentAssetId);
+  if(!asset)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
+  const tags=await tx.query(`SELECT t.tag_id,t.display_name,t.normalized_name,membership.source FROM content_asset_tags membership JOIN asset_tags t ON t.tag_id=membership.tag_id AND t.workspace_id=$2 WHERE membership.content_asset_id=$1 ORDER BY t.normalized_name,t.tag_id`,[contentAssetId,wid]);
+  const suggestions=await tx.query(`SELECT suggestion_id,content_asset_revision_id,labels,provider,status,created_at FROM content_asset_tag_suggestions WHERE content_asset_id=$1 AND workspace_id=$2 AND status='pending' AND content_asset_revision_id=$3 AND expected_tag_set_version=$4 ORDER BY created_at DESC LIMIT 10`,[contentAssetId,wid,asset.content_asset_revision_id,asset.tag_set_version]);
   const job=(await tx.query(`SELECT c.task_id,c.outcome,c.provider,t.state,t.error_code FROM content_jobs c JOIN tasks t ON t.id=c.task_id WHERE c.content_asset_id=$1 AND t.user_id=$2 AND t.workspace_id=$3 ORDER BY t.created_at DESC,t.id DESC LIMIT 1`,[contentAssetId,scope.userId,wid])).rows[0];
-  return {contentAssetId,tags:tags.rows.map(x=>({tagId:x.tag_id,displayName:x.display_name,normalizedName:x.normalized_name,source:x.source})),tagSetVersion:Number(n.tag_set_version),tagEtag:`"tags-${contentAssetId}-${n.tag_set_version}"`,manualOverride:n.tag_manual_override,suggestions:suggestions.rows.map(x=>({suggestionId:x.suggestion_id,contentAssetRevisionId:x.content_asset_revision_id,labels:x.labels as string[],provider:x.provider,status:x.status,createdAt:x.created_at.toISOString()})),contentAssetEtag:n.etag,processingStatus:n.processing_status as string,extraction:job?{taskId:job.task_id as string,status:job.state as string,outcome:job.outcome as string|null,provider:job.provider as string|null,errorCode:job.error_code as string|null}:null};
+  return {contentAssetId,tags:tags.rows.map(x=>({tagId:x.tag_id,displayName:x.display_name,normalizedName:x.normalized_name,source:x.source})),tagSetVersion:Number(asset.tag_set_version),tagEtag:`"tags-${contentAssetId}-${asset.tag_set_version}"`,manualOverride:asset.tag_manual_override,suggestions:suggestions.rows.map(x=>({suggestionId:x.suggestion_id,contentAssetRevisionId:x.content_asset_revision_id,labels:x.labels as string[],provider:x.provider,status:x.status,createdAt:x.created_at.toISOString()})),contentAssetEtag:asset.etag,processingStatus:asset.processing_status as string,extraction:job?{taskId:job.task_id as string,status:job.state as string,outcome:job.outcome as string|null,provider:job.provider as string|null,errorCode:job.error_code as string|null}:null};
  }
  private async applyTagSetTx(tx:pg.PoolClient,wid:string,contentAssetId:string,names:string[]){
   const normalized=this.normalizeTagNames(names);
@@ -210,8 +210,8 @@ export class ContentAssetService {
   for(const displayName of normalized.sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()))){
    const row=(await tx.query(`INSERT INTO asset_tags(tag_id,workspace_id,normalized_name,display_name,source) VALUES($1,$2,$3,$4,'manual') ON CONFLICT(workspace_id,normalized_name) DO UPDATE SET display_name=asset_tags.display_name RETURNING tag_id`,[randomUUID(),wid,displayName.toLowerCase(),displayName])).rows[0];ids.push(row.tag_id);
   }
-  await tx.query(`DELETE FROM content_asset_tags n USING asset_tags t
-   WHERE n.content_asset_id=$1 AND n.tag_id=t.tag_id AND t.workspace_id=$2`,[contentAssetId,wid]);
+  await tx.query(`DELETE FROM content_asset_tags membership USING asset_tags t
+   WHERE membership.content_asset_id=$1 AND membership.tag_id=t.tag_id AND t.workspace_id=$2`,[contentAssetId,wid]);
   for(const tagId of ids)await tx.query("INSERT INTO content_asset_tags(content_asset_id,tag_id,source) VALUES($1,$2,'manual')",[contentAssetId,tagId]);
   const updated=(await tx.query('UPDATE content_assets SET tag_set_version=tag_set_version+1,tag_manual_override=true WHERE content_asset_id=$1 RETURNING tag_set_version',[contentAssetId])).rows[0];
   await tx.query("UPDATE content_asset_tag_suggestions SET status='stale' WHERE content_asset_id=$1 AND status='pending'",[contentAssetId]);
@@ -224,9 +224,9 @@ export class ContentAssetService {
   return transaction(this.pool,async tx=>{
    await assertScope(tx,scope);await this.workspace(tx,scope,wid);
    return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.tags.mutate',key,{contentAssetId,change,ifMatch},async()=>{
-    const n=await this.findContentAsset(tx,scope,wid,contentAssetId,'FOR UPDATE OF n');
-    if(!n||n.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
-    if(ifMatch!==`"tags-${contentAssetId}-${n.tag_set_version}"`)throw new DomainError(412,'TAG_REVISION_MISMATCH');
+    const asset=await this.findContentAsset(tx,scope,wid,contentAssetId,'FOR UPDATE OF asset');
+    if(!asset||asset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
+    if(ifMatch!==`"tags-${contentAssetId}-${asset.tag_set_version}"`)throw new DomainError(412,'TAG_REVISION_MISMATCH');
     const view=await this.tagDto(tx,scope,wid,contentAssetId);let names=view.tags.map(t=>t.displayName as string);
     if(change.replace)names=change.replace;
     if(change.add!==undefined)names.push(change.add);
@@ -238,7 +238,7 @@ export class ContentAssetService {
     if(change.suggestionId){
      const suggestion=(await tx.query("SELECT * FROM content_asset_tag_suggestions WHERE suggestion_id=$1 AND content_asset_id=$2 AND workspace_id=$3 FOR UPDATE",[change.suggestionId,contentAssetId,wid])).rows[0];
      if(!suggestion)throw new DomainError(404,'TAG_SUGGESTION_NOT_FOUND');
-     if(suggestion.status!=='pending'||suggestion.content_asset_revision_id!==n.content_asset_revision_id||Number(suggestion.expected_tag_set_version)!==Number(n.tag_set_version))throw new DomainError(409,'TAG_SUGGESTION_STALE');
+     if(suggestion.status!=='pending'||suggestion.content_asset_revision_id!==asset.content_asset_revision_id||Number(suggestion.expected_tag_set_version)!==Number(asset.tag_set_version))throw new DomainError(409,'TAG_SUGGESTION_STALE');
      names=suggestion.labels;
     }
     await this.applyTagSetTx(tx,wid,contentAssetId,names);
@@ -255,10 +255,10 @@ export class ContentAssetService {
  async requestTagExtraction(scope:Scope,wid:string,contentAssetId:string,key:string){return transaction(this.pool,async tx=>{
   await assertScope(tx,scope);await this.workspace(tx,scope,wid);
   return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.tags.extract',key,{contentAssetId},async()=>{
-   const n=await this.findContentAsset(tx,scope,wid,contentAssetId,'FOR UPDATE OF n');
-   if(!n||n.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
+   const asset=await this.findContentAsset(tx,scope,wid,contentAssetId,'FOR UPDATE OF asset');
+   if(!asset||asset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
    if(this.config?.tagExtractorProvider==='disabled')throw new DomainError(503,'TAG_PROVIDER_UNAVAILABLE');
-   return {taskId:await this.task(tx,scope,wid,contentAssetId,n.content_asset_revision_id)};
+   return {taskId:await this.task(tx,scope,wid,contentAssetId,asset.content_asset_revision_id)};
   });
  });}
  async importContentAsset(scope:Scope,wid:string,input:{title:string;mimeType:string;content:string;folderId?:string|null;sourceUrl?:string;resourceRefs?:Array<{resourceId:string;usage:string}>},key:string){
@@ -305,18 +305,18 @@ export class ContentAssetService {
    // before the contentAsset row, just like new upload claims; title-only edits need neither.
    const updatesRefs=input.parts!==undefined||input.resourceRefs!==undefined;
    if (this.resourceClaims && updatesRefs && (await tx.query(
-    `SELECT 1 FROM content_asset_resource_refs r JOIN content_assets n ON n.content_asset_id=r.content_asset_id
-     JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$2
-     WHERE r.content_asset_id=$1 AND n.user_id=$3 LIMIT 1`, [id,wid,scope.userId],
+    `SELECT 1 FROM content_asset_resource_refs r JOIN content_assets asset ON asset.content_asset_id=r.content_asset_id
+     JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
+     WHERE r.content_asset_id=$1 AND asset.user_id=$3 LIMIT 1`, [id,wid,scope.userId],
    )).rowCount) await this.resourceClaims.lockAccount(tx,scope);
    await this.resourceClaims?.ensure(tx,scope,wid,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
    // Normalize before the idempotency digest and before comparing revisions.
    const prepared=await normalizeOwnedImageParts(tx,scope,wid,input.parts??{},this.config,this.resourceClaims);
    const normalized={...input,...(input.parts?{parts:prepared.parts}:{}),imageOrigins:prepared.imageOrigins};
    return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.update',key,{id,input:normalized,ifMatch},async()=>{
-    const n=await this.findContentAsset(tx,scope,wid,id,'FOR UPDATE OF n');
-    if(!n||n.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
-    if(n.etag!==ifMatch)throw new DomainError(412,'CONTENT_ASSET_REVISION_MISMATCH');
+    const asset=await this.findContentAsset(tx,scope,wid,id,'FOR UPDATE OF asset');
+    if(!asset||asset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
+    if(asset.etag!==ifMatch)throw new DomainError(412,'CONTENT_ASSET_REVISION_MISMATCH');
     if (input.folderId !== undefined) await this.assertActiveFolder(tx, wid, input.folderId);
     const previous=(await tx.query<{part:string;part_revision_id:string;revision:number;content_markdown:string}>('SELECT part,part_revision_id,revision,content_markdown FROM content_asset_parts WHERE content_asset_id=$1',[id])).rows;
     const complete=Object.fromEntries(previous.map(p=>[p.part,p.content_markdown]));
@@ -325,10 +325,10 @@ export class ContentAssetService {
     const changed=Object.entries(canonicalParts).filter(([part,text])=>complete[part]!==text);
     Object.assign(complete,canonicalParts);
     const refsChanged=updatesRefs?await syncContentAssetRefs(tx,scope,wid,id,complete,input.resourceRefs):false;
-    const title=input.title?.trim()??n.title;
+    const title=input.title?.trim()??asset.title;
     const placementChanged = input.folderId !== undefined && await this.setContentAssetFolder(tx, wid, id, input.folderId);
-    if(!changed.length&&!refsChanged&&title===n.title&&!placementChanged)return this.contentAssetDto(tx,scope,wid,id);
-    const v=Number(n.content_asset_revision)+1,rid=randomUUID();
+    if(!changed.length&&!refsChanged&&title===asset.title&&!placementChanged)return this.contentAssetDto(tx,scope,wid,id);
+    const v=Number(asset.content_asset_revision)+1,rid=randomUUID();
     await tx.query('UPDATE content_assets SET title=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
      [id,title,v,rid,etag(id,v)]);
     for(const [part,text] of changed){
@@ -337,7 +337,7 @@ export class ContentAssetService {
      }
     const rawChanged=changed.some(([part])=>part==='raw');
     if(rawChanged)await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,complete.raw?.trim()?'ready':'needs-processing']);
-    await this.cursor(tx,wid,'content_asset',id,'updated',false,rid,v,n.content_asset_revision_id,Number(n.content_asset_revision));
+    await this.cursor(tx,wid,'content_asset',id,'updated',false,rid,v,asset.content_asset_revision_id,Number(asset.content_asset_revision));
     if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,wid,id,rid);
     if(rawChanged)await this.indexContentAsset(tx,scope,wid,id);
     return this.contentAssetDto(tx,scope,wid,id);
@@ -354,7 +354,7 @@ export class ContentAssetService {
     await this.assertActiveFolder(tx,wid,folderId);
     const receipts = [];
     for(const item of contentAssets){
-     const contentAsset=await this.findContentAsset(tx,scope,wid,item.contentAssetId,'FOR UPDATE OF n');
+     const contentAsset=await this.findContentAsset(tx,scope,wid,item.contentAssetId,'FOR UPDATE OF asset');
      if(!contentAsset||contentAsset.state!=='active'){
       receipts.push({contentAssetId:item.contentAssetId,status:'not_found'});
       continue;
@@ -375,13 +375,13 @@ export class ContentAssetService {
   });
  }
  async contentAssetPart(scope:Scope,wid:string,id:string,part:string){checkPart(part);return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);
-  const contentAsset=await this.findContentAsset(tx,scope,wid,id,'FOR SHARE OF n');
+  const contentAsset=await this.findContentAsset(tx,scope,wid,id,'FOR SHARE OF asset');
   if(!contentAsset||contentAsset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
   const row=(await tx.query('SELECT * FROM content_asset_parts WHERE content_asset_id=$1 AND part=$2',[id,part])).rows[0];if(!row)throw new DomainError(404,'CONTENT_ASSET_PART_NOT_FOUND');
   return {contentAssetId:id,part,partRevisionId:row.part_revision_id,contentMarkdown:row.content_markdown,contentSha256:row.content_sha256,etag:contentAsset.etag};
  });}
- private async transitionContentAsset(tx:pg.PoolClient,scope:Scope,wid:string,n:ContentAssetStateRow,restore:boolean){
-  const id=n.content_asset_id,version=Number(n.content_asset_revision)+1,revisionId=randomUUID();
+ private async transitionContentAsset(tx:pg.PoolClient,scope:Scope,wid:string,asset:ContentAssetStateRow,restore:boolean){
+  const id=asset.content_asset_id,version=Number(asset.content_asset_revision)+1,revisionId=randomUUID();
   await tx.query('UPDATE content_assets SET state=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
    [id,restore?'active':'deleted',version,revisionId,etag(id,version)]);
   if(restore){await this.indexContentAsset(tx,scope,wid,id);}
@@ -391,13 +391,13 @@ export class ContentAssetService {
    await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,$3,'kb.content-asset-cleanup','content',$4,'queued',$5,$6)",[taskId,scope.userId,wid,inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
    await enqueueIntent(tx,taskId);await event(tx,taskId);
   }
-  return this.cursor(tx,wid,'content_asset',id,restore?'restored':'deleted',!restore,revisionId,version,n.content_asset_revision_id,Number(n.content_asset_revision));
+  return this.cursor(tx,wid,'content_asset',id,restore?'restored':'deleted',!restore,revisionId,version,asset.content_asset_revision_id,Number(asset.content_asset_revision));
  }
  async deleteContentAsset(scope:Scope,wid:string,id:string,ifMatch:string,key:string,restore=false){
   return transaction(this.pool,async tx=>{
    await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid,true);
    return idempotent(tx,this.secret,`${scope.userId}:${wid}`,restore?'content-asset.restore':'content-asset.delete',key,{id,ifMatch},async()=>{
-    const contentAsset=await this.findContentAsset(tx,scope,wid,id,'FOR UPDATE OF n');
+    const contentAsset=await this.findContentAsset(tx,scope,wid,id,'FOR UPDATE OF asset');
     if(!contentAsset)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
     if(contentAsset.etag!==ifMatch)throw new DomainError(412,'CONTENT_ASSET_REVISION_MISMATCH');
     return this.transitionContentAsset(tx,scope,wid,contentAsset,restore);
@@ -417,11 +417,11 @@ export class ContentAssetService {
   if(!this.ragQuery)throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE');
   const result=(input.ownerKinds?.length&&!input.ownerKinds.includes('content_asset'))||(input.contentAssetParts?.length&&!input.contentAssetParts.includes('raw'))?{results:[]}:await this.ragQuery.query(scope,{query:input.query,mode,sourceType:'content_asset',workspaceId:wid,topK:Math.min(30,input.limit??20),filters:input});
   const ids=[...new Set(result.results.map(r=>String(r.documentKey)))];
-  const contentAssets=await transaction(this.pool,async tx=>{await assertScope(tx,scope);return (await tx.query("SELECT n.content_asset_id,n.title,n.updated_at FROM content_assets n JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$2 WHERE n.content_asset_id=ANY($1::uuid[]) AND n.user_id=$3 AND n.state='active'",[ids,wid,scope.userId])).rows;});
-  const results=contentAssets.flatMap(n=>{const hit=result.results.find(r=>r.documentKey===n.content_asset_id);return hit?[{ownerRef:{workspaceId:wid,kind:'content_asset',id:n.content_asset_id},revisionId:hit.revisionId,part:'raw',path:`content-assets/${n.content_asset_id}.md`,title:n.title,updatedAt:n.updated_at.toISOString(),matchMode:mode,score:Number(hit.rerankScore??(mode==='hybrid'?hit.rrfScore:hit.keywordScore)),staleSource:false}]:[];});
+  const contentAssets=await transaction(this.pool,async tx=>{await assertScope(tx,scope);return (await tx.query("SELECT asset.content_asset_id,asset.title,asset.updated_at FROM content_assets asset JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2 WHERE asset.content_asset_id=ANY($1::uuid[]) AND asset.user_id=$3 AND asset.state='active'",[ids,wid,scope.userId])).rows;});
+  const results=contentAssets.flatMap(asset=>{const hit=result.results.find(r=>r.documentKey===asset.content_asset_id);return hit?[{ownerRef:{workspaceId:wid,kind:'content_asset',id:asset.content_asset_id},revisionId:hit.revisionId,part:'raw',path:`content-assets/${asset.content_asset_id}.md`,title:asset.title,updatedAt:asset.updated_at.toISOString(),matchMode:mode,score:Number(hit.rerankScore??(mode==='hybrid'?hit.rrfScore:hit.keywordScore)),staleSource:false}]:[];});
   return {mode,queryFingerprint:sha(`${wid}:${normalize(input.query)}`),keywordReadiness:'current',vectorReadiness:mode==='hybrid'?'current':'unavailable',vectorStatus:mode==='hybrid'?'ready':'unavailable',contentCursor:String((await this.pool.query('SELECT next_cursor FROM workspace_content_state WHERE workspace_id=$1',[wid])).rows[0]?.next_cursor??0),results};
  }
- async createContentAssetRelation(scope:Scope,wid:string,id:string,input:{targetContentAssetId:string;relationType:string;rationale:string},key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.relation.create',key,{id,...input},async()=>{if(!['references','supports','contradicts','related'].includes(input.relationType)||input.targetContentAssetId===id)throw new DomainError(400,'RELATION_INVALID');const ok=await tx.query("SELECT n.content_asset_id FROM content_assets n JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$2 WHERE n.content_asset_id=ANY($1::uuid[]) AND n.user_id=$3 AND n.state='active'",[[id,input.targetContentAssetId],wid,scope.userId]);if(ok.rowCount!==2)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');const rid=randomUUID();await tx.query('INSERT INTO content_asset_relations(relation_id,workspace_id,source_content_asset_id,target_content_asset_id,relation_type,rationale,etag) VALUES($1,$2,$3,$4,$5,$6,$7)',[rid,wid,id,input.targetContentAssetId,input.relationType,input.rationale,`"relation-${rid}-1"`]);return {relationId:rid,relationType:input.relationType,origin:'explicit',source:{contentAssetId:id,part:'raw'},target:{contentAssetId:input.targetContentAssetId,part:'raw'},rationale:input.rationale,version:1,etag:`"relation-${rid}-1"`};});});}
+ async createContentAssetRelation(scope:Scope,wid:string,id:string,input:{targetContentAssetId:string;relationType:string;rationale:string},key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.relation.create',key,{id,...input},async()=>{if(!['references','supports','contradicts','related'].includes(input.relationType)||input.targetContentAssetId===id)throw new DomainError(400,'RELATION_INVALID');const ok=await tx.query("SELECT asset.content_asset_id FROM content_assets asset JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2 WHERE asset.content_asset_id=ANY($1::uuid[]) AND asset.user_id=$3 AND asset.state='active'",[[id,input.targetContentAssetId],wid,scope.userId]);if(ok.rowCount!==2)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');const rid=randomUUID();await tx.query('INSERT INTO content_asset_relations(relation_id,workspace_id,source_content_asset_id,target_content_asset_id,relation_type,rationale,etag) VALUES($1,$2,$3,$4,$5,$6,$7)',[rid,wid,id,input.targetContentAssetId,input.relationType,input.rationale,`"relation-${rid}-1"`]);return {relationId:rid,relationType:input.relationType,origin:'explicit',source:{contentAssetId:id,part:'raw'},target:{contentAssetId:input.targetContentAssetId,part:'raw'},rationale:input.rationale,version:1,etag:`"relation-${rid}-1"`};});});}
  async deleteContentAssetRelation(scope:Scope,wid:string,rid:string,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.relation.delete',key,{rid,ifMatch},async()=>{const r=await tx.query('DELETE FROM content_asset_relations WHERE relation_id=$1 AND workspace_id=$2 AND etag=$3 RETURNING relation_id,source_content_asset_id,target_content_asset_id',[rid,wid,ifMatch]);if(!r.rowCount)throw new DomainError(412,'RELATION_REVISION_MISMATCH');return {eventId:randomUUID(),workspaceId:wid,cursor:String((await tx.query('SELECT coalesce(next_cursor,0) c FROM workspace_content_state WHERE workspace_id=$1',[wid])).rows[0]?.c??0),operationId:randomUUID(),occurredAt:new Date().toISOString(),objectKind:'content_asset_relation',objectId:rid,changeType:'deleted',tombstone:true,resourcePinDelta:{added:[],released:[]}};});});}
  async navigation(scope:Scope,wid:string,map:string,input:GraphQuery={}){return transaction(this.pool,async tx=>{
   await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await assertScope(tx,scope);await this.workspace(tx,scope,wid);

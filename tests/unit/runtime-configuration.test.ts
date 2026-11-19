@@ -4,7 +4,7 @@ import {defaults,validateValues,applyValues,rejectSecrets} from '../../src/modul
 import {extractionConfig} from '../support/extraction-config.js';
 import {nodeConfig,nodeDocumentConfig,nodeFromRow,type ProcessingNode} from '../../src/modules/processing-nodes/model.js';
 import {loadProcessingNodesConfig} from '../../src/config/processing-nodes.js';
-import {kbSnapshot,kbEmbedding} from '../../src/modules/kb/profile.js';
+import {snapshotForSource,kbEmbedding} from '../../src/modules/kb/profile.js';
 
 const node:ProcessingNode={id:'11111111-1111-4111-8111-111111111111',name:'GPU node',capabilities:['document'],resourceClass:'gpu',mode:'ecs',regionId:'cn-beijing',instanceId:'i-unit12345678',privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,revision:1};
 describe('typed runtime registry (no database/cloud)',()=>{
@@ -42,7 +42,7 @@ describe('typed runtime registry (no database/cloud)',()=>{
  });
  it('keeps the embedding timeout bound to its build snapshot after a configuration change',async()=>{
   const base=config();Object.assign(base.rag,{providerMode:'live',embeddingBaseUrl:'https://embedding.test/v1',embeddingApiKey:'synthetic-fixture-key'});
-  const snapshot=kbSnapshot(applyValues(base,{'rag.embeddingTimeoutMs':2000},1),'content-asset-hybrid','markdown');
+  const snapshot=snapshotForSource(applyValues(base,{'rag.embeddingTimeoutMs':2000},1),'content_asset','markdown');
   const later=applyValues(base,{'rag.embeddingTimeoutMs':9000},2);let signal:AbortSignal|undefined;
   vi.useFakeTimers();const fetchDouble=vi.spyOn(globalThis,'fetch').mockImplementation(async(_url,options)=>new Promise((_resolve,reject)=>{signal=options!.signal as AbortSignal;signal.addEventListener('abort',()=>reject(new DOMException('Fixture timeout','AbortError')),{once:true});}));
   try{

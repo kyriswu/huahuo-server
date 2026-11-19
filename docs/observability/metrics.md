@@ -51,7 +51,7 @@ agent/provider/model/tool 均按启动时的已知定义归一，未知项 other
 | task_oldest_waiting_seconds | queue | 上述任务中最早 available_at 至今的等待；重试从本次可执行时间算起；空队列为零 |
 | task_backlog_observed_timestamp_seconds | queue | 最近一次成功数据库快照的 Unix 时间；没有成功快照时无序列 |
 | rag_stage_duration_seconds | stage | auth/pg_scope/index_ready/embedding/index_search/pg_hydrate/rerank/pg_recheck 各实际阶段 |
-| rag_operations_total | operation, outcome | note_query/file_query/text_query 既有技术路由查询及 embedding_attempt；success/failure |
+| rag_operations_total | operation, outcome | 查询入口使用 `content_asset_query` 或 `file_query`，模型尝试使用 `embedding_attempt`，结果为 `success` 或 `failure`。文档查询覆盖文件及独立文本。 |
 | rag_operation_duration_seconds | operation, outcome | 对应查询/嵌入尝试耗时；不能把查询和内部嵌入次数相加当作用户检索次数 |
 | rag_fallbacks_total | reason | 每次查询发生 rerank 降级记一次；timeout/error/invalid_response |
 | stream_sessions_total | kind, outcome | 状态流关闭一次；completed/client_abort/error/timeout/shutdown/backpressure/cancelled |
@@ -60,6 +60,8 @@ agent/provider/model/tool 均按启动时的已知定义归一，未知项 other
 | stream_events_total | kind | 流结束时汇总传输层已接收的数据事件数；不含心跳 |
 
 Task 延后继续、回滚、未知外部结果不伪造处理完成；重试尝试可以先失败、最终成功。终态分布的时间窗不是同一批创建任务的成功率。kind/queue 为代码中的受控枚举。队列 Gauge 为共享 PG 快照，多 Scheduler 用 max；Counter 才按副本 sum(rate(...))。快照最多每 10 秒刷新，结合抓取周期存在正常延迟。
+
+资产任务按 `kind="kb.content-asset-index"`、`kind="kb.content-asset-cleanup"` 和 `kind="content-asset.tag-extract"` 查询。资产查询日志使用 `event="rag.query.finished"` 和 `sourceType="content_asset"`，包含状态码、分阶段耗时和现有重排降级情况。Prometheus 标签使用有限业务类型，资产 ID 不进入标签。
 
 stream kind 为 node_status/document_trial/state；HTTP 200 下的 document_trial failed/cancelled 仍按 error/cancelled 结束。状态流与 Agent 原生模型输出流是不同指标族，不拿状态首事件当 LLM 首文本。
 

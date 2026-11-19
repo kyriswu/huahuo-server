@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261119-warm-cache-verification",
-  "baseRevision": "53e6b0897932939e516fd6a67514b177c2c2fe5c",
+  "id": "20261119-content-asset-terminology",
+  "baseRevision": "4b5dc0f3471027a14c85ea0a2b64a9946c6078af",
   "services": [
     "api-server",
     "admin",
@@ -9,29 +9,58 @@
     "scheduler"
   ],
   "database": {
-    "migrations": [],
-    "verifySql": "scripts/release/changes/20261119-warm-cache-verification/verify-db.sql",
+    "migrations": [
+      "0021_content_asset_search_terminology.sql"
+    ],
+    "verifySql": "scripts/release/changes/20261119-content-asset-terminology/verify-db.sql",
     "dataChange": {
-      "mode": "none",
-      "reason": "Repeat the complete test release with warm Docker caches. Runtime code, dependencies, configuration and schema are unchanged."
+      "mode": "inline",
+      "reason": "Rename index attributes in place and update saved search modes and the ContentAsset target name. The DDL takes exclusive locks on the affected indexes without rebuilding them. Preserve build, point and task IDs. Coordinate the Milvus rename and all runtime roles in one maintenance window."
     }
   },
   "configuration": {
-    "mode": "reuse",
-    "changes": [],
-    "reviewedFiles": [],
-    "verifyFile": "scripts/release/changes/20261119-warm-cache-verification/verify-config.mjs"
+    "mode": "candidate",
+    "changes": [
+      {
+        "key": "KB_CONTENT_ASSET_HYBRID_COLLECTION",
+        "operation": "change",
+        "roles": [
+          "api-server",
+          "admin",
+          "worker",
+          "scheduler"
+        ],
+        "required": true,
+        "hasDefault": true
+      }
+    ],
+    "reviewedFiles": [
+      "src/config/config.ts",
+      "compose.yaml",
+      ".env.example",
+      ".env.host.example",
+      ".env.compose.local.example",
+      ".env.compose.cloud.example",
+      "specs/backend-plan/examples/.env.compose.local.example",
+      "specs/backend-plan/examples/.env.compose.cloud.example"
+    ],
+    "verifyFile": "scripts/release/changes/20261119-content-asset-terminology/verify-config.mjs"
   },
-  "dependencies": [],
+  "dependencies": [
+    {
+      "name": "content-asset-milvus-collection",
+      "checkFile": "scripts/release/changes/20261119-content-asset-terminology/verify-external.mjs"
+    }
+  ],
   "backfill": {
     "required": false,
     "reference": null
   },
   "compatibility": {
-    "database": true,
+    "database": false,
     "api": true,
-    "tasks": true,
-    "configuration": true
+    "tasks": false,
+    "configuration": false
   },
   "smoke": "health"
 }
