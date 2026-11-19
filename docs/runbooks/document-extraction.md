@@ -1,6 +1,6 @@
 # 文档提取接入与关键词索引
 
-现有 `/api/v1/rag/ingestions` 和 `FILE_UPLOAD` 已接入 Xberg 提取；解析结果进入原来的 `document-keyword` / BM25 流水线，不新增 Embedding、Rerank 或第二套知识库。PDF、Office、TXT、Markdown、CSV 都由外部服务解析，Server 只传客户端已经上传的 OSS URL，不读取或中转源文件。手动正文不属于文件解析入口；独立图片 OCR 不改成文档任务。未开启处理节点时，文件受理明确返回 `DOCUMENT_PARSER_NOT_CONFIGURED`，没有本地解析兜底。
+现有 `/api/v1/rag/ingestions` 和 `FILE_UPLOAD` 已接入 Xberg 提取；解析结果进入现有的 `keyword` / BM25 流水线，不新增 Embedding、Rerank 或第二套知识库。PDF、Office、TXT、Markdown、CSV 都由外部服务解析，Server 只传客户端已经上传的 OSS URL，不读取或中转源文件。手动正文不属于文件解析入口；独立图片 OCR 不改成文档任务。未开启处理节点时，文件受理明确返回 `DOCUMENT_PARSER_NOT_CONFIGURED`，没有本地解析兜底。
 
 大文件测试前须确认外部解析服务器的下载限制、内存/临时磁盘容量及异步结果保留规则覆盖完整处理流程。当前 Worker 不缓存源文件，以下旧中转测试只作历史记录。历史2026-11-14的325页 VPC 复测先遇128MiB临时磁盘 `ENOSPC`，随后旧服务异步任务约5分钟后返回404，全文未完成入库及查询，见[失败记录](../acceptance/document-extraction.md#完整325页复测未通过解析机已停止2026-11-14)。当前调用侧已改为持久回调接收，但不能据此将该次失败改记为通过；真实CPU全文与回调网络仍待内网复测。
 
@@ -81,7 +81,7 @@ curl --fail-with-body "$SERVER_BASE_URL/api/v1/rag/ingestions/$JOB_ID/extraction
 
 ## 关键词流水线与恢复
 
-完整 `content` → 原有分段（最多2000字符、无重叠）→ 原有 `document-keyword` BM25 索引 → 原有查询接口。图片 CDATA 已有 OCR 文字作为正文的一部分参与检索，不再次 OCR；只有 UUID/空 CDATA 时不虚构图片内容。上传回执和定位 JSON 另存，不把整包 metadata 塞进索引。
+完整 `content` → 原有分段（最多2000字符、无重叠）→ 原有 `keyword` BM25 索引 → 原有查询接口。图片 CDATA 已有 OCR 文字作为正文的一部分参与检索，不再次 OCR；只有 UUID/空 CDATA 时不虚构图片内容。上传回执和定位 JSON 另存，不把整包 metadata 塞进索引。
 
 运行库先经 Redis 去重/FIFO/全局并发，再检查 ECS；Running 复用，Stopped 启动并分步骤检查健康。机器侧名额覆盖远端执行、产物保存和 PG 提交，等待期间不释放实际远端占用；Worker租约和执行槽则在步骤间释放。无排队/执行/未知请求满60秒后触发节省停机；事件唤醒、每分钟临时兜底及确认停机后休眠的约定保持。
 

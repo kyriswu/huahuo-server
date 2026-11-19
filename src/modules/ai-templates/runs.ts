@@ -27,8 +27,8 @@ async function assertWorkspace(tx: pg.PoolClient, scope: Scope, workspaceId: str
 async function readSource(tx: pg.PoolClient, userId: string, workspaceId: string, contentAssetId: string, includeContent = false) {
   // Lock the content asset before reading its parts, matching the write path.
   const { rows: [contentAsset] } = await tx.query<{ title: string }>(
-    `SELECT n.title FROM content_assets n JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$1
-     WHERE n.content_asset_id=$2 AND n.user_id=$3 AND n.state='active' FOR SHARE OF n`, [workspaceId, contentAssetId, userId],
+    `SELECT asset.title FROM content_assets asset JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$1
+     WHERE asset.content_asset_id=$2 AND asset.user_id=$3 AND asset.state='active' FOR SHARE OF asset`, [workspaceId, contentAssetId, userId],
   );
   if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
   const { rows: [part] } = await tx.query<Omit<Source, 'title'>>(

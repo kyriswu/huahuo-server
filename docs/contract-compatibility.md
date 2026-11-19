@@ -1,10 +1,14 @@
-## 资产命名统一（2026-11-19，本地候选）
+# Server 契约与阶段记录
 
-Server 统一采用 `ContentAsset` 表达用户可以管理的资产，中文显示为「资产」。当前 PostgreSQL 主表为 `content_assets`，归属字段为 `user_id`，标识字段为 `content_asset_id`。正文、资源引用、工作区、文件夹和标签沿用现有关系模型。上传原文件使用 `Resource` 和 `resourceId`。
+## 当前资产契约
 
-资产公开路径以 `/api/v1/workspaces/{workspaceId}/content-assets` 为入口，接口字段使用 `contentAssetId` 和 `contentAssetRevisionId`。资产全文查询使用 `/api/v1/kb/content-assets/query`，通用查询的业务类型为 `content_asset`。AI 纲要使用 `content_asset_outline`，正文润色继续按模板提示词生成通用文本。
+Server 使用 `ContentAsset` 表达用户可以管理的资产，中文显示为「资产」。PostgreSQL 主表为 `content_assets`，归属字段为 `user_id`，标识字段为 `content_asset_id`。正文、原文件、工作区、文件夹和标签按关系挂到资产。上传原文件使用 `Resource` 和 `resourceId`。 [资产与搜索术语](content-assets.md)
 
-增量迁移 `0020` 原地调整表、字段和必要的任务载荷，并删除旧文件夹级联恢复标记。本轮验收以新资产流程为准。旧客户端格式与新契约不兼容。共享开发和测试库切换时，API、Admin、Worker 与 Scheduler 一起切换。物理 Milvus 资产集合继续沿用现有对象，显式配置时将集合值填入 `KB_CONTENT_ASSET_HYBRID_COLLECTION`。
+资产管理入口为 `/api/v1/workspaces/{workspaceId}/content-assets`，资产 ID 和修订分别使用 `contentAssetId` 和 `contentAssetRevisionId`。全文查询入口为 `/api/v1/kb/content-assets/query`，业务来源为 `content_asset`。AI 纲要场景使用 `content_asset_outline`。编辑器润色继续用一次生成请求返回提示词定义的文本，支持 JSON 和 SSE。 [AI 模板](runbooks/ai-templates.md)
+
+`0020` 完成业务表、字段和任务命名收敛。本地候选 `0021` 更正索引列名和存量快照，底层索引使用 `hybrid`、`keyword`，集合按业务来源绑定。资产默认集合名随已有集合原地更名生效。 [索引与切换](runbooks/milvus.md)
+
+以下带日期的段落记录当时的实现与验收，保留对应版本的协议和数据库命名。
 
 ## 笔记归属与组织关系（2026-11-19，本地候选）
 
@@ -362,31 +366,29 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 | 旧 `PUT /api/v1/media/uploads/{uploadId}/object`、`GET /api/v1/media/resources/{resourceId}/object` | 旧 Server 字节代理路径 | 已删除，不提供代理回退或兼容模式 |
 | `DELETE /api/v1/workspaces/{workspaceId}/media/resources/{resourceId}` | Bearer + 幂等；解析 `resourceId/workspaceId/status`，status 接受 `deleted` 或 `delete_pending` | CODE；引用检查后返回 `delete_pending`，Worker 异步删除，不在 API 同步删文件 |
 
-头像、笔记、手动文本图片及自有文档入口首次使用临时上传时，在各自业务事务中调用 `ResourceClaims`，统一建立资源和归属；后续业务需通过同一入口接入，已有引用继续使用 `resource_refs`。上传完成不触发检查、解析、ASR 或文本任务。Redis 24 小时到期回收以 PG `resources` 是否存在为判定，不查看各业务表，不为每条临时上传生成数据库任务。
+头像、资产、手动文本图片及自有文档入口首次使用临时上传时，在各自业务事务中调用 `ResourceClaims`，统一建立资源和归属；后续业务需通过同一入口接入，已有引用继续使用 `resource_refs`。上传完成不触发检查、解析、ASR 或文本任务。Redis 24 小时到期回收以 PG `resources` 是否存在为判定，不查看各业务表，不为每条临时上传生成数据库任务。
 
-## P06：个人资产、笔记、文件夹、检索与图谱
+## P06 个人资产、文件夹、检索与图谱
 
-App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本阶段核对 `domain_clients.dart`、`contract_models.dart`、`api_contract_manifest.dart`、`endpoint_catalog.dart`；App 未修改。
+以下路径以 `/api/v1/workspaces/{workspaceId}` 为前缀。写入沿用幂等键，更新资产及正文部分携带当前资产 ETag。
 
-| API | App 解析/行为 | 后端状态 |
-|---|---|---|
-| `GET/POST/PATCH/DELETE /workspaces/{workspaceId}/folders` | Folder ID、parentFolderId、normalizedName、state、currentRevisionId、etag、contentCursor；If-Match + 幂等 | CODE；同级重名冲突、循环移动拒绝、软删除/恢复、作用域隔离 |
-| `GET/POST/PATCH/DELETE /workspaces/{workspaceId}/notes` | HNote 的 raw/outline/germination parts、noteRevisionId、etag、resourceRefs、sourceRef | CODE；只保存当前正文，修订 ID 为并发/异步标记；旧 ETag 返回 412，删除保留 tombstone |
-| `GET/PUT .../notes/{noteId}/parts/{part}` | `contentMarkdown`、partRevisionId、contentSha256；PUT 用 If-Match | CODE；读取与替换当前部分，不提供历史正文；basePartRevisionId 已移除，原文不被标签任务覆盖 |
-| `POST /workspaces/{workspaceId}/notes/batch-move` | 局部结果逐项返回 | CODE；单项冲突不会覆盖其他项 |
-| `POST /workspaces/{workspaceId}/search` | keyword/semantic mode、中文与英文 query、owner/folder/date filters；结果带 ownerRef、part、revisionId、path、matchMode | CODE；Note keyword 使用笔记集合 BM25，semantic/hybrid 使用同集合 Dense/BM25 原生 RRF；返回 `part=raw` 和整篇 Note 修订，保留授权及业务筛选 |
-| `GET /workspaces/{workspaceId}/content-navigation/{map}` | 局部节点/标签聚合 | CODE；只返回有据的 Note/Tag 节点与计数，限制 100 节点 |
-| `GET/POST/DELETE .../notes/{noteId}/relations` | typed explicit relation、source/target、rationale、version、etag | CODE；引用关系和标签聚合均按 workspace 隔离 |
+| API | Server 当前行为 |
+|---|---|
+| `GET/POST /content-assets` | 分页读取资产元信息，或创建含 raw、outline、germination 的资产，返回 `contentAssetId`。 |
+| `GET/PATCH/DELETE /content-assets/{contentAssetId}` | 资产详情、编辑与删除。返回 `contentAssetRevisionId`、`etag`、`resourceRefs` 和 `sourceRef`。整篇读取可校验 `revisionId`。 |
+| `GET/PUT /content-assets/{contentAssetId}/parts/{part}` | 读取或更新当前正文部分，读取返回 `contentMarkdown`、`partRevisionId`、`contentSha256`。 |
+| `POST /content-asset-imports` | 将纯文本或 Markdown 写为资产，可引用已有原文件。 |
+| `POST /content-assets/batch-move` | 修改工作区内文件夹位置，逐项返回结果。 |
+| `POST /search` | 当前支持 `keyword`、`hybrid`，以及标签、来源、日期和文件夹过滤。返回 `ownerRef.kind=content_asset`、`part=raw` 和整篇资产修订。 |
+| `GET /content-navigation/{map}` | 返回有界的资产与标签节点、共同标签边和 `totalContentAssets`。 |
+| `GET/POST /content-assets/{contentAssetId}/relations` | 读取或创建资产间的显式关系，创建使用 `targetContentAssetId`。 |
+| `DELETE /content-asset-relations/{relationId}` | 按关系 ETag 删除显式关系。 |
 
-标签提取由 `asset.tag-extract` 持久任务执行，最多 5 个候选；任务失败或 revision 过期不会删除或覆盖原文，人工标签表与提取来源分开。未接真实 LLM/Dify，确定性提取只作为明确的本地 Worker fixture。
+有效标签由 `content_asset_tags` 维护，自动提取由 `content-asset.tag-extract` 执行。标签写入使用标签自己的 ETag。 [标签与图谱](runbooks/p06-tags.md)
 
-## P06 标签化补充修订
+App 只读依据见 [App 源码参照](app-reference.md)。Server 中的搜索路由是当前技术实现。 [搜索业务边界](runbooks/search-status.md)
 
-- App 参照确认人工标签规范为每篇最多 20 个、每个 1–24 Unicode 字符；后端按此拒绝超限并返回 tag ETag。新增 tag CRUD/建议/提取路由为后端补充契约，保持 envelope、Bearer、Idempotency-Key 和 If-Match 约定。
-- App `contentNavigation` 请求目前只发送 workspace/map 且解析 `items/map/contentCursor`；后端提供真实相对路径、revision/version、ownerRef，并额外返回有界 nodes/edges。App 当前 `MiroFishGraphMapper.fromContentNavigation` 只按路径建层级边，忽略显式后端 edges；因此共同标签边已在 API/契约测试中验证，但 App 端完整可视化接线待 P15，不修改 Flutter。
-- 搜索保持 `ownerRef.kind=hnote`、`keywordReadiness=current`、`vectorReadiness/vectorStatus=unavailable`，不返回正文/snippet/evidence，保留关键词/标签/来源/时间过滤。
-
-## 知识库当前契约（2026-11-10）
+## 历史记录 · 知识库契约（2026-11-10）
 
 解析器和图文绑定不变。Note 保存 raw 后异步走笔记混合模式，资料保留文件/导入身份并走纯 BM25。索引使用四张元数据表、两个 Collection；详见 [知识库手册](runbooks/milvus.md)。
 
@@ -398,13 +400,13 @@ App 参照 commit `20f61b78887f9288d1fd3227f326e6374d516f27`，本阶段核对 `
 
 真实客户端源文件、hash 和测试夹具位置见 app-reference.md。本阶段未运行或修改 Flutter；集成通过只证明相应 HTTP/JSON 契约，不能代替真机验收。
 
-## Note / File 入库线路梳理与调整说明（2026-11-16）
+## 历史记录 · 入库线路审计（2026-11-16）
 
-后续用户进一步决定先封装关键词/向量/混合这些技术能力；本节保留上层来源分派的分析。下面的AI调整任务不作为本次底层工作的执行范围，Note/File映射与业务名称后续再收敛。最新已实现边界见文首“搜索底层端口收敛”与检索手册。
+下列内容记录当时的来源分派和调整计划。现行模式、来源和存储映射见 [资产与搜索术语](content-assets.md) 与 [知识库手册](runbooks/milvus.md)。
 
 用户确认的是底层 Note / File 两条 ingestion 线路，未来在产品中叫什么另定。当前实现已有两种索引模式，并没有三套索引引擎。前次审计使用“文档存在两套模型”概括过重，更准确的问题是：原始记录来源被混用为入库/查询类别，造成 File 线路内的来源覆盖不完整。以下是源码事实与后续AI任务边界，本轮没有修改业务实现或执行迁移。
 
-### 当前完整调用链
+### 审计时的调用链
 
 | 层次 | Note线路 | File线路 |
 | --- | --- | --- |
@@ -428,7 +430,7 @@ Note索引依赖功能开关；只改outline/germination不会按raw变化重建
 4. File线路不同入口的生命周期能力不齐：rag入口有delete/cleanup、目录/章节和解析产物读取；text入口有修改/重试，没有同等的删除入口。需要统一索引层对当前版本、可见性、删除和旧索引回收的保证；业务接口是否都需要同样能力单独判断，不要求为了接口对称而新增产品功能。
 5. source.type参与build ID、point ID、互斥锁键和清理选择条件，PG及Milvus中也已有file/text元数据。类型收敛必须评估既有ID、存量数据与索引的一致性，不能只改枚举/路由就宣告完成。旧标记若保留，只能有明确的内部来源语义，不得继续向调用方形成第三条入库线路。
 
-### 交给AI的调整任务
+### 当时的调整计划
 
 目标：将入库与检索统一为Note / File两条技术线路，复用已有KnowledgeIndexJobs；获取方式、内容格式、原始记录引用分别表达，业务产品命名留待后续确定。
 
@@ -444,5 +446,5 @@ Note索引依赖功能开关；只改outline/germination不会按raw变化重建
 
 ## AI 模板配置
 
-新增笔记纲要与编辑器润色目录、生成接口及纲要结果查询。生成接口通过 Accept 支持
+支持资产纲要与编辑器润色目录、生成接口及纲要结果查询。生成接口通过 Accept 支持
 默认 JSON 和 SSE。接口和隔离验证见 [AI 模板配置与 App 契约](runbooks/ai-templates.md)。

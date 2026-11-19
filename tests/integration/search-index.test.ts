@@ -10,7 +10,9 @@ import { configureTestMilvus } from '../support/milvus.js';
 const enabled = process.env.TEST_MILVUS_MODE === 'local' && Boolean(process.env.TEST_MILVUS_ADDRESS);
 describe.skipIf(!enabled)('portable search adapters on real ephemeral Milvus', () => {
   const prefix = 'huahuo_test_ports_' + randomUUID().replaceAll('-', '');
-  const names = { keyword: prefix + '_keyword', vector: prefix + '_vector', hybrid: prefix + '_hybrid' };
+  const names = { keyword: prefix + '_keyword', vector: prefix + '_vector', hybrid: prefix + '_hybrid',
+    original: prefix + '_original', renamed: prefix + '_renamed' };
+  let milvusConfig: ReturnType<typeof loadConfig>['milvus'];
   let client:ReturnType<typeof createMilvusClient>,keyword:KeywordIndex,vector:VectorIndex,native:HybridIndex;
   beforeAll(async () => {
     const database = process.env.TEST_DATABASE_MIGRATION_URL!;
@@ -18,7 +20,8 @@ describe.skipIf(!enabled)('portable search adapters on real ephemeral Milvus', (
     const config = loadConfig('migrate', { DATABASE_URL: database });
     configureTestMilvus(config);
     if (!config.milvus.address?.startsWith('127.0.0.1:')) throw new Error('EPHEMERAL_LOCAL_MILVUS_REQUIRED');
-    client = createMilvusClient(config.milvus);
+    milvusConfig = config.milvus;
+    client = createMilvusClient(milvusConfig);
     const common = { ...config.milvus, dimensions: 4, maxContentChars: 2000, createIfMissing: true };
     keyword = createMilvusKeywordIndex({ ...common, collection: names.keyword });
     vector = createMilvusVectorIndex({ ...common, collection: names.vector });
@@ -66,5 +69,29 @@ describe.skipIf(!enabled)('portable search adapters on real ephemeral Milvus', (
     const options = scopeFor(points.map(p => p.id));
     expect((await native.hybridSearch([1, 0, 0, 0], 'spectroscope', options)).map(h => h.chunkKey)).toEqual(['hybrid-a']);
 
+  });
+
+  it('retains the hybrid collection identity and searchable points after a rename', async () => {
+    const options = { ...milvusConfig, dimensions: 4, maxContentChars: 2000 };
+    const original = createMilvusHybridIndex({ ...options, collection: names.original, createIfMissing: true });
+    const savedPoint = point('rename-check');
+    try {
+      await original.ensureReady();
+      await original.upsert([savedPoint]);
+      const before = await client.describeCollection({ collection_name: names.original });
+      expect(before.status.error_code).toBe('Success');
+      const changed = await client.renameCollection({ collection_name: names.original, new_collection_name: names.renamed });
+      expect(changed.error_code, changed.reason).toBe('Success');
+      const after = await client.describeCollection({ collection_name: names.renamed });
+      expect(after).toMatchObject({ collectionID: before.collectionID, collection_name: names.renamed, status: { error_code: 'Success' } });
+      expect(await client.hasCollection({ collection_name: names.original })).toMatchObject({ value: false, status: { error_code: 'Success' } });
+
+      const renamed = createMilvusHybridIndex({ ...options, collection: names.renamed, createIfMissing: false });
+      try {
+        await renamed.ensureReady();
+        const results = await renamed.hybridSearch([1, 0, 0, 0], 'spectroscope', scopeFor([savedPoint.id]));
+        expect(results.map(row => row.chunkKey)).toEqual([savedPoint.id]);
+      } finally { await renamed.close(); }
+    } finally { await original.close(); }
   });
 });

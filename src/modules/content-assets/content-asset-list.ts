@@ -53,18 +53,18 @@ export async function listContentAssetPage(tx: pg.PoolClient, userId: string, wi
   const after = decodeCursor(cursor, wid);
   // The time upper bound lets content_assets_scope start at the requested page, including
   // deep pages. The UUID breaks timestamp ties without depending on anchor existence.
-  const boundary = after ? 'AND n.updated_at <= $3::timestamptz AND (n.updated_at < $3::timestamptz OR n.content_asset_id > $4::uuid)' : '';
+  const boundary = after ? 'AND asset.updated_at <= $3::timestamptz AND (asset.updated_at < $3::timestamptz OR asset.content_asset_id > $4::uuid)' : '';
   const result = await tx.query<ContentAssetListRow>(`SELECT page.*,
     coalesce((SELECT next_cursor::text FROM workspace_content_state WHERE workspace_id=$1), '0') AS content_cursor,
     (SELECT f.folder_id FROM content_asset_folders f JOIN asset_folders a ON a.folder_id=f.folder_id
       WHERE f.content_asset_id=page.content_asset_id AND a.workspace_id=$1 AND a.state='active' ORDER BY f.folder_id LIMIT 1) AS folder_id,
     part.preview_markdown
     FROM (
-      SELECT n.content_asset_id,n.title,n.state,n.content_asset_revision_id,n.etag,n.source_kind,n.source_id,n.created_at,n.updated_at,
-        to_char(n.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_updated_at
-      FROM content_assets n JOIN content_asset_workspaces w ON w.content_asset_id=n.content_asset_id AND w.workspace_id=$1
-      WHERE n.user_id=$2 AND n.state='active' ${boundary}
-      ORDER BY n.updated_at DESC,n.content_asset_id ASC LIMIT ${CONTENT_ASSET_PAGE_SIZE + 1}
+      SELECT asset.content_asset_id,asset.title,asset.state,asset.content_asset_revision_id,asset.etag,asset.source_kind,asset.source_id,asset.created_at,asset.updated_at,
+        to_char(asset.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_updated_at
+      FROM content_assets asset JOIN content_asset_workspaces w ON w.content_asset_id=asset.content_asset_id AND w.workspace_id=$1
+      WHERE asset.user_id=$2 AND asset.state='active' ${boundary}
+      ORDER BY asset.updated_at DESC,asset.content_asset_id ASC LIMIT ${CONTENT_ASSET_PAGE_SIZE + 1}
     ) page
     LEFT JOIN LATERAL (
       SELECT left(content_markdown, ${previewSourceLength}) AS preview_markdown FROM content_asset_parts
@@ -74,11 +74,11 @@ export async function listContentAssetPage(tx: pg.PoolClient, userId: string, wi
   const rows = result.rows.slice(0, CONTENT_ASSET_PAGE_SIZE);
   const last = rows.at(-1);
   return {
-    items: rows.map(n => ({
-      contentAssetId: n.content_asset_id, workspaceId: wid, folderId: n.folder_id, title: n.title, state: n.state,
-      contentAssetRevisionId: n.content_asset_revision_id, etag: n.etag, contentCursor: n.content_cursor,
-      sourceKind: n.source_kind, sourceRef: n.source_id ? { kind: n.source_kind, id: n.source_id } : null,
-      createdAt: n.created_at.toISOString(), updatedAt: n.updated_at.toISOString(), preview: preview(n.preview_markdown ?? ''),
+    items: rows.map(asset => ({
+      contentAssetId: asset.content_asset_id, workspaceId: wid, folderId: asset.folder_id, title: asset.title, state: asset.state,
+      contentAssetRevisionId: asset.content_asset_revision_id, etag: asset.etag, contentCursor: asset.content_cursor,
+      sourceKind: asset.source_kind, sourceRef: asset.source_id ? { kind: asset.source_kind, id: asset.source_id } : null,
+      createdAt: asset.created_at.toISOString(), updatedAt: asset.updated_at.toISOString(), preview: preview(asset.preview_markdown ?? ''),
     })),
     nextCursor: result.rows.length > CONTENT_ASSET_PAGE_SIZE && last
       ? Buffer.from(JSON.stringify({ wid, updatedAt: last.cursor_updated_at, contentAssetId: last.content_asset_id } satisfies Cursor)).toString('base64url')

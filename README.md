@@ -4,6 +4,8 @@
 
 本文说明首次运行、依赖、服务关系、开发与发布入口。实际配置以代码、`compose.yaml` 和环境模板为准；功能状态与验收边界见 [开发进度](docs/progress.md)。
 
+业务代码、数据库、API 和文档统一使用 `ContentAsset`（资产）与 `Resource`（原文件）。底层索引模式使用 `hybrid` 和 `keyword`。 [资产与搜索术语](docs/content-assets.md)
+
 ## 运行环境与工具
 
 | 工具或依赖 | 版本 / 要求 | 用途 |

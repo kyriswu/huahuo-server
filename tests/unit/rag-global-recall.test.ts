@@ -4,7 +4,7 @@ import type pg from 'pg';
 import { expect, it, vi } from 'vitest';
 import { digest } from '../../src/lib/crypto.js';
 import type { HybridIndex, RecallHit, SearchOptions } from '../../src/lib/search-index/types.js';
-import { kbSnapshot } from '../../src/modules/kb/profile.js';
+import { snapshotForSource } from '../../src/modules/kb/profile.js';
 import { RagQueryService } from '../../src/modules/rag/query-service.js';
 import { fuseRankedRecall } from '../../src/modules/rag/search.js';
 import { config } from '../helpers.js';
@@ -15,7 +15,7 @@ it('fuses global branch ranks across point windows and retains each branch candi
  settings.rag.rerankProvider='disabled';
  const scope={userId:randomUUID(),sessionId:randomUUID(),traceId:randomUUID()},workspaceId=randomUUID();
  const buildId=randomUUID(),sourceId=randomUUID(),revision=randomUUID();
- const snapshot=kbSnapshot(settings,'content-asset-hybrid','markdown');
+ const snapshot=snapshotForSource(settings,'content_asset','markdown');
  let content='';
  const rows=Array.from({length:300},(_,ordinal)=>{
   const point=ordinal===0?'A':ordinal===1?'B':ordinal===256?'C':`filler-${ordinal}`;
@@ -31,7 +31,7 @@ it('fuses global branch ranks across point windows and retains each branch candi
    const start=values[3]===null?0:Number(values[3])+1;
    return {rows:rows.slice(start,start+Number(values[4])),rowCount:Math.min(Number(values[4]),rows.length-start)};
   }
-  if(query.includes('FROM content_assets n'))return {rows:[{revision,content,state:'active',processing_status:'ready'}],rowCount:1};
+  if(query.includes('FROM content_assets asset'))return {rows:[{revision,content,state:'active',processing_status:'ready'}],rowCount:1};
   if(['BEGIN','COMMIT','ROLLBACK'].includes(query))return {rows:[],rowCount:0};
   throw new Error(`UNEXPECTED_SQL: ${query}`);
  });

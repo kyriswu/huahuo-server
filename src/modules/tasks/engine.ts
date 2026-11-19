@@ -112,26 +112,26 @@ export class TaskEngine {
    if(!input)return this.fail(a,'INPUT_UNAVAILABLE',false);
    const spec=JSON.parse(String(input.body)) as {contentAssetId:string;contentAssetRevisionId:string;tagSetVersion:number};
    if(!Number.isSafeInteger(spec.tagSetVersion)||spec.tagSetVersion<0)return this.fail(a,'TAG_INPUT_INVALID',false);
-   const n=(await this.pool.query(`SELECT n.*,p.content_markdown FROM content_assets n
-     JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$2
-     JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=n.user_id AND w.state='ready'
-     LEFT JOIN content_asset_parts p ON p.content_asset_id=n.content_asset_id AND p.part='raw'
-     WHERE n.content_asset_id=$1 AND n.user_id=$3`,[spec.contentAssetId,a.task.workspace_id,a.task.user_id])).rows[0];
+   const asset=(await this.pool.query(`SELECT asset.*,p.content_markdown FROM content_assets asset
+     JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
+     JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=asset.user_id AND w.state='ready'
+     LEFT JOIN content_asset_parts p ON p.content_asset_id=asset.content_asset_id AND p.part='raw'
+     WHERE asset.content_asset_id=$1 AND asset.user_id=$3`,[spec.contentAssetId,a.task.workspace_id,a.task.user_id])).rows[0];
    const outcome=(status:string)=>this.finish(a,hash(status),0,async tx=>{
      await tx.query('UPDATE content_jobs SET outcome=$2,provider=$3 WHERE task_id=$1',[a.task.id,status,this.tagExtractor.provider]);
    });
-   if(!n||n.state!=='active'||n.content_asset_revision_id!==spec.contentAssetRevisionId||spec.tagSetVersion!==Number(n.tag_set_version))return outcome('stale');
-   if(!n.content_markdown?.trim())return outcome('needs-readable-text');
+   if(!asset||asset.state!=='active'||asset.content_asset_revision_id!==spec.contentAssetRevisionId||spec.tagSetVersion!==Number(asset.tag_set_version))return outcome('stale');
+   if(!asset.content_markdown?.trim())return outcome('needs-readable-text');
    let extracted:{provider:string;labels:unknown};
-   try { extracted=await extractBoundedTags(this.tagExtractor,{contentAssetId:spec.contentAssetId,contentAssetRevisionId:spec.contentAssetRevisionId,title:n.title,rawText:n.content_markdown}); }
+   try { extracted=await extractBoundedTags(this.tagExtractor,{contentAssetId:spec.contentAssetId,contentAssetRevisionId:spec.contentAssetRevisionId,title:asset.title,rawText:asset.content_markdown}); }
    catch(error) { const invalid=error instanceof Error && /TAG_(OUTPUT|INPUT)_/.test(error.message);return this.fail(a,invalid?'TAG_OUTPUT_INVALID':'TAG_PROVIDER_UNAVAILABLE',!invalid&&!(this.tagExtractor instanceof UnavailableTagExtractor)); }
    let labels:string[];
    try { labels=validateTagLabels(extracted.labels); } catch { return this.fail(a,'TAG_OUTPUT_INVALID',false); }
    return this.finish(a,hash(JSON.stringify({labels,provider:extracted.provider})),labels.length,async tx=>{
-     const locked=(await tx.query(`SELECT n.*,m.workspace_id FROM content_assets n
-       JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$2
-       JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=n.user_id AND w.state='ready'
-       WHERE n.content_asset_id=$1 AND n.user_id=$3 FOR UPDATE OF n`,[spec.contentAssetId,a.task.workspace_id,a.task.user_id])).rows[0];
+     const locked=(await tx.query(`SELECT asset.*,m.workspace_id FROM content_assets asset
+       JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
+       JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=asset.user_id AND w.state='ready'
+       WHERE asset.content_asset_id=$1 AND asset.user_id=$3 FOR UPDATE OF asset`,[spec.contentAssetId,a.task.workspace_id,a.task.user_id])).rows[0];
      let status='stale';
      if(locked?.state==='active' && locked.content_asset_revision_id===spec.contentAssetRevisionId){
        // Only the first automatic extraction may write the effective set.

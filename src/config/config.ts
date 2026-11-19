@@ -9,6 +9,7 @@ import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
 import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
 import { scopedConfig } from '../modules/runtime-settings/service.js';
 import { CONTENT_ASSET_EMBEDDING_MODEL, CONTENT_ASSET_EMBEDDING_PROFILE, CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_RERANK_MODEL } from '../modules/rag/model-profile.js';
+export const DEFAULT_CONTENT_ASSET_COLLECTION = 'huahuo_kb_content_asset_hybrid_chunks';
 export type Role = 'api-server' | 'admin' | 'worker' | 'scheduler' | 'migrate';
 export type Env = Record<string, string | undefined>;
 export interface AppConfig {
@@ -179,7 +180,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if(rag.rerankProvider==='http'&&rag.rerankModel!==CONTENT_ASSET_RERANK_MODEL)fail('RAG_RERANK_MODEL');
   const kb = {
     contentAssetEnabled: false,
-    contentAssetCollection: env.KB_CONTENT_ASSET_HYBRID_COLLECTION?.trim() || 'huahuo_kb_note_hybrid_chunks',
+    contentAssetCollection: env.KB_CONTENT_ASSET_HYBRID_COLLECTION?.trim() || DEFAULT_CONTENT_ASSET_COLLECTION,
     documentCollection: env.KB_DOCUMENT_KEYWORD_COLLECTION?.trim() || 'huahuo_kb_keyword_chunks',
   };
   if(kb.contentAssetCollection===kb.documentCollection||![kb.contentAssetCollection,kb.documentCollection].every(v=>/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(v)))fail('KB_COLLECTIONS');

@@ -12,7 +12,7 @@ import {ContentAssetService} from '../../src/modules/content-assets/service.js';
 import {ContentAssetIndexService} from '../../src/modules/ingestion/service.js';
 import {ContentAssetIndexJobs} from '../../src/modules/ingestion/jobs.js';
 import {KnowledgeIndexJobs} from '../../src/modules/kb/jobs.js';
-import {kbSnapshot,kbEmbedding} from '../../src/modules/kb/profile.js';
+import {snapshotForSource,kbEmbedding} from '../../src/modules/kb/profile.js';
 import {mockKnowledgeIndex} from '../support/kb-index.js';
 import {mockOssUploadConfig} from '../support/oss-upload.js';
 import type {KbBuild,KbSnapshot} from '../../src/modules/kb/types.js';
@@ -47,11 +47,11 @@ const memory=mockKnowledgeIndex();
 const targets:string[]=[];
 const factory:IndexFactory=(snapshot:KbSnapshot)=>{
  targets.push(snapshot.target.collection);
- return process.env.TEST_MILVUS_ADDRESS?knowledgeIndex(config,snapshot):snapshot.mode==='content-asset-hybrid'?memory:memory.keyword;
+ return process.env.TEST_MILVUS_ADDRESS?knowledgeIndex(config,snapshot):snapshot.mode==='hybrid'?memory:memory.keyword;
 };
 const embeddings=vi.fn(async(s:KbSnapshot)=>kbEmbedding(config,s));
 const deps={index:factory,embedding:(s:KbSnapshot)=>{const e=kbEmbedding(config,s);return {...e,model:s.embedding!.model,dimensions:1024,embed:vi.fn(async(texts:string[])=>{await embeddings(s);return e.embed(texts);})};}};
-const queries=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'content-asset-hybrid','markdown')).embed(texts)}});
+const queries=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(texts)}});
 const assets=new ContentAssetService(pool,config.appTokenSecret!,config,queries);
 const imageConfig=mockOssUploadConfig(config),imageAssets=new ContentAssetService(pool,imageConfig.appTokenSecret!,imageConfig,queries);
 const indexing=new ContentAssetIndexService(pool,config),jobs=new ContentAssetIndexJobs(wp,workerConfig,deps),engine=new TaskEngine(wp,120000);
@@ -98,7 +98,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(candidates.every(c=>!c.content.includes('preview.test')&&!c.content.includes('playbackToken='))).toBe(true);
    return candidates.map(c=>({...c,rerankScore:c.documentKey===second.contentAssetId?10:1}));
   });
-  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'content-asset-hybrid','markdown')).embed(texts)},rerank:{rerank},resolveImages});
+  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(texts)},rerank:{rerank},resolveImages});
   try{
    const ids=await q.query(f.scope,{query:'imageselect',mode:'hybrid',topK:1});
    expect(ids.results[0]).toMatchObject({documentKey:second.contentAssetId,content:body,evidence:{child:body},images:[{resourceId:b},{resourceId:b}]});
@@ -118,7 +118,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    VALUES($1,$2,'fixture.png','image/png',1,$3,$1,'fixture','aliyun-oss',$4,'ready')`,[id,f.scope.userId,'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
   const contentAsset=await imageAssets.createContentAsset(f.scope,f.workspaceId,{title:'删除竞态',parts:{raw:`imagedelete ![图](asset://${id})`}},randomUUID());await runContentAsset(contentAsset.contentAssetId);
   const resolveImages=vi.fn(async()=>new Map());
-  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,kbSnapshot(config,'content-asset-hybrid','markdown')).embed(texts)},resolveImages,
+  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(texts)},resolveImages,
    rerank:{rerank:async(_query,candidates)=>{await imageAssets.deleteContentAsset(f.scope,f.workspaceId,contentAsset.contentAssetId,contentAsset.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
   try{expect((await q.query(f.scope,{query:'imagedelete',mode:'hybrid',assetMode:'links',documentKey:contentAsset.contentAssetId})).results).toEqual([]);expect(resolveImages).not.toHaveBeenCalled();}finally{await q.close();}
  });
@@ -181,7 +181,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('requires trusted user/session scope and rejects retired credentials for the Agent contract',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);
-  const api=await buildApiServer({config,ragQueryDependencies:{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async t=>kbEmbedding(config,kbSnapshot(config,'content-asset-hybrid','markdown')).embed(t)}}});
+  const api=await buildApiServer({config,ragQueryDependencies:{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async t=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(t)}}});
   try{
    const payload={query:'MVCC',mode:'keyword',topK:5};
    for(const headers of [{},{authorization:'Bearer '+f.bearer},{'x-huahuo-service-key':'retired-service-key'}])expect((await api.inject({method:'POST',url:'/internal/v1/rag/query',headers,payload})).statusCode).toBe(401);
@@ -216,7 +216,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   const f=await create('# first\n'+('first 字。'.repeat(90))+'\n\n# second\n'+('second 字。'.repeat(90)));const b=await latest(f.contentAsset.contentAssetId);const a=await engine.claim(b.task_id,randomUUID());
   const real=requireIndexKind(factory(b.snapshot),'hybrid');let writes=0;
   const flaky=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:()=>({...real,ensureReady:()=>real.ensureReady(),search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:async()=>{},upsert:async(rows:readonly import('../../src/lib/search-index/types.js').VectorPoint[])=>{writes++;if(writes===2)throw Object.assign(new Error('batch failed'),{retryable:false});await real.upsert(rows);}})});
-  try{await expect(flaky.executeBuild(b.id,a!,'content-asset-hybrid')).rejects.toThrow();expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);await jobs.execute(a!);expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);}finally{await real.close();}
+  try{await expect(flaky.executeBuild(b.id,a!,'content_asset')).rejects.toThrow();expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);await jobs.execute(a!);expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);}finally{await real.close();}
  });
  it('deletion filters in-flight and future hits and cleanup protects no deleted points',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,f.contentAsset.etag,randomUUID());
@@ -226,7 +226,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   expect((await root.query('SELECT count(*)::int n FROM kb_content_asset_hybrid_builds WHERE source_id=$1 AND published',[f.contentAsset.contentAssetId])).rows[0].n).toBe(0);
  });
  it('searches every published source and bounded point page beyond the former 200-source cutoff',async()=>{
-  const f=await fixture(),snapshot=kbSnapshot(config,'document-keyword','markdown'),index=mockKnowledgeIndex().keyword;
+  const f=await fixture(),snapshot=snapshotForSource(config,'file','markdown'),index=mockKnowledgeIndex().keyword;
   const entries=Array.from({length:205},(_,n)=>({id:randomUUID(),build:randomUUID(),task:randomUUID(),content:n===0?'oldestneedle':'filler '+n,point:randomUUID(),ordinal:n}));
   const body=JSON.stringify(entries);
   // Seed canonical published sources in isolated PG; recall remains an explicit
@@ -344,13 +344,13 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('rechecks current revision after rerank so an in-flight hit cannot reveal superseded content',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);
-  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async t=>kbEmbedding(config,kbSnapshot(config,'content-asset-hybrid','markdown')).embed(t)},rerank:{rerank:async(_q,candidates)=>{await assets.updateContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,{parts:{raw:'entirely replaced'}},f.contentAsset.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
+  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async t=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(t)},rerank:{rerank:async(_q,candidates)=>{await assets.updateContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,{parts:{raw:'entirely replaced'}},f.contentAsset.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
   try{expect((await q.query(f.scope,{query:'MVCC',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);}finally{await q.close();}
  });
  it('recovers a remote success before PG acknowledgement with the same IDs and fenced lease',async()=>{
   const f=await create();const b=await latest(f.contentAsset.contentAssetId);const a=await engine.claim(b.task_id,randomUUID());let sabotaged=false;
   const flaky=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:snapshot=>{const real=requireIndexKind(factory(snapshot),'hybrid');return {kind:'hybrid',ensureReady:()=>real.ensureReady(),upsert:async rows=>{await real.upsert(rows);if(!sabotaged){sabotaged=true;await root.query("UPDATE tasks SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",[a!.task.id]);}},search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:()=>real.close()};}});
-  await expect(flaky.executeBuild(b.id,a!,'content-asset-hybrid')).rejects.toThrow('KB_LEASE_LOST');
+  await expect(flaky.executeBuild(b.id,a!,'content_asset')).rejects.toThrow('KB_LEASE_LOST');
   expect((await queries.query(f.scope,{query:'MVCC',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);
   const ids=(await root.query('SELECT point_id FROM kb_content_asset_hybrid_chunks WHERE build_id=$1',[b.id])).rows;
   await root.query("UPDATE tasks SET state='retry_scheduled',version=version+1,lease_owner=NULL,lease_until=NULL,available_at=now() WHERE id=$1",[b.task_id]);
@@ -360,7 +360,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  it('does not let an old task publish or overwrite a replacement build with the same body revision',async()=>{
   const f=await create();const b=await latest(f.contentAsset.contentAssetId);const a=await engine.claim(b.task_id,randomUUID());const taskId=randomUUID(),inputId=randomUUID();let replaced=false;
   const runner=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:snapshot=>{const real=requireIndexKind(factory(snapshot),'hybrid');return {kind:'hybrid',ensureReady:()=>real.ensureReady(),upsert:async rows=>{await real.upsert(rows);if(!replaced){replaced=true;await root.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,f.scope.userId,f.workspaceId,JSON.stringify({buildId:b.id})]);await root.query("INSERT INTO tasks(trace_id,id,user_id,workspace_id,kind,queue,input_id,state) VALUES(gen_random_uuid()::text,$1,$2,$3,'kb.content-asset-index','content',$4,'queued')",[taskId,f.scope.userId,f.workspaceId,inputId]);await root.query('UPDATE kb_content_asset_hybrid_builds SET task_id=$2 WHERE id=$1',[b.id,taskId]);}},search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:()=>real.close()};}});
-  await expect(runner.executeBuild(b.id,a!,'content-asset-hybrid')).rejects.toThrow('KB_SOURCE_SUPERSEDED');
+  await expect(runner.executeBuild(b.id,a!,'content_asset')).rejects.toThrow('KB_SOURCE_SUPERSEDED');
   const current=(await root.query('SELECT task_id,status,published FROM kb_content_asset_hybrid_builds WHERE id=$1',[b.id])).rows[0];expect(current).toEqual({task_id:taskId,status:'indexing',published:false});
   await runContentAsset(f.contentAsset.contentAssetId);expect((await queries.query(f.scope,{query:'MVCC',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);
  });

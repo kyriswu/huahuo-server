@@ -93,7 +93,7 @@
     "app_reference_url": "https://github.com/kyriswu/huahuo-app",
     "app_reference_required": true,
     "services": "api-server资产/查询；worker解析/标签；scheduler补偿；admin限权管理",
-    "reference_hints": "note/asset/folder/tag/search/graph、正文revision与分页解析",
+    "reference_hints": "ContentAsset/Resource/folder/tag/search/graph、正文修订与分页解析",
     "backend_root": "huahuo-server",
     "app_reference_path": "../huahuo-app",
     "app_reference_path_base": "backend-root",

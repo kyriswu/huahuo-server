@@ -8,7 +8,7 @@ export type QueryStage = 'auth' | 'pg_scope' | 'index_ready' | 'embedding' | 'in
 type QueryMetrics=Pick<ApplicationMetrics,'recordRagStage'|'recordRagOperation'|'recordRagFallback'>;
 
 /** One per request; no query, content, user identifiers or credentials. */
-export class ContentAssetQueryTiming {
+export class SearchQueryTiming {
   private readonly started = performance.now();
   private readonly durations: Partial<Record<QueryStage, number>> = {};
   readonly embeddingAttempts: EmbeddingAttempt[] = [];

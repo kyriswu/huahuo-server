@@ -2,6 +2,8 @@ import { digest } from '../../lib/crypto.js';
 import { analyzeDocumentStructure } from '../../lib/document-processing/structure.js';
 import type { DocumentStructure, TokenCounter } from '../../lib/document-processing/types.js';
 
+import type { IndexMode } from './types.js';
+
 export interface KbDraft {
   ordinal: number; start: number; end: number; coreStart: number; coreEnd: number;
   sectionId: string | null; headingPath: string[]; content: string; embeddingText: string;
@@ -30,27 +32,27 @@ function cut(content: string, start: number, limit: number, end: number): number
   const sentence=[...window.matchAll(/[。！？；]|[.!?;](?:\s|$)|\n/gu)].at(-1);
   return sentence ? start+sentence.index+sentence[0].length : limit;
 }
-/** Embedding carries stable asset identifiers and OCR, never a signed URL. */
+/** Embedding carries stable Resource identifiers and OCR, never a signed URL. */
 export function embeddingText(content: string, headings: string[]): string {
   return (headings.length ? headings.join(' > ')+'\n\n' : '') + content
     .replace(/data:[^\s)]+/giu,'')
     .replace(/https?:\/\/[^\s)]+/giu,'');
 }
 /** Both modes preserve original UTF-16 positions. Keyword never receives a tokenizer. */
-export async function splitKnowledgeContent(content: string, mode: 'content-asset-hybrid'|'document-keyword', options: {
+export async function splitKnowledgeContent(content: string, mode: IndexMode, options: {
   format?:'text'|'markdown'; structure?:DocumentStructure; tokenizer?:TokenCounter;
 } = {}): Promise<{chunks:KbDraft[];structure?:DocumentStructure}> {
-  const max=mode==='content-asset-hybrid'?500:2000;
-  const structure=mode==='content-asset-hybrid' ? options.structure ?? await analyzeDocumentStructure(content,{format:options.format??'markdown'}) : undefined;
+  const max=mode==='hybrid'?500:2000;
+  const structure=mode==='hybrid' ? options.structure ?? await analyzeDocumentStructure(content,{format:options.format??'markdown'}) : undefined;
   const ranges=structure?.toc.length ? structure.ranges : paragraphs(content,0,content.length);
   const chunks:KbDraft[]=[];
-  if(mode==='content-asset-hybrid'&&!options.tokenizer)throw new Error('KB_TOKENIZER_REQUIRED');
+  if(mode==='hybrid'&&!options.tokenizer)throw new Error('KB_TOKENIZER_REQUIRED');
   for(const range of ranges){
     let cursor=range.sourceStart;
     while(cursor<range.sourceEnd){
       const previous=chunks.at(-1);
       let start=cursor;
-      if(mode==='content-asset-hybrid'&&previous&&previous.coreEnd===cursor&&previous.coreStart>=range.sourceStart){
+      if(mode==='hybrid'&&previous&&previous.coreEnd===cursor&&previous.coreStart>=range.sourceStart){
         const overlap=boundaries(content,previous.coreStart,cursor);
         start=overlap[Math.max(0,overlap.length-1-50)]!;
       }
@@ -58,11 +60,11 @@ export async function splitKnowledgeContent(content: string, mode: 'content-asse
       let end=cut(content,cursor,points[Math.min(max,points.length-1)]!,range.sourceEnd);
       if(end<=cursor){start=cursor;const core=boundaries(content,cursor,range.sourceEnd,max);end=core[Math.min(max,core.length-1)]!;}
       let raw=content.slice(start,end);
-      let input=mode==='content-asset-hybrid'?embeddingText(raw,range.headingPath):raw;
-      let tokens=mode==='content-asset-hybrid'?await options.tokenizer!.count(input):0;
+      let input=mode==='hybrid'?embeddingText(raw,range.headingPath):raw;
+      let tokens=mode==='hybrid'?await options.tokenizer!.count(input):0;
       // Shrink generated context first; if necessary split the source without dropping a codepoint.
-      if(mode==='content-asset-hybrid'&&tokens>options.tokenizer!.maxInputTokens){input=embeddingText(raw,[]);tokens=await options.tokenizer!.count(input);}
-      while(mode==='content-asset-hybrid'&&tokens>options.tokenizer!.maxInputTokens){
+      if(mode==='hybrid'&&tokens>options.tokenizer!.maxInputTokens){input=embeddingText(raw,[]);tokens=await options.tokenizer!.count(input);}
+      while(mode==='hybrid'&&tokens>options.tokenizer!.maxInputTokens){
         const core=boundaries(content,cursor,end);
         if(core.length<=2)throw new Error('KB_MODEL_INPUT_TOO_LONG');
         end=core[Math.max(1,Math.floor((core.length-1)/2))]!;
