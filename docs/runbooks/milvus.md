@@ -6,11 +6,11 @@
 
 | 来源 | 索引模式 | 现有处理 | 默认集合 |
 | --- | --- | --- | --- |
-| 资产正文 | `hybrid` | 保存当前 raw，按配置创建 Task/Outbox，分段、Embedding、写索引 | `huahuo_kb_content_asset_hybrid_chunks_account_v1` |
+| 资产正文 | `hybrid` | 保存当前 raw，按配置创建 Task/Outbox，分段、Embedding、写索引 | `huahuo_kb_content_asset_hybrid_chunks_asset_v2` |
 | OSS 文件 | `keyword` | 外部解析器读取 OSS URL，保存规范正文、目录与图片回执，分段写入 | `huahuo_kb_keyword_chunks` |
 | 独立导入文本 | `keyword` | 保存原文，按现有分段规则写入 | `huahuo_kb_keyword_chunks` |
 
-资产正文当前使用 `qwen3.7-text-embedding-flash`，原生 1024 维 FP16。关键词索引构建使用 BM25。标签图谱由有效标签关系形成。
+资产正文当前使用 `qwen3.7-text-embedding-flash`，原生 1024 维 FP16。资产使用应用侧稀疏向量，独立文档关键词索引仍按配置选择 BM25 或稀疏向量。标签图谱由有效标签关系形成。
 
 ## 现有查询实现（技术现状）
 
@@ -18,7 +18,7 @@
 - `/api/v1/kb/content-assets/query` 查询已发布的资产正文，支持 `keyword`、`dense` 和 `hybrid`。
 - `/api/v1/kb/documents/query` 按 `keyword` 查询文件和独立文本，结果保留 `file` 或 `text` 来源。
 - `/api/v1/content-assets/search` 复用资产查询，支持 `keyword` 和 `hybrid`。
-- 当前实现保留来源分页、精确已发布point范围、正文/哈希/权限复核、全局分支融合及可选重排；它们不是产品需求决定。
+- 资产直接在 Milvus 按账号和可选条件召回，按命中的分片 ID 回读 PostgreSQL，再复核正文、哈希和权限。独立文档保留精确的已发布分片范围。
 - 当前 App 首页搜索仍为本地筛选，未接这些接口。本轮未接线 App 或其他项目。
 
 ## 实现与数据边界
@@ -27,7 +27,7 @@
 - modules/kb/split 按索引模式保留 UTF-16 原文范围。`hybrid` 每段最多 500 码点、目标重叠 50 码点。`keyword` 每段最多 2000 码点、零重叠。
 - lib/rag-indexing/index 与 lib/search-index/keyword-indexing 负责已准备记录的批次写入。
 - modules/kb/profile 按业务来源固定存储目标、模型与构建快照。modules/kb/jobs、ingestion、rag/jobs、text-ingestion/jobs 负责各自授权、租约、发布和清理。
-- PostgreSQL 保存正文身份、修订、构建、范围、哈希、点ID与状态；向量及索引文本写 Milvus，不在关系表重复保存。
+- PostgreSQL 保存正文身份、修订、构建、范围、哈希、点ID与状态；向量写 Milvus。资产正文只在 PostgreSQL 保存，原生 BM25 文档集合另存其索引文本。
 - 用户/工作区归属、正文修订、租约及当前发布状态在事务边界复核。删除通过既有任务精确清理；编辑和恢复不信任已清理点的旧 ready 标记。
 
 Embedding仍用现有百炼同步接口，单HTTP批次最多20条；输入预算用UTF-8字节数加16保守估计，不冒充供应商真实token用量。端点/模型/凭据在授权部署配置中提供，后台仅管理索引批次、并发、超时、重试及正文上限。已有可选重排仍使用 RAG_RERANK_* 技术配置；不因保留配置自动启用或调用真实模型。
@@ -54,3 +54,13 @@ pnpm test:integration --milvus 创建本项目独立临时 PostgreSQL/Redis/Milv
 资产集合的物理名称由 `snapshotForSource` 计算。原生 BM25 使用配置前缀加 `_account_v1`，`sparse-v1` 使用前缀加 `_sparse_v1_account_v1`。新集合用 `user_id` 和 PostgreSQL 当前已发布点 ID 限制召回范围。独立文档集合沿用现有方案。
 
 维护时先核对旧资产构建的快照目标是否与部署配置一致，按当前索引布局准备并验证新的资产集合。0023 会让旧资产点退出服务，并把当前构建重新排队。已存在的命中可能在重建完成前暂时不可用。上线验收包括检查重建积压、真实查询和跨账号隔离；旧集合的云端清理由后续维护处理。
+
+## 0025 资产按元数据直接召回
+
+资产统一使用 `_asset_v2` 集合。九字段和 API 条件见[资产搜索集合](../content-assets.md#资产搜索集合)。独立文档的集合布局由已有配置决定。
+
+1. 在已授权的目标和维护窗口内预建、加载新集合，并核对运行角色访问权限。候选构建可用 `MILVUS_CREATE_IF_MISSING=true pnpm rag:verify-milvus --asset-only` 准备新集合，此命令不重建旧集合或调用模型。运行服务仍使用已审的 Milvus 配置。
+2. 本次测试／开发共享库只读盘点确认没有旧资产、正文和索引构建。排空旧写入方后再次确认资产及关联仍为空，再应用 0024、0025。迁移不调度旧资产重建。
+3. 检查资产索引队列是否有积压或失败，抽查账号隔离、创建和编辑时间范围、资产类型以及分片原文。用 `rag:consistency` 对账新集合。旧集合只交由单独授权的维护处理。
+
+更新时间增量同步使用 Milvus 2.6.2 及以上版本的部分更新。 [Milvus 部分更新](https://milvus.io/docs/v2.6.x/upsert-entities.md)

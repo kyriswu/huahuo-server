@@ -1,3 +1,4 @@
+import {inferAssetKind,type AssetKind} from './asset-kind.js';
 import { idempotent } from '../../lib/idempotency.js';
 import {resolveTraceId} from '../../lib/trace.js';
 import {tagGraph,type GraphQuery} from './tag-graph.js';
@@ -25,6 +26,7 @@ interface ContentAssetStateRow {
  state: 'active' | 'deleted';
 }
 interface ContentAssetRow extends ContentAssetStateRow {
+ folder_id: string | null;
  title: string;
  source_kind: string;
  source_id: string | null;
@@ -69,28 +71,14 @@ export class ContentAssetService {
   );
   if (!result.rowCount) throw new DomainError(404, 'FOLDER_NOT_FOUND');
  }
- private async setContentAssetFolder(tx: pg.PoolClient, userId: string, contentAssetId: string, folderId: string | null) {
-  // The existing move action replaces placements for the owning account.
-  const removed = await tx.query(
-   `DELETE FROM content_asset_folders m USING asset_folders f
-    WHERE m.content_asset_id=$1 AND m.folder_id=f.folder_id AND f.user_id=$2
-      AND m.folder_id IS DISTINCT FROM $3::uuid`, [contentAssetId, userId, folderId],
-  );
-  if (folderId === null) return Boolean(removed.rowCount);
-  const added = await tx.query(
-   'INSERT INTO content_asset_folders(folder_id,content_asset_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [folderId, contentAssetId],
-  );
-  return Boolean(added.rowCount || removed.rowCount);
- }
  private async cursor(tx:pg.PoolClient, userId: string,kind:string,id:string,change:string,tombstone:boolean,revisionId:string|null,version:number|null,previousRevisionId:string|null,previousVersion:number|null){await tx.query('INSERT INTO account_content_state(user_id) VALUES($1) ON CONFLICT DO NOTHING',[userId]);const c=await tx.query<{next_cursor:string}>("UPDATE account_content_state SET next_cursor=next_cursor+1,updated_at=now() WHERE user_id=$1 RETURNING next_cursor",[userId]);const cursor=String(c.rows[0]!.next_cursor),eventId=randomUUID(),operationId=randomUUID();await tx.query('INSERT INTO content_events(event_id,user_id,cursor,operation_id,object_kind,object_id,change_type,tombstone,revision_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[eventId,userId,cursor,operationId,kind,id,change,tombstone,revisionId]);return {eventId,cursor,operationId,occurredAt:new Date().toISOString(),objectKind:kind,objectId:id,changeType:change,tombstone,resourcePinDelta:{added:[],released:[]},...(revisionId?{revisionId}:{}) ,...(previousRevisionId?{previousRevisionId}:{}),...(version!==null?{version}:{}) ,...(previousVersion!==null?{previousVersion}:{})};}
  private async contentAssetDto(tx: pg.PoolClient, scope: Scope, contentAssetId: string) {
   const contentAsset = await this.findContentAsset(tx, scope, contentAssetId);
   if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
-  const { rows: [folder] } = await tx.query<{ folder_id: string }>(
-   `SELECT f.folder_id FROM content_asset_folders m JOIN asset_folders f ON f.folder_id=m.folder_id
-    WHERE m.content_asset_id=$1 AND f.user_id=$2 AND f.state='active' ORDER BY f.folder_id LIMIT 1`,
-   [contentAssetId, scope.userId],
-  );
+  const folder = contentAsset.folder_id === null ? undefined : (await tx.query<{ folder_id: string }>(
+   "SELECT folder_id FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active'",
+   [contentAsset.folder_id, scope.userId],
+  )).rows[0];
   const savedParts = await tx.query(
    'SELECT part,part_revision_id,content_markdown,content_sha256 FROM content_asset_parts WHERE content_asset_id=$1', [contentAssetId],
   );
@@ -266,7 +254,7 @@ export class ContentAssetService {
   const contentAsset=await this.createContentAsset(scope,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:'ready',parts:{raw:input.content,outline:'',germination:''}},key);
   return {status:'ready' as const,contentAsset};
  }
- async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
+ async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];assetKind?:AssetKind;sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
   await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
@@ -278,10 +266,9 @@ export class ContentAssetService {
    await this.assertActiveFolder(tx, scope.userId, input.folderId ?? null);
    const id=randomUUID(),rid=randomUUID();
    await tx.query(
-    'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag) VALUES($1,$2,$3,$4,$5,$6,$7)',
-    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1)],
+    'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag,folder_id,asset_kind) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1),input.folderId??null,input.assetKind??inferAssetKind(input.sourceKind)],
    );
-   if (input.folderId) await this.setContentAssetFolder(tx, scope.userId, id, input.folderId);
    await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,input.processingStatus??(input.parts.raw?.trim()?'ready':'needs-processing')]);
    await syncContentAssetRefs(tx,scope,id,canonicalParts,input.resourceRefs);
    for(const part of parts){
@@ -322,11 +309,12 @@ export class ContentAssetService {
     Object.assign(complete,canonicalParts);
     const refsChanged=updatesRefs?await syncContentAssetRefs(tx,scope,id,complete,input.resourceRefs):false;
     const title=input.title?.trim()??asset.title;
-    const placementChanged = input.folderId !== undefined && await this.setContentAssetFolder(tx, scope.userId, id, input.folderId);
+    const folderId = input.folderId === undefined ? asset.folder_id : input.folderId;
+    const placementChanged = folderId !== asset.folder_id;
     if(!changed.length&&!refsChanged&&title===asset.title&&!placementChanged)return this.contentAssetDto(tx,scope,id);
     const v=Number(asset.content_asset_revision)+1,rid=randomUUID();
-    await tx.query('UPDATE content_assets SET title=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
-     [id,title,v,rid,etag(id,v)]);
+    await tx.query('UPDATE content_assets SET title=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,folder_id=$6,updated_at=now() WHERE content_asset_id=$1',
+     [id,title,v,rid,etag(id,v),folderId]);
     for(const [part,text] of changed){
      const revision=Number(previous.find(p=>p.part===part)?.revision??0)+1,partRevisionId=randomUUID();
      await tx.query('INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(content_asset_id,part) DO UPDATE SET part_revision_id=EXCLUDED.part_revision_id,revision=EXCLUDED.revision,content_markdown=EXCLUDED.content_markdown,content_sha256=EXCLUDED.content_sha256,updated_at=now()',[partRevisionId,id,part,revision,text,sha(text)]);
@@ -336,6 +324,7 @@ export class ContentAssetService {
     await this.cursor(tx,scope.userId,'content_asset',id,'updated',false,rid,v,asset.content_asset_revision_id,Number(asset.content_asset_revision));
     if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
     if(rawChanged)await this.indexContentAsset(tx,scope,id);
+    else if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleMetadataRefresh(tx,scope,id);
     return this.contentAssetDto(tx,scope,id);
    });
   });
@@ -359,11 +348,11 @@ export class ContentAssetService {
       receipts.push({contentAssetId:item.contentAssetId,status:'conflict'});
       continue;
      }
-     await this.setContentAssetFolder(tx,scope.userId,item.contentAssetId,folderId);
      const version=Number(contentAsset.content_asset_revision)+1,revisionId=randomUUID(),nextEtag=etag(item.contentAssetId,version);
-     await tx.query('UPDATE content_assets SET content_asset_revision=$2,content_asset_revision_id=$3,etag=$4,updated_at=now() WHERE content_asset_id=$1',
-      [item.contentAssetId,version,revisionId,nextEtag]);
+     await tx.query('UPDATE content_assets SET content_asset_revision=$2,content_asset_revision_id=$3,etag=$4,folder_id=$5,updated_at=now() WHERE content_asset_id=$1',
+      [item.contentAssetId,version,revisionId,nextEtag,folderId]);
      await this.cursor(tx,scope.userId,'content_asset',item.contentAssetId,'moved',false,revisionId,version,contentAsset.content_asset_revision_id,Number(contentAsset.content_asset_revision));
+     if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleMetadataRefresh(tx,scope,item.contentAssetId);
      receipts.push({contentAssetId:item.contentAssetId,status:'moved',etag:nextEtag});
     }
     return {contentAssets:receipts};
@@ -380,7 +369,10 @@ export class ContentAssetService {
   const id=asset.content_asset_id,version=Number(asset.content_asset_revision)+1,revisionId=randomUUID();
   await tx.query('UPDATE content_assets SET state=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
    [id,restore?'active':'deleted',version,revisionId,etag(id,version)]);
-  if(restore){await this.indexContentAsset(tx,scope,id);}
+  if(restore){
+   await this.indexContentAsset(tx,scope,id);
+   if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleMetadataRefresh(tx,scope,id);
+  }
   else if((await tx.query('SELECT 1 FROM kb_content_asset_hybrid_builds WHERE source_id=$1 LIMIT 1',[id])).rowCount){
    const taskId=randomUUID(),inputId=randomUUID();
    await tx.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',[inputId,scope.userId,JSON.stringify({contentAssetId:id})]);
@@ -401,7 +393,7 @@ export class ContentAssetService {
   });
  }
 
- async search(scope:Scope,input:{query:string;mode?:string;ownerKinds?:string[];contentAssetParts?:string[];folderIds?:string[];tagIds?:string[];sourceKinds?:string[];contentAssetTypeIds?:string[];from?:string;to?:string;limit?:number}){
+ async search(scope:Scope,input:{query:string;mode?:string;ownerKinds?:string[];contentAssetParts?:string[];folderIds?:string[];tagIds?:string[];sourceKinds?:string[];assetKinds?:AssetKind[];timeField?:'created_at'|'updated_at';contentAssetTypeIds?:string[];from?:string;to?:string;limit?:number}){
   await transaction(this.pool,async tx=>{await assertScope(tx,scope);});
   if(input.mode&&!['keyword','hybrid'].includes(input.mode))throw new DomainError(400,'SEARCH_MODE_INVALID');
   if(input.contentAssetParts?.some(p=>!['raw','outline','germination'].includes(p)))throw new DomainError(400,'CONTENT_ASSET_PART_INVALID');

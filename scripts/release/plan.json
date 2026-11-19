@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261119-free-writing-account",
-  "baseRevision": "21dcb90610a7590d7f621cc6b4dfad2361a797e7",
+  "id": "20261119-content-asset-search",
+  "baseRevision": "f6a8ca09e7efa9e0f9a512b9b05a859cc1ce44d8",
   "services": [
     "api-server",
     "admin",
@@ -10,25 +10,24 @@
   ],
   "database": {
     "migrations": [
-      "0023_free_writing_account_scope.sql"
+      "0024_content_asset_folder_id.sql",
+      "0025_content_asset_search_metadata.sql"
     ],
-    "verifySql": "scripts/release/changes/20261119-free-writing-account/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261119-content-asset-search/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "Convert asset organization and run ownership to account scope, preserve business records, and queue derived search rebuilds for the new account-scope collection during a reviewed maintenance cutover."
+      "reason": "Apply the folder and asset-kind migrations after old-role drain and verification that the test asset inventory is empty. Migration 0025 refuses a live legacy index and creates no model work."
     }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [],
-    "reviewedFiles": [
-      "src/config/config.ts"
-    ]
+    "reviewedFiles": ["src/config/config.ts"]
   },
   "dependencies": [
     {
-      "name": "milvus-account-asset-collection",
-      "checkFile": "scripts/release/changes/20261119-free-writing-account/verify-external.mjs"
+      "name": "milvus-asset-v2",
+      "checkFile": "scripts/release/changes/20261119-content-asset-search/verify-external.mjs"
     }
   ],
   "backfill": {
@@ -37,9 +36,9 @@
   },
   "compatibility": {
     "database": false,
-    "api": false,
+    "api": true,
     "tasks": false,
-    "configuration": false
+    "configuration": true
   },
   "smoke": "health"
 }

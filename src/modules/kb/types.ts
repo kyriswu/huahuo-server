@@ -1,5 +1,5 @@
 import type { VectorTarget } from '../../lib/rag-indexing/index.js';
-import type { IndexKind } from '../../lib/search-index/types.js';
+import type { AssetIndexMetadata, IndexKind } from '../../lib/search-index/types.js';
 export type IndexMode=Exclude<IndexKind,'vector'>;
 export type KbSourceType='content_asset'|'file'|'text';
 export interface KbSnapshot {
@@ -7,6 +7,7 @@ export interface KbSnapshot {
   businessStore:string; rules:{maxChars:number;overlapChars:number;version:'paragraph-sections'};
   target:VectorTarget; configHash:string;
   accountScope?:true;
+  assetMetadata?:true;
   indexLayout?:'sparse-v1';
   pointIdentityHash?:string;
   embedding?:{model:string;dimensions:number;profile:string;baseUrl?:string};
@@ -14,7 +15,7 @@ export interface KbSnapshot {
   tokenizer?:{model:string;id:string;maxInputTokens:number};
   indexing:{batchSize:number;concurrency:number;timeoutMs:number;maxRetries:number};
 }
-export interface KbSource {type:KbSourceType;id:string;revision:string;userId:string;workspaceId?:string;content:string;format:'text'|'markdown';}
+export interface KbSource {type:KbSourceType;id:string;revision:string;userId:string;workspaceId?:string;content:string;format:'text'|'markdown';assetMetadata?:Omit<AssetIndexMetadata,'buildId'>;}
 export interface KbBuild {
  content_asset_revision_id?:string;id:string; source_type:KbSourceType; source_id:string; source_revision:string; user_id:string;workspace_id?:string;
  task_id:string;content_hash:string;config_hash:string;snapshot:KbSnapshot;status:string;published:boolean;

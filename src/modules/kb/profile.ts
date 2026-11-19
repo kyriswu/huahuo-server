@@ -22,15 +22,18 @@ export function snapshotForSource(config:AppConfig,sourceType:KbSourceType,forma
   snapshot.tokenizer={model:CONTENT_ASSET_EMBEDDING_MODEL,id:'utf8-byte-upper-bound-v1',maxInputTokens:CONTENT_ASSET_EMBEDDING_MAX_INPUT_TOKENS};
  }
  snapshot.configHash=indexIdentityHash(snapshot);
- if(config.kb.indexLayout==='sparse-v1'){
+ if(sourceType==='content_asset'){
+  snapshot.pointIdentityHash=snapshot.configHash;
+  snapshot.indexLayout='sparse-v1';
+  snapshot.accountScope=true;
+  snapshot.assetMetadata=true;
+  snapshot.target={...target,collection:target.collection+'_asset_v2'};
+  snapshot.configHash=indexIdentityHash(snapshot);
+ }else if(config.kb.indexLayout==='sparse-v1'){
   snapshot.pointIdentityHash=snapshot.configHash;
   snapshot.indexLayout='sparse-v1';
   snapshot.target={...target,collection:target.collection+'_sparse_v1'};
   snapshot.configHash=indexIdentityHash(snapshot);
- }
- if(sourceType==='content_asset'){
-  snapshot.accountScope=true;
-  snapshot.target={...snapshot.target,collection:snapshot.target.collection+'_account_v1'};
  }
  return snapshot;
 }
@@ -71,7 +74,7 @@ export function knowledgeIndex(config:AppConfig,snapshot:KbSnapshot,providers?:I
   },
   hybrid:binding=>{
    if(binding.connectionId!==connectionId(config))throw new Error('KB_TARGET_CHANGED');
-   return createMilvusHybridIndex({...config.milvus,database:binding.namespace!,collection:binding.index,dictionary,accountScope:snapshot.accountScope===true,maxContentChars:snapshot.rules.maxChars,dimensions:snapshot.embedding?.dimensions});
+   return createMilvusHybridIndex({...config.milvus,database:binding.namespace!,collection:binding.index,dictionary,accountScope:snapshot.accountScope===true,assetMetadata:snapshot.assetMetadata===true,maxContentChars:snapshot.rules.maxChars,dimensions:snapshot.embedding?.dimensions});
   },
  };
  return createSearchIndex(snapshot.mode,{

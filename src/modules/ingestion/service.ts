@@ -25,6 +25,16 @@ export class ContentAssetIndexService {
   await tx.query("INSERT INTO tasks(id,user_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,'kb.content-asset-index','content',$3,'queued',$4,$5)",[taskId,scope.userId,inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
   await enqueueIntent(tx,taskId);await event(tx,taskId);return build;
  }
+ async scheduleMetadataRefresh(tx:pg.PoolClient,scope:Scope,contentAssetId:string){
+  if(!(await tx.query(`SELECT 1 FROM kb_content_asset_hybrid_builds b
+   JOIN content_asset_parts p ON p.content_asset_id=b.source_id AND p.part='raw' AND p.part_revision_id::text=b.source_revision
+   WHERE b.source_id=$1 AND b.user_id=$2 AND (b.published OR b.status='indexing')
+   AND b.snapshot->>'assetMetadata'='true' LIMIT 1`,[contentAssetId,scope.userId])).rowCount)return;
+  const taskId=randomUUID(),inputId=randomUUID();
+  await tx.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',[inputId,scope.userId,JSON.stringify({refreshAssetId:contentAssetId})]);
+  await tx.query("INSERT INTO tasks(id,user_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,'kb.content-asset-index','content',$3,'queued',$4,$5)",[taskId,scope.userId,inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
+  await enqueueIntent(tx,taskId);await event(tx,taskId);
+ }
  async scheduleCleanup(tx:pg.PoolClient,scope:Scope,contentAssetId:string){
   if(!(await tx.query('SELECT 1 FROM kb_content_asset_hybrid_builds WHERE source_id=$1 AND user_id=$2 LIMIT 1',[contentAssetId,scope.userId])).rowCount)return;
   const taskId=randomUUID(),inputId=randomUUID();await tx.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',[inputId,scope.userId,JSON.stringify({contentAssetId})]);

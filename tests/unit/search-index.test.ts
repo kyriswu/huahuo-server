@@ -34,12 +34,12 @@ class VectorBackend implements VectorIndex {
 }
 function matches(p: KeywordPoint | VectorPoint, options: SearchOptions) {
   return p.userId === options.scope.userId && p.workspaceId === options.scope.workspaceId
-    && options.scope.pointIds.includes(p.id)
+    && options.scope.pointIds?.includes(p.id)
     && (!options.filter?.sourceIds || options.filter.sourceIds.includes(p.sourceId))
     && (!options.filter?.sourceTypes || options.filter.sourceTypes.includes(p.sourceType));
 }
 const point = (id: string): VectorPoint => ({ id, sourceId: 'source', sourceType: 'future-business', userId: 'user', workspaceId: 'workspace', content: 'needle ' + id, embedding: [1, 0] });
-const search: SearchOptions = { scope: { userId: 'user', workspaceId: 'workspace', pointIds: ['a', 'b', 'c'] }, limit: 3, filter: { sourceTypes: ['future-business'] } };
+const search = { scope: { userId: 'user', workspaceId: 'workspace', pointIds: ['a', 'b', 'c'] }, limit: 3, filter: { sourceTypes: ['future-business'] } } satisfies SearchOptions;
 
 describe('portable index capabilities and provider selection', () => {
   it('runs keyword writes/search/delete through a class adapter with no vector or Milvus operations', async () => {

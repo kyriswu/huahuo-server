@@ -7,7 +7,7 @@
 | 资产身份与归属 | PostgreSQL 的 `content_assets.content_asset_id` 和 `user_id`。API 使用 `contentAssetId` 和 `contentAssetRevisionId`。 |
 | 正文 | `content_asset_parts` 保存各部分的当前内容。常用部分为 `raw`、`outline`、`germination`。正文部分的修订使用 `partRevisionId`。 |
 | 文件与录音原件 | `Resource`，表为 `resources`，API 使用 `resourceId`。`content_asset_resource_refs` 建立资产与原文件的引用。 |
-| 可见范围与整理 | 按登录账号读取资产。`content_asset_folders` 表示文件夹位置，`folderId` 是关系投影。 |
+| 可见范围与整理 | 按登录账号读取资产。`content_assets.folder_id` 保存唯一的可空文件夹位置。文件夹软删后，API 的 `folderId` 显示为空；恢复文件夹后重新显示原位置。 |
 | 标签与关系 | `content_asset_tags` 建立资产与标签的关联。`content_asset_relations` 保存资产间的显式关系。「我的标签」是 App 本机的最近使用记录。 |
 | 来源 | 资产的 `sourceKind`、`sourceRef` 描述来源。索引的 `source_type` 指定原始记录类别，取值为 `content_asset`、`file`、`text`。 |
 
@@ -32,3 +32,11 @@
 ## 无正文检索
 
 Server 的 `sparse-v1` 集合保存向量、稳定分块 ID 和筛选字段。资产用稠密与稀疏向量，文件与独立文本用稀疏向量。Milvus 返回点 ID 和分数，Server 从权威正文批量取片段并校验当前修订。旧部署使用原生 BM25，经测试维护切换后使用稀疏向量。 [集合切换与验收](runbooks/milvus-textless-search.md)
+
+### 资产搜索集合
+
+资产使用 `<KB_CONTENT_ASSET_HYBRID_COLLECTION>_asset_v2`，保留 `chunk_id` 主键、`source_id`、`user_id`、`asset_kind`、`created_at`、`updated_at`、`build_id`、`sparse_vector` 和 FP16/1024 的 `dense_vector`。`build_id` 记录写入批次。正文由 PostgreSQL 按命中的 `chunk_id` 回读。Milvus 先按账号、可选资产类型和时间筛选，PostgreSQL 再校验账号、当前正文和其余条件。时间以资产的 UTC 毫秒时间戳存储。
+
+创建资产可指定 `assetKind` 为 `audio`、`image`、`file` 或 `creative`。搜索可传 `assetKinds`、`from`、`to` 和 `timeField`。时间范围含端点，`timeField` 默认是 `updated_at`，也可指定 `created_at`。RAG 查询通过 `filters` 传递这些字段。类型或时间有变化时，由索引 worker 同步到 Milvus。独立文件和文本的关键词索引继续使用 `KB_INDEX_LAYOUT`。
+
+切换前需在目标 Milvus 预建和加载新集合，并核实支持部分更新。0025 遇到遗留资产索引或未结束索引任务会停止。测试／开发共享库已核对无旧资产，维护时排空旧写入方后再次确认。
