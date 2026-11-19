@@ -73,6 +73,13 @@ describe('native test deployment intent (read-only API fixtures)', () => {
     const files = ['scripts/release/deployment-policy.py', 'tests/unit/deployment-policy.test.ts', 'src/release/plan.ts', 'tests/unit/release-plan.test.ts'].map(filename => ({ filename }));
     await expect(testReleaseIntent(context(), fixture(files).read)).resolves.toEqual({ deploy: false, reason: 'no-application-change' });
   });
+  it('treats impact reporting files as CI-only and still requires a plan for mixed application changes', async () => {
+    const files = ['.github/workflows/release-smoke-check.yml', '.github/release-impact/package.json',
+      '.github/release-impact/pnpm-lock.yaml', '.github/release-impact/report.mjs'].map(filename => ({ filename }));
+    await expect(testReleaseIntent(context(), fixture(files).read)).resolves.toEqual({ deploy: false, reason: 'no-application-change' });
+    await expect(testReleaseIntent(context(), fixture([...files, { filename: 'src/modules/rag/jobs.ts' }]).read))
+      .rejects.toThrow('TEST_RELEASE_PLAN_UPDATE_REQUIRED');
+  });
   it.each(['src/business.ts', 'compose.yaml', '.env.example', 'migrations/0003_new.sql', 'scripts/release/unknown.mjs'])('requires an updated plan for %s', async filename => {
     await expect(testReleaseIntent(context(), fixture([{ filename }]).read)).rejects.toThrow('TEST_RELEASE_PLAN_UPDATE_REQUIRED');
   });
