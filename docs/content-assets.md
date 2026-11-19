@@ -22,3 +22,13 @@
 *Hybrid search* 对应 `hybrid`，支持关键词和向量召回。*Keyword search* 对应 `keyword`，使用关键词召回。业务来源决定表与集合，搜索模式决定索引能力。当前资产原文使用 `hybrid` 索引，独立文件和文本记录使用 `keyword` 索引。 [索引与查询](runbooks/milvus.md)
 
 资产查询入口为 `/api/v1/kb/content-assets/query`。资产查询的指标标签为 `operation="content_asset_query"`，结构化日志使用 `sourceType="content_asset"`，任务按 `kb.content-asset-index`、`kb.content-asset-cleanup` 和 `content-asset.tag-extract` 观测。 [指标说明](observability/metrics.md)
+
+## 正文编辑与索引复用
+
+资产原文更新后按当前版本重新生成分块范围。混合索引根据分块正文哈希、向量化输入哈希、相同块出现次数和索引配置计算稳定点 ID。已有可用点直接复用，向量化和写入只处理本次缺失点。新构建完整写入后发布，随后清理旧版本独有的点。原文修订变更到新构建发布之间，查询会暂时排除该资产。独立文件和文本的 `keyword` 建索引按新版本写入分块。 [索引执行](../src/modules/kb/jobs.ts) · [版本筛选](../src/modules/rag/query-service.ts)
+
+隔离 PostgreSQL、Redis 和 Milvus 实测四个章节。单改一个独立章节只向量化一块，复用三块，替换后的旧点从集合中查询不到。删除一个独立章节时向量化零块，其余点 ID 一致，删除点从集合中查询不到。切分验证中，修改重叠区的一个字符影响两块，修改标题会改变该节各块的向量化输入。 [集成用例](../tests/integration/knowledge-base.test.ts)
+
+## 无正文检索
+
+Server 的 `sparse-v1` 集合保存向量、稳定分块 ID 和筛选字段。资产用稠密与稀疏向量，文件与独立文本用稀疏向量。Milvus 返回点 ID 和分数，Server 从权威正文批量取片段并校验当前修订。旧部署使用原生 BM25，经测试维护切换后使用稀疏向量。 [集合切换与验收](runbooks/milvus-textless-search.md)

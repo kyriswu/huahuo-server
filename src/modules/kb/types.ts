@@ -6,6 +6,8 @@ export interface KbSnapshot {
   mode:IndexMode; providerMode:'live'|'mock'|'disabled'; format:'markdown'|'text';
   businessStore:string; rules:{maxChars:number;overlapChars:number;version:'paragraph-sections'};
   target:VectorTarget; configHash:string;
+  indexLayout?:'sparse-v1';
+  pointIdentityHash?:string;
   embedding?:{model:string;dimensions:number;profile:string;baseUrl?:string};
   /** Conservative input budget, not the proprietary model tokenizer or billing usage. */
   tokenizer?:{model:string;id:string;maxInputTokens:number};

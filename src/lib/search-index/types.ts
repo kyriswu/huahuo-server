@@ -41,7 +41,7 @@ export interface SearchOptions extends OperationOptions {
 }
 /** Scores order results from this search only; scores from different engines
  * or retrieval methods are not assumed to be on a common scale. */
-export interface RecallHit { chunkKey: string; score: number; content: string; }
+export interface RecallHit { chunkKey: string; score: number; content?: string; }
 
 export interface IndexLifecycle {
   ensureReady(): Promise<void>;
@@ -49,8 +49,12 @@ export interface IndexLifecycle {
   deletePoints(ids: readonly string[], options?: OperationOptions): Promise<void>;
   close(): Promise<void>;
 }
+export interface LexicalDictionary {
+  coordinates(terms: readonly string[], allocate: boolean): Promise<ReadonlyMap<string, number>>;
+}
 export interface KeywordReader {
   searchKeyword(query: string, options: SearchOptions): Promise<RecallHit[]>;
+  prepareKeywordSearch?(query: string): Promise<(options: SearchOptions) => Promise<RecallHit[]>>;
 }
 export interface VectorReader {
   search(vector: readonly number[], options: SearchOptions): Promise<RecallHit[]>;

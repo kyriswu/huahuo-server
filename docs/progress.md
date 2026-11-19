@@ -1,4 +1,8 @@
-## 资产术语与通用搜索模式（2026-11-19，本地验收）
+## Milvus 无正文检索（2026-11-19，测试发布候选）
+
+Server 提供独立的无正文资产和文档集合，支持稀疏关键词与 RRF 混合召回。默认候选关闭外部重排，正文按最终候选批量读取并按排名补齐失效片段。0022 在隔离 PostgreSQL 升级验证通过，复跑无待应用迁移。测试环境只读核对两套旧集合均为零点，已发布构建与待索引任务均为零，已确认 Jieba 可用。切换和退役继续走现有审核、CI 与维护门禁。 [候选与验收](runbooks/milvus-textless-search.md)
+
+## 资产术语与通用搜索模式（2026-11-19，测试环境）
 
 资产主模型使用 `ContentAsset`，原文件使用 `Resource`。本轮补齐 API 说明、业务代码、索引列、快照、配置和监控说明。搜索中间层使用 `hybrid` 和 `keyword`，业务来源绑定各自的 PostgreSQL 表和 Milvus 集合。资产写入继续使用现有保存与导入入口。 [术语与映射](content-assets.md)
 
@@ -6,7 +10,7 @@
 
 首轮演练发现 PostgreSQL 索引属性仍保留早期字段名，已通过原地更名修正。首轮集成的任务样本缺少 `trace_id`，Milvus 测试用了另一种协议的参数名，修正后完整复跑通过。
 
-本地发布清单审查通过，现有自动门禁按清单拒绝不兼容候选。0021 与 Milvus 原地更名和候选配置同窗切换，走现有不兼容升级维护流程。本轮交付本地候选。 [维护步骤](runbooks/milvus.md)
+2026-11-19 16:35:36（北京时间）完成五阶段测试维护。业务提交为 `3f751ac`，`main` 控制提交为 `d606c2b`。共享库 0021 校验和匹配，物理外键为零。四角色健康，旧角色均在排空预算内退出。Milvus 原地改名并保留集合 ID，`hybrid` 和 `keyword` 均命中合成索引点，回读确认样本已清理。验证使用真实测试集合和合成向量。 [业务 PR](https://github.com/kyriswu/huahuo-server/pull/45) · [控制 PR](https://github.com/kyriswu/huahuo-server/pull/46) · [test CI](https://github.com/kyriswu/huahuo-server/actions/runs/44486425350) · [main CI](https://github.com/kyriswu/huahuo-server/actions/runs/44487996536)
 
 ## 0020 初次资产命名验收（2026-11-19）
 

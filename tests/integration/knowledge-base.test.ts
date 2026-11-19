@@ -32,7 +32,7 @@ import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.j
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {RuntimeSettings} from '../../src/modules/runtime-settings/service.js';
 import {configureTestMilvus} from '../support/milvus.js';
-import {DataType} from '@zilliz/milvus2-sdk-node';
+import {DataType,type ConsistencyLevelEnum} from '@zilliz/milvus2-sdk-node';
 import * as markdownInput from '../../src/lib/markdown-images.js';
 const url=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!url||!/^huahuo_test_/.test(new URL(url).pathname.slice(1)))throw new Error('ISOLATED_TEST_DB_REQUIRED');
@@ -148,9 +148,9 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(parseInput).not.toHaveBeenCalled();
   }finally{parseInput.mockRestore();await q.close();}
  });
- it('initializes exactly four metadata tables with indexed associations and no physical FKs',async()=>{
+ it('initializes knowledge metadata and the sparse dictionary with no physical FKs',async()=>{
   const cols=await root.query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name LIKE 'kb_%'");
-  expect(new Set(cols.rows.map(r=>r.table_name)).size).toBe(4);expect(cols.rows.some(r=>['content','embedding_text','embedding_vector'].includes(r.column_name))).toBe(false);
+  expect(new Set(cols.rows.map(r=>r.table_name))).toEqual(new Set(['kb_content_asset_hybrid_builds','kb_content_asset_hybrid_chunks','kb_document_keyword_builds','kb_document_keyword_chunks','kb_lexical_terms']));expect(cols.rows.some(r=>['content','embedding_text','embedding_vector'].includes(r.column_name))).toBe(false);
   expect(Number((await root.query("SELECT count(*) FROM pg_constraint WHERE contype='f' AND connamespace='public'::regnamespace")).rows[0].count)).toBe(0);
   for(const name of ['document_ingestion_chunks','rag_child_chunks','text_ingestion_chunks','rag_chunks','note_index_state','note_index_jobs'])expect((await root.query('SELECT to_regclass($1) name',[name])).rows[0].name).toBeNull();
  });
@@ -204,6 +204,61 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   expect(newIds.some(id=>oldIds.includes(id))).toBe(true);expect(newIds.some(id=>!oldIds.includes(id))).toBe(true);
   expect((await queries.query(f.scope,{query:'MVCC',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results[0]!.partRevisionId).toBe(changed.parts.raw!.partRevisionId);
   expect((await root.query('SELECT published FROM kb_content_asset_hybrid_builds WHERE id=$1',[old.id])).rows[0].published).toBe(false);
+ });
+ it.each(process.env.TEST_MILVUS_ADDRESS?(['bm25','sparse-v1'] as const):(['bm25'] as const))('embeds only a changed section and removes obsolete points using %s after editing and deleting a section',async indexLayout=>{
+  const settings={...config,kb:{...config.kb,indexLayout}};
+  const workerSettings={...workerConfig,kb:{...workerConfig.kb,indexLayout}};
+  const assetService=new ContentAssetService(pool,settings.appTokenSecret!,settings);
+  const scopedFactory:IndexFactory=snapshot=>indexLayout==='sparse-v1'?knowledgeIndex(workerSettings,snapshot,undefined,wp):factory(snapshot);
+  const sections=['# First\n\nanchoralpha durable text\n\n','# Edit\n\nrevisionold material\n\n',
+   '# Remove\n\nretiredsection material\n\n','# Last\n\nanchoromega durable text'];
+  const original=sections.join('');
+  const f=await fixture();
+  const created=await assetService.createContentAsset(f.scope,f.workspaceId,{title:'Diff',parts:{raw:original}},randomUUID());
+  const assetId=created.contentAssetId;
+  const embedded:string[]=[];
+  const indexer=new ContentAssetIndexJobs(wp,workerSettings,{index:scopedFactory,embedding:snapshot=>{
+   const model=kbEmbedding(config,snapshot);
+   return {...model,embed:async texts=>{embedded.push(...texts);return model.embed(texts);}};
+  }});
+  const pointIds=async(buildId:string)=>(await root.query<{point_id:string}>(
+   'SELECT point_id FROM kb_content_asset_hybrid_chunks WHERE build_id=$1 ORDER BY ordinal',[buildId]
+  )).rows.map(row=>row.point_id);
+  const client=process.env.TEST_MILVUS_ADDRESS?createMilvusClient(config.milvus):undefined;
+  const present=async(ids:string[])=>{
+   if(!client)return ids.filter(id=>memory.points.has(id)).sort();
+   // Match the adapter's wire value because the SDK treats numeric Strong=0 as unset.
+   const result=await client.query({collection_name:snapshotForSource(settings,'content_asset','markdown').target.collection,
+    filter:`id in [${ids.map(id=>JSON.stringify(id)).join(',')}]`,output_fields:['id'],
+    consistency_level:'Strong' as unknown as ConsistencyLevelEnum});
+   expect(result.status.error_code).toBe('Success');
+   return result.data.map(row=>String(row.id)).sort();
+  };
+  try{
+   await client?.connectPromise;
+   const initial=await runContentAsset(assetId,indexer);
+   const initialIds=await pointIds(initial.id);
+   expect(initialIds).toHaveLength(4);
+   expect(embedded).toHaveLength(4);
+   expect(await present(initialIds)).toEqual([...initialIds].sort());
+
+   embedded.length=0;
+   const edited=original.replace('revisionold','revisionnew');
+   const update=await assetService.updateContentAsset(f.scope,f.workspaceId,assetId,{parts:{raw:edited}},created.etag,randomUUID());
+   const editedIds=await pointIds((await runContentAsset(assetId,indexer)).id);
+   expect(embedded).toEqual([expect.stringContaining('revisionnew')]);
+   expect(editedIds).toHaveLength(4);
+   expect(editedIds.filter((_id,ordinal)=>ordinal!==1)).toEqual(initialIds.filter((_id,ordinal)=>ordinal!==1));
+   expect(editedIds[1]).not.toBe(initialIds[1]);
+   expect(await present([...new Set([...initialIds,...editedIds])])).toEqual([...editedIds].sort());
+
+   embedded.length=0;
+   await assetService.updateContentAsset(f.scope,f.workspaceId,assetId,{parts:{raw:edited.replace(sections[2]!,'')}},update.etag,randomUUID());
+   const remainingIds=await pointIds((await runContentAsset(assetId,indexer)).id);
+   expect(remainingIds).toEqual(editedIds.filter((_id,ordinal)=>ordinal!==2));
+   expect(embedded).toHaveLength(0);
+   expect(await present(editedIds)).toEqual([...remainingIds].sort());
+  }finally{await client?.closeConnection();}
  });
  it('deduplicates repeated source intent and never publishes a late task',async()=>{
   const f=await create('first revision');const first=await latest(f.contentAsset.contentAssetId);
@@ -370,6 +425,159 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   expect(result.results.length).toBeGreaterThan(0);
   if(process.env.TEST_MILVUS_ADDRESS)expect(Number(result.results[0]!.rrfScore)).toBeGreaterThan(1/61+0.001);
  });
+ it.skipIf(!process.env.TEST_MILVUS_ADDRESS)('preserves stable point IDs across layouts and retires the superseded copy only',async()=>{
+  const f=await create('跨集合稳定 ID 和 MVCC。'),assetId=f.contentAsset.contentAssetId;
+  const legacy=await runContentAsset(assetId);
+  const settings={...config,kb:{...config.kb,indexLayout:'sparse-v1' as const}};
+  const workerSettings={...workerConfig,kb:{...workerConfig.kb,indexLayout:'sparse-v1' as const}};
+  const tx=await pool.connect();
+  try{
+   await tx.query('BEGIN');
+   await new ContentAssetIndexService(pool,settings).schedule(tx,f.scope,f.workspaceId,assetId);
+   await tx.query('COMMIT');
+  }catch(error){await tx.query('ROLLBACK');throw error;}finally{tx.release();}
+  const rebuilt=await runContentAsset(assetId,new ContentAssetIndexJobs(wp,workerSettings));
+  expect(rebuilt.source_revision).toBe(legacy.source_revision);
+  expect(rebuilt.config_hash).not.toBe(legacy.config_hash);
+  const pointFor=async (buildId:string)=>(await root.query<{point_id:string}>(
+   'SELECT point_id FROM kb_content_asset_hybrid_chunks WHERE build_id=$1',[buildId],
+  )).rows[0]!.point_id;
+  const point=await pointFor(legacy.id);
+  expect(await pointFor(rebuilt.id)).toBe(point);
+  const client=createMilvusClient(config.milvus);
+  try{
+   await client.connectPromise;
+   const counts=[];
+   for(const collection_name of [legacy.snapshot.target.collection,rebuilt.snapshot.target.collection]){
+    const result=await client.query({collection_name,filter:`id == ${JSON.stringify(point)}`,output_fields:['id'],
+     consistency_level:'Strong' as unknown as ConsistencyLevelEnum});
+    expect(result.status.error_code).toBe('Success');
+    counts.push(result.data.length);
+   }
+   expect(counts).toEqual([0,1]);
+   expect((await root.query('SELECT published,cleanup_status FROM kb_content_asset_hybrid_builds WHERE id=$1',[legacy.id])).rows[0])
+    .toEqual({published:false,cleanup_status:'ready'});
+  }finally{await client.closeConnection();}
+ });
+ it.skipIf(!process.env.TEST_MILVUS_ADDRESS)('compares textless keyword and hybrid recall against native BM25 with real Milvus',async()=>{
+  const samples=[
+   {body:'PostgreSQL 数据库事务采用 MVCC 管理并发版本。',query:'数据库事务'},
+   {body:'The distributed workers were running isolated concurrent tasks.',query:'worker isolation'},
+   {body:'向量检索使用 HNSW 索引，比较 recall latency 与吞吐。',query:'HNSW 索引'},
+   {body:'跨区域数据恢复 archive replication failover 可以恢复可用性。',query:'replication'},
+   {body:'Observability records tracing and PostgreSQL write performance.',query:'Observability tracing'},
+  ];
+  const distractors=[
+   'PostgreSQL 版本升级记录与配置说明。',
+   'The distributed workers schedule tasks and send daily notifications.',
+   '检索和缓存涉及请求排队与容量管理。',
+   '跨区域网络路由正常，备份测试报告已完成。',
+   'Performance metrics measure the database write latency and response times.',
+  ];
+  const embedding={
+   model:config.rag.embeddingModel,dimensions:1024,
+   embed:async (texts:string[])=>texts.map(text=>{
+    // Stable relevance signals keep random point IDs from breaking dense score ties
+    // between labeled hits. The sparse branch still uses real analyzer/recall.
+    const label=samples.findIndex(sample=>text.includes(sample.body)||text.startsWith(sample.query));
+    const vector=Array<number>(1024).fill(0);
+    vector[label<0?samples.length:label]=1;
+    return vector;
+   }),
+  };
+  const fixtures=await Promise.all((['bm25','sparse-v1'] as const).map(async indexLayout=>{
+   const settings={...config,kb:{...config.kb,indexLayout}},workerSettings={...workerConfig,kb:{...workerConfig.kb,indexLayout}};
+   const f=await fixture(),sourceAssets=new ContentAssetService(pool,settings.appTokenSecret!,settings);
+   const buildJobs=new ContentAssetIndexJobs(wp,workerSettings,{embedding:()=>embedding});
+   const ids=[];
+   const extra=process.env.TEST_SEARCH_BENCHMARK==='true'?Array.from({length:5},(_,i)=>Array.from({length:42},(_,j)=>
+    `# Part ${i} ${j}\n\n${distractors[(i+j)%distractors.length]!.repeat(7)}`).join('\n\n')):[];
+   for(const body of [...samples.map(sample=>sample.body),...distractors,...extra]){
+    const asset=await sourceAssets.createContentAsset(f.scope,f.workspaceId,{title:'Search comparison',parts:{raw:body}},randomUUID());
+    await runContentAsset(asset.contentAssetId,buildJobs);
+    ids.push(asset.contentAssetId);
+   }
+   const text=await new TextIngestionService(pool,settings).create(f.scope,{source_type:'MANUAL_INPUT',raw_content:samples[2]!.body},randomUUID());
+   const task=(await root.query('SELECT current_task_id FROM text_ingestion_jobs WHERE id=$1',[text.id])).rows[0].current_task_id;
+   const a=await engine.claim(task,randomUUID());
+   const r=await new TextIngestionJobs(wp,workerSettings).execute(a!);
+   expect(await engine.finish(a!,r.digest,r.bytes)).toBe(true);
+   const chunks=(await root.query<{n:number}>('SELECT sum(chunk_count)::int n FROM kb_content_asset_hybrid_builds WHERE user_id=$1 AND published',[f.scope.userId])).rows[0]!.n;
+   return {indexLayout,settings,f,ids,text,chunks,q:new RagQueryService(pool,settings,{embedding})};
+  }));
+  const sparse=fixtures[1]!,client=createMilvusClient(sparse.settings.milvus);
+  try{
+   await client.connectPromise;
+   for(const sourceType of ['content_asset','file'] as const){
+    const snapshot=snapshotForSource(sparse.settings,sourceType,'markdown');
+    const {schema}=await client.describeCollection({collection_name:snapshot.target.collection});
+    expect(schema.fields.map(f=>f.name).sort()).toEqual(['id','index_status','source_id','source_type','sparse_vector','user_id','workspace_id',...(sourceType==='content_asset'?['dense_vector']:[])].sort());
+    expect(schema.enable_dynamic_field).toBe(false);
+    expect(schema.functions??[]).toHaveLength(0);
+   }
+   for(const mode of ['keyword','hybrid'] as const){
+    const metrics=[];
+    for(const {indexLayout,f,ids,q,text} of fixtures){
+     const ranks:number[]=[];
+     for(const [i,{query,body}] of samples.entries()){
+      const {results}=await q.query(f.scope,{query,mode,topK:3});
+      const rank=results.findIndex(hit=>hit.documentKey===ids[i]);
+      if(rank>=0){
+       expect(results[rank]!.content).toBe(body);
+       if(mode==='hybrid')expect(Number(results[rank]!.rrfScore)).toBeGreaterThan(1/(config.milvus.rrfK+1));
+      }
+      ranks.push(rank);
+     }
+     const recall=ranks.filter(rank=>rank>=0).length/ranks.length;
+     const ndcg=ranks.reduce((score,rank)=>rank<0?score:score+1/Math.log2(rank+2),0)/ranks.length;
+     const textResult=await q.query(f.scope,{query:'HNSW 索引',sourceType:'file',mode:'keyword',topK:1,documentKey:text.id});
+     expect(textResult.results[0]?.content).toBe(samples[2]!.body);
+     expect((await q.query(f.scope,{query:'zzmissedtermzz',mode:'keyword'})).results).toEqual([]);
+     expect((await q.query(f.scope,{query:'!!!',mode:'keyword'})).results).toEqual([]);
+     expect((await q.query(fixtures.find(other=>other.f!==f)!.f.scope,{query:'HNSW',mode,documentKey:ids[2]})).results).toEqual([]);
+     metrics.push({indexLayout,recall,ndcg,ranks});
+    }
+    console.log(JSON.stringify({benchmark:'search-recall',mode,metrics}));
+    expect(metrics[1]!.recall).toBe(1);
+    expect(metrics[1]!.recall).toBeGreaterThanOrEqual(metrics[0]!.recall);
+    expect(metrics[1]!.ndcg).toBeGreaterThanOrEqual(metrics[0]!.ndcg);
+   }
+   if(process.env.TEST_SEARCH_BENCHMARK==='true'){
+    const querySet=samples.map(({query})=>query),requestsPerWorker=100,concurrency=4;
+    for(const mode of ['keyword','hybrid'] as const){
+     const metrics=[];
+     // Alternate runner order and report individual rounds to expose warm-up and contention.
+     for(const {f,q} of fixtures){
+      await Promise.all(querySet.map(query=>q.query(f.scope,{query,mode,topK:3})));
+     }
+     for(let round=0;round<4;round++){
+      const run=round<2?'warm':'uncached';
+      const order=round%2?[...fixtures].reverse():fixtures;
+      for(const {indexLayout,f,q,chunks} of order){
+       const latencies:number[]=[];
+       const started=performance.now();
+       await Promise.all(Array.from({length:concurrency},(_,worker)=>(async()=>{
+        for(let i=0;i<requestsPerWorker;i++){
+         const base=querySet[(worker+i)%querySet.length]!;
+         // Distinct punctuation exercises uncached analysis with the same tokens.
+         const suffix=((round*concurrency+worker)*requestsPerWorker+i).toString(2).replaceAll('0','!').replaceAll('1','?');
+         const query=run==='warm'?base:base+' '+suffix+(mode==='hybrid'?'?':'!');
+         const start=performance.now();
+         await q.query(f.scope,{query,mode,topK:3});
+         latencies.push(performance.now()-start);
+        }
+       })()));
+       const qps=latencies.length*1000/(performance.now()-started);
+       latencies.sort((a,b)=>a-b);
+       const percentile=(p:number)=>latencies[Math.ceil(latencies.length*p)-1]!;
+       metrics.push({indexLayout,run,round,chunks,qps,p95:percentile(0.95),p99:percentile(0.99)});
+      }
+     }
+     console.log(JSON.stringify({benchmark:'search-throughput',mode,concurrency,requestsPerRound:concurrency*requestsPerWorker,metrics}));
+    }
+   }
+  }finally{await Promise.all([client.closeConnection(),...fixtures.map(({q})=>q.close())]);}
+ },180_000);
  it('real Milvus schema contains no dense field in document collection, while contentAsset uses FP16/1024',async()=>{
   if(!process.env.TEST_MILVUS_ADDRESS)return;
   const c=createMilvusClient(config.milvus);

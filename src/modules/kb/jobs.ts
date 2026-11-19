@@ -20,7 +20,7 @@ const chunkWriteBatchSize=256;
 export class KnowledgeIndexJobs {
  constructor(readonly pool:pg.Pool,readonly config:AppConfig,readonly dependencies:KbDependencies={}){}
  async close():Promise<void>{}
- private index(snapshot:KbSnapshot):HybridIndex|KeywordIndex{return this.dependencies.index?.(snapshot)??knowledgeIndex(this.config,snapshot);}
+ private index(snapshot:KbSnapshot):HybridIndex|KeywordIndex{return this.dependencies.index?.(snapshot)??knowledgeIndex(this.config,snapshot,undefined,this.pool);}
  private async lease(tx:pg.PoolClient|pg.Client,attempt:Attempt){
   const r=await tx.query("SELECT id FROM tasks WHERE id=$1 AND workspace_id=$2 AND user_id=$3 AND state='running' AND lease_owner=$4 AND version=$5 AND attempt_no=$6 AND lease_until>clock_timestamp() FOR UPDATE",[attempt.task.id,attempt.task.workspace_id,attempt.task.user_id,attempt.owner,attempt.version,attempt.attempt]);
   if(!r.rowCount)throw new KbJobError('KB_LEASE_LOST');
@@ -58,11 +58,11 @@ export class KnowledgeIndexJobs {
        for(let offset=0;offset<plan.chunks.length;offset+=chunkWriteBatchSize){
         const batch=plan.chunks.slice(offset,offset+chunkWriteBatchSize).map(draft=>{
          const k=draft.contentHash+draft.inputHash;const occurrence=occurrences.get(k)??0;occurrences.set(k,occurrence+1);
-         return {draft,pointId:digest(JSON.stringify([source.type,source.id,build.config_hash,k,occurrence]))};
+         return {draft,pointId:digest(JSON.stringify([source.type,source.id,build.snapshot.pointIdentityHash??build.config_hash,k,occurrence]))};
         });
         // EXISTS keeps both the lookup input and result bounded even when many
         // historical builds reference the same reusable point.
-        const reusable=new Set(mode==='hybrid'?(await tx.query<{point_id:string}>(`SELECT requested.point_id FROM unnest($1::text[]) AS requested(point_id)
+        const reusable=new Set((mode==='hybrid'||build.snapshot.indexLayout==='sparse-v1')?(await tx.query<{point_id:string}>(`SELECT requested.point_id FROM unnest($1::text[]) AS requested(point_id)
          WHERE EXISTS(SELECT 1 FROM ${chunks} c JOIN ${builds} b ON b.id=c.build_id
           WHERE c.point_id=requested.point_id AND c.index_status='ready' AND b.source_id=$2 AND b.user_id=$3 AND b.config_hash=$4 AND b.cleanup_status<>'ready')`,
          [batch.map(row=>row.pointId),source.id,source.userId,build.config_hash])).rows.map(row=>row.point_id):[]);
@@ -116,7 +116,7 @@ export class KnowledgeIndexJobs {
   const scope={source_type:type,source_id:id,user_id:attempt.task.user_id!,workspace_id:attempt.task.workspace_id!};
   const state=await transaction(this.pool,async tx=>{const s=await sourceState(tx,scope,true);await this.lease(tx,attempt);
    await tx.query(`UPDATE ${builds} SET published=false,status=$4 WHERE source_type=$1 AND source_id=$2 AND user_id=$3 AND (source_revision<>$5 OR $6)`,[type,id,scope.user_id,s.deleted?'deleted':'superseded',s.revision,s.deleted]);return s;});
-  const retired=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE source_type=$1 AND source_id=$2 AND user_id=$3 AND workspace_id=$4 AND NOT published AND cleanup_status<>'ready' AND (source_revision<>$5 OR $6)`,[type,id,scope.user_id,scope.workspace_id,state.revision,state.deleted])).rows;
+  const retired=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE source_type=$1 AND source_id=$2 AND user_id=$3 AND workspace_id=$4 AND NOT published AND cleanup_status<>'ready' AND (source_revision<>$5 OR $6 OR status='superseded')`,[type,id,scope.user_id,scope.workspace_id,state.revision,state.deleted])).rows;
   for(const b of retired){
    const ids=(await this.pool.query<{point_id:string}>(`SELECT c.point_id FROM ${chunks} c WHERE c.build_id=$1 AND NOT EXISTS(SELECT 1 FROM ${chunks} live JOIN ${builds} lb ON lb.id=live.build_id WHERE live.point_id=c.point_id AND lb.id<>$1 AND lb.status IN ('pending','indexing','ready') AND lb.config_hash=$2 AND lb.source_revision=$3)`,[b.id,b.config_hash,state.revision])).rows.map(r=>r.point_id);
    const index=this.index(b.snapshot);try{await index.deletePoints(ids);await this.pool.query(`UPDATE ${builds} SET cleanup_status='ready' WHERE id=$1 AND task_id=$2`,[b.id,b.task_id]);}finally{await index.close();}

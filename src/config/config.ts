@@ -43,7 +43,7 @@ export interface AppConfig {
   storageAliyunOss?: { endpoint:string; publicEndpoint?:string; region:string; bucket:string; accessKeyId:string; accessKeySecret:string; secure:boolean; timeoutMs:number; keyPrefix?:string; maxBytes:number };
   milvus: MilvusConfig;
   rag: RagConfig;
-  kb: { contentAssetEnabled: boolean; contentAssetCollection: string; documentCollection: string };
+  kb: { contentAssetEnabled: boolean; contentAssetCollection: string; documentCollection: string; indexLayout: 'bm25' | 'sparse-v1' };
 }
 export interface MilvusConfig {
   address?: string;
@@ -178,12 +178,16 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (rag.rerankProvider === 'http' && (!rag.rerankBaseUrl || !rag.rerankApiKey)) fail('RAG_RERANK_CONFIG');
   if(rag.embeddingModel!==CONTENT_ASSET_EMBEDDING_MODEL||rag.embeddingProfile!==CONTENT_ASSET_EMBEDDING_PROFILE)fail('RAG_EMBEDDING_PROFILE');
   if(rag.rerankProvider==='http'&&rag.rerankModel!==CONTENT_ASSET_RERANK_MODEL)fail('RAG_RERANK_MODEL');
-  const kb = {
+  const indexLayout = env.KB_INDEX_LAYOUT?.trim() || 'bm25';
+  if(indexLayout!=='bm25'&&indexLayout!=='sparse-v1')return fail('KB_INDEX_LAYOUT');
+  const kb: AppConfig['kb'] = {
+    indexLayout,
     contentAssetEnabled: false,
     contentAssetCollection: env.KB_CONTENT_ASSET_HYBRID_COLLECTION?.trim() || DEFAULT_CONTENT_ASSET_COLLECTION,
     documentCollection: env.KB_DOCUMENT_KEYWORD_COLLECTION?.trim() || 'huahuo_kb_keyword_chunks',
   };
   if(kb.contentAssetCollection===kb.documentCollection||![kb.contentAssetCollection,kb.documentCollection].every(v=>/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(v)))fail('KB_COLLECTIONS');
+  if(indexLayout==='sparse-v1'&&[kb.contentAssetCollection,kb.documentCollection].some(name=>name.length>245||name.endsWith('_sparse_v1')))fail('KB_COLLECTIONS');
   const maxUploadBytes=100*1024*1024;
   const uploadHardMaxBytes=integer('HTTP_UPLOAD_HARD_MAX_BYTES',2*1024*1024*1024,100*1024*1024,2*1024*1024*1024);
   const httpRequestTimeoutMs=integer('HTTP_REQUEST_TIMEOUT_MS',60_000,1_000,600_000);
