@@ -13,7 +13,7 @@ it('fuses global branch ranks across point windows and retains each branch candi
  const settings=config();
  Object.assign(settings.milvus,{denseCandidates:3,bm25Candidates:4,hybridCandidates:4,rrfK:60});
  settings.rag.rerankProvider='disabled';
- const scope={userId:randomUUID(),sessionId:randomUUID(),traceId:randomUUID()},workspaceId=randomUUID();
+ const scope={userId:randomUUID(),sessionId:randomUUID(),traceId:randomUUID()};
  const buildId=randomUUID(),sourceId=randomUUID(),revision=randomUUID();
  const snapshot=snapshotForSource(settings,'content_asset','markdown');
  let content='';
@@ -22,7 +22,7 @@ it('fuses global branch ranks across point windows and retains each branch candi
   const body=`chunk ${point}\n`,start=content.length;content+=body;
   return {build_id:buildId,point_id:point,ordinal,source_start:start,source_end:content.length,content_hash:digest(body),chunk_count:300};
  });
- const build={id:buildId,source_type:'content_asset',source_id:sourceId,source_revision:revision,user_id:scope.userId,workspace_id:workspaceId,
+ const build={id:buildId,source_type:'content_asset',source_id:sourceId,source_revision:revision,user_id:scope.userId,
   content_hash:digest(content),snapshot,published:true,status:'ready',chunk_count:300,content_asset_revision_id:randomUUID(),cursor_created_at:'2026-01-01 00:00:00.000000+00'};
  const sql=vi.fn(async(query:string,values:unknown[]=[])=>{
   if(query.includes('FROM user_sessions'))return {rows:[{id:scope.sessionId}],rowCount:1};
@@ -47,7 +47,7 @@ it('fuses global branch ranks across point windows and retains each branch candi
  const index:HybridIndex={kind:'hybrid',ensureReady:vi.fn(async()=>{}),upsert:vi.fn(async()=>{}),deletePoints:vi.fn(async()=>{}),close:vi.fn(async()=>{}),search,searchKeyword,hybridSearch};
  // C wins if each window assigns its own rank 1 before the windows are merged.
  const local=([rows.slice(0,256),rows.slice(256)]).flatMap(window=>{
-  const options={scope:{userId:scope.userId,workspaceId,pointIds:window.map(row=>row.point_id)},limit:4};
+  const options={scope:{userId:scope.userId,pointIds:window.map(row=>row.point_id)},limit:4};
   return fuseRankedRecall([recall(denseScores,{...options,limit:3}),recall(keywordScores,options)],4,60);
  }).sort((a,b)=>b.score-a.score||a.chunkKey.localeCompare(b.chunkKey));
  expect(local[0]!.chunkKey).toBe('C');
@@ -67,12 +67,12 @@ it('fuses global branch ranks across point windows and retains each branch candi
 it.each(['rerank','topK','refill'] as const)('hydrates only the ranked bodies needed for %s', async strategy => {
  const settings=config();
  settings.kb.indexLayout='sparse-v1';
- const scope={userId:randomUUID(),sessionId:randomUUID(),traceId:randomUUID()},workspaceId=randomUUID();
+ const scope={userId:randomUUID(),sessionId:randomUUID(),traceId:randomUUID()};
  const snapshot=snapshotForSource(settings,'content_asset','markdown');
  const fixtures=['first','second','superseded'].map((pointId,index)=>{
   const content=pointId+' candidate',source='🚀'+content;
   const build={id:randomUUID(),source_type:'content_asset',source_id:randomUUID(),source_revision:randomUUID(),
-   user_id:scope.userId,workspace_id:workspaceId,content_hash:digest(source),snapshot,published:true,status:'ready',
+   user_id:scope.userId,content_hash:digest(source),snapshot,published:true,status:'ready',
    chunk_count:1,content_asset_revision_id:randomUUID()};
   const row={build_id:build.id,point_id:pointId,ordinal:0,source_start:'🚀'.length,source_end:source.length,content_hash:digest(content),chunk_count:1};
   return {build,row,source,hit:{chunkKey:pointId,score:3-index}};
@@ -81,7 +81,7 @@ it.each(['rerank','topK','refill'] as const)('hydrates only the ranked bodies ne
   if(query.includes('FROM user_sessions'))return {rows:[{id:scope.sessionId}],rowCount:1};
   if(query.includes('SELECT c.*'))return {rows:fixtures.map(f=>f.row)};
   if(query.includes('SELECT b.*')){
-   const ids=values[6] as string[]|null;
+   const ids=values[5] as string[]|null;
    const selected=ids?fixtures.filter(f=>ids.includes(f.build.id)):fixtures;
    if(query.includes('AS source_body')){
     // The database may return a different order, and a revision can disappear after recall.
@@ -104,10 +104,10 @@ it.each(['rerank','topK','refill'] as const)('hydrates only the ranked bodies ne
   const bodyQueries=sql.mock.calls.filter(([query])=>query.includes('AS source_body'));
   if(strategy==='rerank'){
    expect(rerank.mock.calls[0]?.[1].map(c=>c.chunkKey)).toEqual(['first','second']);
-   expect(bodyQueries.map(call=>call[1]?.[6])).toEqual([fixtures.map(f=>f.build.id)]);
+   expect(bodyQueries.map(call=>call[1]?.[5])).toEqual([fixtures.map(f=>f.build.id)]);
   }else{
    expect(rerank).not.toHaveBeenCalled();
-   expect(bodyQueries.map(call=>call[1]?.[6])).toEqual(
+   expect(bodyQueries.map(call=>call[1]?.[5])).toEqual(
     (strategy==='refill'?fixtures.slice(0,2):fixtures.slice(0,1)).map(f=>[f.build.id]),
    );
   }

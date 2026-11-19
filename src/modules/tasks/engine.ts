@@ -108,15 +108,13 @@ export class TaskEngine {
   if(a.task.kind==='kb.content-asset-index'&&this.contentAssetIndex){const result=await this.contentAssetIndex.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind==='content-asset.tag-extract'){
    if(!await this.heartbeat(a))return false;
-   const input=(await this.pool.query('SELECT body FROM task_inputs WHERE id=$1 AND user_id=$2 AND workspace_id=$3',[a.task.input_id,a.task.user_id,a.task.workspace_id])).rows[0];
+   const input=(await this.pool.query('SELECT body FROM task_inputs WHERE id=$1 AND user_id=$2 AND workspace_id IS NULL',[a.task.input_id,a.task.user_id])).rows[0];
    if(!input)return this.fail(a,'INPUT_UNAVAILABLE',false);
    const spec=JSON.parse(String(input.body)) as {contentAssetId:string;contentAssetRevisionId:string;tagSetVersion:number};
    if(!Number.isSafeInteger(spec.tagSetVersion)||spec.tagSetVersion<0)return this.fail(a,'TAG_INPUT_INVALID',false);
    const asset=(await this.pool.query(`SELECT asset.*,p.content_markdown FROM content_assets asset
-     JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
-     JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=asset.user_id AND w.state='ready'
      LEFT JOIN content_asset_parts p ON p.content_asset_id=asset.content_asset_id AND p.part='raw'
-     WHERE asset.content_asset_id=$1 AND asset.user_id=$3`,[spec.contentAssetId,a.task.workspace_id,a.task.user_id])).rows[0];
+     WHERE asset.content_asset_id=$1 AND asset.user_id=$2`,[spec.contentAssetId,a.task.user_id])).rows[0];
    const outcome=(status:string)=>this.finish(a,hash(status),0,async tx=>{
      await tx.query('UPDATE content_jobs SET outcome=$2,provider=$3 WHERE task_id=$1',[a.task.id,status,this.tagExtractor.provider]);
    });
@@ -128,34 +126,32 @@ export class TaskEngine {
    let labels:string[];
    try { labels=validateTagLabels(extracted.labels); } catch { return this.fail(a,'TAG_OUTPUT_INVALID',false); }
    return this.finish(a,hash(JSON.stringify({labels,provider:extracted.provider})),labels.length,async tx=>{
-     const locked=(await tx.query(`SELECT asset.*,m.workspace_id FROM content_assets asset
-       JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
-       JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=asset.user_id AND w.state='ready'
-       WHERE asset.content_asset_id=$1 AND asset.user_id=$3 FOR UPDATE OF asset`,[spec.contentAssetId,a.task.workspace_id,a.task.user_id])).rows[0];
+     const locked=(await tx.query(`SELECT asset.* FROM content_assets asset
+       WHERE asset.content_asset_id=$1 AND asset.user_id=$2 FOR UPDATE OF asset`,[spec.contentAssetId,a.task.user_id])).rows[0];
      let status='stale';
      if(locked?.state==='active' && locked.content_asset_revision_id===spec.contentAssetRevisionId){
        // Only the first automatic extraction may write the effective set.
        const automatic=spec.tagSetVersion===0 && Number(locked.tag_set_version)===0 && !locked.tag_manual_override;
        if(automatic){
          await tx.query(`DELETE FROM content_asset_tags m USING asset_tags t
-           WHERE m.content_asset_id=$1 AND m.source='extracted' AND m.tag_id=t.tag_id AND t.workspace_id=$2`,
-           [spec.contentAssetId,locked.workspace_id]);
+           WHERE m.content_asset_id=$1 AND m.source='extracted' AND m.tag_id=t.tag_id AND t.user_id=$2`,
+           [spec.contentAssetId,locked.user_id]);
          for(const displayName of [...labels].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()))){
            const normalized=displayName.normalize('NFKC').trim().toLowerCase();
-           const tag=(await tx.query(`INSERT INTO asset_tags(tag_id,workspace_id,normalized_name,display_name,source)
-             VALUES($1,$2,$3,$4,'extracted') ON CONFLICT(workspace_id,normalized_name) DO UPDATE SET display_name=asset_tags.display_name RETURNING tag_id`,
-             [randomUUID(),locked.workspace_id,normalized,displayName])).rows[0];
+           const tag=(await tx.query(`INSERT INTO asset_tags(tag_id,user_id,normalized_name,display_name,source)
+             VALUES($1,$2,$3,$4,'extracted') ON CONFLICT(user_id,normalized_name) DO UPDATE SET display_name=asset_tags.display_name RETURNING tag_id`,
+             [randomUUID(),locked.user_id,normalized,displayName])).rows[0];
            await tx.query("INSERT INTO content_asset_tags(content_asset_id,tag_id,source) VALUES($1,$2,'extracted') ON CONFLICT DO NOTHING",[spec.contentAssetId,tag.tag_id]);
          }
          await tx.query('UPDATE content_assets SET tag_set_version=tag_set_version+1 WHERE content_asset_id=$1',[spec.contentAssetId]);
-         await tx.query('INSERT INTO workspace_content_state(workspace_id) VALUES($1) ON CONFLICT DO NOTHING',[locked.workspace_id]);
-         const cursor=(await tx.query('UPDATE workspace_content_state SET next_cursor=next_cursor+1,updated_at=now() WHERE workspace_id=$1 RETURNING next_cursor',[locked.workspace_id])).rows[0].next_cursor;
-         await tx.query(`INSERT INTO content_events(event_id,workspace_id,cursor,operation_id,object_kind,object_id,change_type) VALUES($1,$2,$3,$4,'content_asset',$5,'updated')`,[randomUUID(),locked.workspace_id,cursor,randomUUID(),spec.contentAssetId]);
+         await tx.query('INSERT INTO account_content_state(user_id) VALUES($1) ON CONFLICT DO NOTHING',[locked.user_id]);
+         const cursor=(await tx.query('UPDATE account_content_state SET next_cursor=next_cursor+1,updated_at=now() WHERE user_id=$1 RETURNING next_cursor',[locked.user_id])).rows[0].next_cursor;
+         await tx.query(`INSERT INTO content_events(event_id,user_id,cursor,operation_id,object_kind,object_id,change_type) VALUES($1,$2,$3,$4,'content_asset',$5,'updated')`,[randomUUID(),locked.user_id,cursor,randomUUID(),spec.contentAssetId]);
          status='applied';
        }else if(spec.tagSetVersion===Number(locked.tag_set_version)){
-         await tx.query(`INSERT INTO content_asset_tag_suggestions(suggestion_id,workspace_id,content_asset_id,task_id,content_asset_revision_id,expected_tag_set_version,labels,provider)
+         await tx.query(`INSERT INTO content_asset_tag_suggestions(suggestion_id,user_id,content_asset_id,task_id,content_asset_revision_id,expected_tag_set_version,labels,provider)
            VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(task_id) DO NOTHING`,
-           [randomUUID(),locked.workspace_id,spec.contentAssetId,a.task.id,spec.contentAssetRevisionId,spec.tagSetVersion,JSON.stringify(labels),extracted.provider]);
+           [randomUUID(),locked.user_id,spec.contentAssetId,a.task.id,spec.contentAssetRevisionId,spec.tagSetVersion,JSON.stringify(labels),extracted.provider]);
          status='suggested';
        }
      }

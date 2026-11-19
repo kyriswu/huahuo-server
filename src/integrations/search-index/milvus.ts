@@ -26,7 +26,7 @@ function quote(value: string): string { return JSON.stringify(value); }
 
 export function milvusScopeFilter(scope:RecallScope,filter?:RecallFilter):string {
  validateSearch({scope,filter,limit:1});
- let expression=`user_id == ${quote(scope.userId)} && workspace_id == ${quote(scope.workspaceId)} && index_status == "ready" && id in [${scope.pointIds.map(quote).join(',')}]`;
+ let expression=`user_id == ${quote(scope.userId)}${scope.workspaceId===undefined?'':` && workspace_id == ${quote(scope.workspaceId)}`} && index_status == "ready" && id in [${scope.pointIds.map(quote).join(',')}]`;
  if(filter?.sourceIds)expression+=` && source_id in [${filter.sourceIds.map(quote).join(',')}]`;
  if(filter?.sourceTypes)expression+=` && source_type in [${filter.sourceTypes.map(quote).join(',')}]`;
  return expression;
@@ -66,6 +66,7 @@ export interface MilvusIndexConfig extends MilvusConfig {
  maxContentChars:number;
  dimensions?:number;
  dictionary?:LexicalDictionary;
+ accountScope?:boolean;
 }
 class MilvusIndexDriver {
  private client:MilvusClient|undefined;private connectPromise:Promise<void>|undefined;private readyPromise:Promise<void>|undefined;
@@ -113,7 +114,7 @@ class MilvusIndexDriver {
   private get outputFields(){return this.config.dictionary?MILVUS_POINT_FIELDS:MILVUS_OUTPUT_FIELDS;}
   private async ensureReadyOnce(): Promise<void> {
     const sparse=!!this.config.dictionary;
-    const fields=buildMilvusSchema(this.config.kind,this.config.dimensions??1024,sparse);
+    const fields=buildMilvusSchema(this.config.kind,this.config.dimensions??1024,sparse,this.config.accountScope);
     await this.operation('ensureReady', async client => {
       const exists = await client.hasCollection({ collection_name: this.collection }); ok(exists, 'hasCollection');
       if (!exists.value) {
@@ -124,7 +125,7 @@ class MilvusIndexDriver {
       }
       const desc = await client.describeCollection({ collection_name: this.collection }); ok(desc, 'describeCollection');
       if(this.config.kind==='keyword'&&desc.schema.fields.some(f=>[DataType.FloatVector,DataType.Float16Vector,DataType.BFloat16Vector,DataType.BinaryVector,DataType.Int8Vector].includes(typeId(f.data_type))))incompatible('Keyword collection must not contain dense vectors');
-      if(sparse&&(desc.schema.enable_dynamic_field||desc.schema.fields.length!==fields.length))incompatible('Textless collection field set does not match');
+      if((sparse||this.config.accountScope)&&(desc.schema.enable_dynamic_field||desc.schema.fields.length!==fields.length))incompatible('Collection field set does not match');
       for (const expected of fields) {
         const field = desc.schema.fields.find(f => f.name === expected.name);
         if (!field || typeId(field.data_type) !== typeId(expected.data_type)) incompatible(`Invalid field ${expected.name}`);
@@ -202,11 +203,16 @@ class MilvusIndexDriver {
       return counts.size?Object.fromEntries([...counts].map(([term,tf])=>[coordinates.get(term)!,2.2*tf/(tf+lengthFactor)])):{0:1};
     });
   }
+  private scopeFilter(options:SearchOptions):string {
+    if(this.config.accountScope ? options.scope.workspaceId!==undefined : !options.scope.workspaceId)
+      throw new SearchIndexError('SEARCH_INDEX_SCOPE_REQUIRED');
+    return milvusScopeFilter(options.scope,options.filter);
+  }
   async upsert(points:readonly IndexPoint[],options?:OperationOptions):Promise<void>{
     options?.signal?.throwIfAborted();
     if(!points.length)return;
     for(const point of points){
-      if(!point.id||!point.sourceId||!point.sourceType||!point.userId||!point.workspaceId||!point.content.trim())incompatible('Incomplete point');
+      if(!point.id||!point.sourceId||!point.sourceType||!point.userId||(this.config.accountScope?point.workspaceId!==undefined:!point.workspaceId)||!point.content.trim())incompatible('Incomplete point');
       if(Array.from(point.content).length>this.config.maxContentChars||Buffer.byteLength(point.content,'utf8')>65535)incompatible('Chunk exceeds configured storage limit');
       if(this.config.kind!=='keyword')this.validateVector(point.embedding??[],this.config.dimensions??1024);
       else if(point.embedding!==undefined)incompatible('Keyword collection does not accept dense vectors');
@@ -218,7 +224,7 @@ class MilvusIndexDriver {
       const sparse=this.config.dictionary?await this.encodePoints(client,points,languages):undefined;
       options?.signal?.throwIfAborted();
       const response=await client.upsert({collection_name:this.collection,data:points.map((p,i)=>({
-        id:p.id,source_id:p.sourceId,source_type:p.sourceType,user_id:p.userId,workspace_id:p.workspaceId,
+        id:p.id,source_id:p.sourceId,source_type:p.sourceType,user_id:p.userId,...(this.config.accountScope?{}:{workspace_id:p.workspaceId}),
         ...(sparse?{sparse_vector:sparse[i]}:{text:p.content,language:languages[i]}),index_status:'ready',
         ...(this.config.kind!=='keyword'?{dense_vector:f32ArrayToF16Bytes([...p.embedding!])}:{}),
       }))});ok(response,'upsert');
@@ -227,7 +233,7 @@ class MilvusIndexDriver {
   }
   async search(vector:readonly number[],options:SearchOptions):Promise<RecallHit[]>{
     validateSearch(options);if(this.config.kind==='keyword')incompatible('Dense search is not enabled');this.validateVector(vector,this.config.dimensions??1024);await this.ensureReady();
-    const response=await this.gate.run(()=>this.operation('search',c=>c.search({collection_name:this.collection,data:[f32ArrayToF16Bytes([...vector])],anns_field:'dense_vector',filter:milvusScopeFilter(options.scope,options.filter),limit:options.limit,metric_type:MetricType.COSINE,params:{ef:Math.max(64,options.limit)},output_fields:this.outputFields,consistency_level:STRONG})));
+    const response=await this.gate.run(()=>this.operation('search',c=>c.search({collection_name:this.collection,data:[f32ArrayToF16Bytes([...vector])],anns_field:'dense_vector',filter:this.scopeFilter(options),limit:options.limit,metric_type:MetricType.COSINE,params:{ef:Math.max(64,options.limit)},output_fields:this.outputFields,consistency_level:STRONG})));
     return this.parseHits(response);
   }
   async prepareKeywordSearch(query:string){
@@ -237,7 +243,7 @@ class MilvusIndexDriver {
     const routes=await this.prepareKeywordRoutes(query);
     return async (options:SearchOptions):Promise<RecallHit[]>=>{
       validateSearch(options);
-      const filter=milvusScopeFilter(options.scope,options.filter);
+      const filter=this.scopeFilter(options);
       const responses=await Promise.all(routes.map(route=>this.gate.run(()=>this.operation('keyword',c=>c.search({
         collection_name:this.collection,data:route.data,anns_field:'sparse_vector',filter:filter+route.filter,
         limit:options.limit,metric_type:route.metric,params:route.params,output_fields:this.outputFields,consistency_level:STRONG,
@@ -282,7 +288,7 @@ class MilvusIndexDriver {
   }
   async hybridSearch(vector:readonly number[],query:string,options:SearchOptions):Promise<RecallHit[]>{
     validateSearch(options);if(this.config.kind!=='hybrid')incompatible('Hybrid search is not enabled');if(!query.trim())throw new SearchIndexError('SEARCH_INDEX_QUERY_INVALID');this.validateVector(vector,this.config.dimensions??1024);await this.ensureReady();
-    const filter=milvusScopeFilter(options.scope,options.filter);
+    const filter=this.scopeFilter(options);
     const routes=await this.prepareKeywordRoutes(query);
     const response=await this.gate.run(()=>this.operation('hybrid',c=>c.hybridSearch({collection_name:this.collection,data:[
       {data:[f32ArrayToF16Bytes([...vector])],anns_field:'dense_vector',expr:filter,params:{topk:this.config.denseCandidates,metric_type:MetricType.COSINE,params:JSON.stringify({ef:Math.max(64,this.config.denseCandidates)})}},

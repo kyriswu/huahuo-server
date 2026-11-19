@@ -17,18 +17,11 @@ const fields = `id, scene_key, item_key, template_version, content_asset_id, sou
 
 export const RunTimeoutMs = 90_000;
 
-async function assertWorkspace(tx: pg.PoolClient, scope: Scope, workspaceId: string) {
-  const result = await tx.query(
-    "SELECT id FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready' FOR SHARE", [workspaceId, scope.userId],
-  );
-  if (!result.rowCount) throw new DomainError(404, 'WORKSPACE_NOT_FOUND');
-}
-
-async function readSource(tx: pg.PoolClient, userId: string, workspaceId: string, contentAssetId: string, includeContent = false) {
+async function readSource(tx: pg.PoolClient, userId: string, contentAssetId: string, includeContent = false) {
   // Lock the content asset before reading its parts, matching the write path.
   const { rows: [contentAsset] } = await tx.query<{ title: string }>(
-    `SELECT asset.title FROM content_assets asset JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$1
-     WHERE asset.content_asset_id=$2 AND asset.user_id=$3 AND asset.state='active' FOR SHARE OF asset`, [workspaceId, contentAssetId, userId],
+    `SELECT asset.title FROM content_assets asset
+     WHERE asset.content_asset_id=$1 AND asset.user_id=$2 AND asset.state='active' FOR SHARE OF asset`, [contentAssetId, userId],
   );
   if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
   const { rows: [part] } = await tx.query<Omit<Source, 'title'>>(
@@ -82,19 +75,19 @@ export class AiTemplateRuns {
     });
   }
 
-  begin(scope: Scope, workspaceId: string, key: string, request: RunRequest, executorAvailable: boolean) {
+  begin(scope: Scope, key: string, request: RunRequest, executorAvailable: boolean) {
     const requestHash = digest(canonical(request));
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
-      await assertWorkspace(tx, scope, workspaceId);
-      await lock(tx, canonical(['ai-template', scope.userId, workspaceId.toLowerCase(), key]));
+
+      await lock(tx, canonical(['ai-template', scope.userId, key]));
       const { rows: [previous] } = await tx.query<RunRow>(
-        `SELECT ${fields} FROM ai_template_runs WHERE user_id=$1 AND workspace_id=$2 AND idempotency_key=$3`,
-        [scope.userId, workspaceId, key],
+        `SELECT ${fields} FROM ai_template_runs WHERE user_id=$1 AND idempotency_key=$2`,
+        [scope.userId, key],
       );
       if (previous) {
         if (previous.request_hash !== requestHash) throw new DomainError(409, 'IDEMPOTENCY_CONFLICT');
-        if (previous.content_asset_id) await readSource(tx, scope.userId, workspaceId, previous.content_asset_id);
+        if (previous.content_asset_id) await readSource(tx, scope.userId, previous.content_asset_id);
         return { run: await expireRun(tx, previous) };
       }
 
@@ -108,7 +101,7 @@ export class AiTemplateRuns {
       let sourceTitle = '';
       let text: string;
       if (request.sceneKey === 'content_asset_outline') {
-        const source = await readSource(tx, scope.userId, workspaceId, request.input.contentAssetId, true);
+        const source = await readSource(tx, scope.userId, request.input.contentAssetId, true);
         assertSourceRevision(source, request.input.sourceRevision);
         contentAssetId = request.input.contentAssetId;
         sourceRevision = source.part_revision_id;
@@ -125,22 +118,22 @@ export class AiTemplateRuns {
         throw new DomainError(400, 'AI_TEMPLATE_PROMPT_INVALID');
       }
       const { rows: [run] } = await tx.query<RunRow>(
-        `INSERT INTO ai_template_runs (id, user_id, workspace_id, scene_key, item_key, template_version,
+        `INSERT INTO ai_template_runs (id, user_id, scene_key, item_key, template_version,
           content_asset_id, source_revision, idempotency_key, request_hash, trace_id, deadline_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp()+$12*interval '1 millisecond')
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp()+$11*interval '1 millisecond')
          RETURNING ${fields}`,
-        [randomUUID(), scope.userId, workspaceId, request.sceneKey, template.itemKey, revision,
+        [randomUUID(), scope.userId, request.sceneKey, template.itemKey, revision,
           contentAssetId, sourceRevision, key, requestHash, scope.traceId, RunTimeoutMs + 5_000],
       );
       return { run: run!, input: { prompt, text } };
     });
   }
 
-  complete(scope: Scope, workspaceId: string, run: RunRow, text: string, signal: AbortSignal) {
+  complete(scope: Scope, run: RunRow, text: string, signal: AbortSignal) {
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
-      await assertWorkspace(tx, scope, workspaceId);
-      if (run.content_asset_id) assertSourceRevision(await readSource(tx, scope.userId, workspaceId, run.content_asset_id), run.source_revision!);
+
+      if (run.content_asset_id) assertSourceRevision(await readSource(tx, scope.userId, run.content_asset_id), run.source_revision!);
       signal.throwIfAborted();
       const { rows: [row] } = await tx.query<RunRow>(
         `UPDATE ai_template_runs SET state='succeeded', result_text=$2, finished_at=clock_timestamp()
@@ -155,30 +148,30 @@ export class AiTemplateRuns {
     await transaction(this.pool, tx => writeFailure(tx, runId, error));
   }
 
-  get(scope: Scope, workspaceId: string, runId: string) {
+  get(scope: Scope, runId: string) {
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
-      await assertWorkspace(tx, scope, workspaceId);
+
       const { rows: [row] } = await tx.query<RunRow>(
-        `SELECT ${fields} FROM ai_template_runs WHERE id=$1 AND workspace_id=$2 AND user_id=$3`,
-        [runId, workspaceId, scope.userId],
+        `SELECT ${fields} FROM ai_template_runs WHERE id=$1 AND user_id=$2`,
+        [runId, scope.userId],
       );
       if (!row) throw new DomainError(404, 'AI_TEMPLATE_RUN_NOT_FOUND');
-      if (row.content_asset_id) await readSource(tx, scope.userId, workspaceId, row.content_asset_id);
+      if (row.content_asset_id) await readSource(tx, scope.userId, row.content_asset_id);
       return expireRun(tx, row);
     });
   }
 
-  outlineResults(scope: Scope, workspaceId: string, contentAssetId: string) {
+  outlineResults(scope: Scope, contentAssetId: string) {
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
-      await assertWorkspace(tx, scope, workspaceId);
-      const source = await readSource(tx, scope.userId, workspaceId, contentAssetId);
+
+      const source = await readSource(tx, scope.userId, contentAssetId);
       const { rows } = await tx.query<{ id: string; item_key: string; template_version: number; finished_at: Date }>(
         `SELECT DISTINCT ON (item_key) id, item_key, template_version, finished_at FROM ai_template_runs
-         WHERE workspace_id=$1 AND content_asset_id=$2 AND source_revision=$3 AND user_id=$4
+         WHERE content_asset_id=$1 AND source_revision=$2 AND user_id=$3
            AND scene_key='content_asset_outline' AND state='succeeded'
-         ORDER BY item_key, finished_at DESC, id DESC`, [workspaceId, contentAssetId, source.part_revision_id, scope.userId],
+         ORDER BY item_key, finished_at DESC, id DESC`, [contentAssetId, source.part_revision_id, scope.userId],
       );
       return {
         contentAssetId,

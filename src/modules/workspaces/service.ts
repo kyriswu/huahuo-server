@@ -51,7 +51,7 @@ export class WorkspaceService {
  });}
  list(scope:Scope){return this.read(scope,async tx=>({items:(await tx.query<WorkspaceRow>('SELECT * FROM workspaces WHERE user_id=$1 ORDER BY created_at,id',[scope.userId])).rows.map(workspaceDto)}));}
  detail(scope:Scope,id:string){return this.read(scope,async tx=>{
-  const w=await workspace(tx,scope,id);const current=(await tx.query<{next_cursor:string}>('SELECT next_cursor FROM workspace_content_state WHERE workspace_id=$1',[id])).rows[0];
+  const w=await workspace(tx,scope,id);const current=(await tx.query<{next_cursor:string}>('SELECT next_cursor FROM account_content_state WHERE user_id=$1',[scope.userId])).rows[0];
   return {...workspaceDto(w),bootstrapReceiptId:w.bootstrap_receipt_id,bootstrapContentCursor:'0',contentCursor:String(current?.next_cursor??0)};
  });}
  create(scope:Scope,input:{displayName:string;setAsDefault:boolean},key:string){return this.write(scope,'workspace.create',key,input,async tx=>{

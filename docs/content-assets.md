@@ -7,13 +7,13 @@
 | 资产身份与归属 | PostgreSQL 的 `content_assets.content_asset_id` 和 `user_id`。API 使用 `contentAssetId` 和 `contentAssetRevisionId`。 |
 | 正文 | `content_asset_parts` 保存各部分的当前内容。常用部分为 `raw`、`outline`、`germination`。正文部分的修订使用 `partRevisionId`。 |
 | 文件与录音原件 | `Resource`，表为 `resources`，API 使用 `resourceId`。`content_asset_resource_refs` 建立资产与原文件的引用。 |
-| 可见范围与整理 | `content_asset_workspaces` 表示工作区可见关系，`content_asset_folders` 表示文件夹位置。`folderId` 是按当前工作区返回的关系投影。 |
-| 标签与关系 | `content_asset_tags` 建立资产与标签的关联。`content_asset_relations` 保存资产间的显式关系。 |
+| 可见范围与整理 | 按登录账号读取资产。`content_asset_folders` 表示文件夹位置，`folderId` 是关系投影。 |
+| 标签与关系 | `content_asset_tags` 建立资产与标签的关联。`content_asset_relations` 保存资产间的显式关系。「我的标签」是 App 本机的最近使用记录。 |
 | 来源 | 资产的 `sourceKind`、`sourceRef` 描述来源。索引的 `source_type` 指定原始记录类别，取值为 `content_asset`、`file`、`text`。 |
 
 ## 写入入口
 
-- `/api/v1/workspaces/{workspaceId}/content-assets` 管理资产，`content-asset-imports` 导入可编辑纯文本或 Markdown 并创建资产。详情返回正文和资源引用，列表返回元信息和预览。 [接口对照](contract-compatibility.md)
+- `/api/v1/content-assets` 管理资产，`content-asset-imports` 导入可编辑纯文本或 Markdown 并创建资产。详情返回正文和资源引用，列表返回元信息和预览。 [接口对照](contract-compatibility.md)
 - 通用上传完成后交付可供业务认领的 `resourceId`。资产可引用录音、PDF 或其他原文件。 [上传与资源](runbooks/user-storage-layout.md)
 - `/api/v1/rag/ingestions` 和 `/api/v1/text-ingestions` 当前分别保存独立的文件解析记录和文本导入记录，用于各自的状态与检索。形成可管理的资产时，由业务调用资产写入入口。 [文件入库](runbooks/rag-url-ingestion.md) · [文本入库](runbooks/text-ingestion.md)
 

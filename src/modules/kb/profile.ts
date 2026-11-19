@@ -28,6 +28,10 @@ export function snapshotForSource(config:AppConfig,sourceType:KbSourceType,forma
   snapshot.target={...target,collection:target.collection+'_sparse_v1'};
   snapshot.configHash=indexIdentityHash(snapshot);
  }
+ if(sourceType==='content_asset'){
+  snapshot.accountScope=true;
+  snapshot.target={...snapshot.target,collection:snapshot.target.collection+'_account_v1'};
+ }
  return snapshot;
 }
 function indexIdentityHash(snapshot:KbSnapshot):string {
@@ -67,7 +71,7 @@ export function knowledgeIndex(config:AppConfig,snapshot:KbSnapshot,providers?:I
   },
   hybrid:binding=>{
    if(binding.connectionId!==connectionId(config))throw new Error('KB_TARGET_CHANGED');
-   return createMilvusHybridIndex({...config.milvus,database:binding.namespace!,collection:binding.index,dictionary,maxContentChars:snapshot.rules.maxChars,dimensions:snapshot.embedding?.dimensions});
+   return createMilvusHybridIndex({...config.milvus,database:binding.namespace!,collection:binding.index,dictionary,accountScope:snapshot.accountScope===true,maxContentChars:snapshot.rules.maxChars,dimensions:snapshot.embedding?.dimensions});
   },
  };
  return createSearchIndex(snapshot.mode,{

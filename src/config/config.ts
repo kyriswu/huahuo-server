@@ -187,6 +187,9 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     documentCollection: env.KB_DOCUMENT_KEYWORD_COLLECTION?.trim() || 'huahuo_kb_keyword_chunks',
   };
   if(kb.contentAssetCollection===kb.documentCollection||![kb.contentAssetCollection,kb.documentCollection].every(v=>/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(v)))fail('KB_COLLECTIONS');
+  const assetIndexName=kb.contentAssetCollection+(indexLayout==='sparse-v1'?'_sparse_v1':'')+'_account_v1';
+  const documentIndexName=kb.documentCollection+(indexLayout==='sparse-v1'?'_sparse_v1':'');
+  if(assetIndexName.length>255||assetIndexName===documentIndexName)fail('KB_COLLECTIONS');
   if(indexLayout==='sparse-v1'&&[kb.contentAssetCollection,kb.documentCollection].some(name=>name.length>245||name.endsWith('_sparse_v1')))fail('KB_COLLECTIONS');
   const maxUploadBytes=100*1024*1024;
   const uploadHardMaxBytes=integer('HTTP_UPLOAD_HARD_MAX_BYTES',2*1024*1024*1024,100*1024*1024,2*1024*1024*1024);

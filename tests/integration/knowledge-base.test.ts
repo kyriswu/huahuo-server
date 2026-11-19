@@ -55,10 +55,11 @@ const queries=new RagQueryService(pool,config,{index:factory,embedding:{model:'q
 const assets=new ContentAssetService(pool,config.appTokenSecret!,config,queries);
 const imageConfig=mockOssUploadConfig(config),imageAssets=new ContentAssetService(pool,imageConfig.appTokenSecret!,imageConfig,queries);
 const indexing=new ContentAssetIndexService(pool,config),jobs=new ContentAssetIndexJobs(wp,workerConfig,deps),engine=new TaskEngine(wp,120000);
-async function fixture(){const userId=await insertFixtureUser(root),sessionId=randomUUID(),workspaceId=randomUUID();const bearer=await insertFixtureSession(root,userId,sessionId);await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'KB',true,$3)",[workspaceId,userId,randomUUID()]);return {bearer,workspaceId,scope:{userId,sessionId,traceId:randomUUID()}};}
+async function fixture(withWorkspace=true){const userId=await insertFixtureUser(root),sessionId=randomUUID(),workspaceId=randomUUID();const bearer=await insertFixtureSession(root,userId,sessionId);if(withWorkspace)await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'KB',true,$3)",[workspaceId,userId,randomUUID()]);return {bearer,workspaceId,scope:{userId,sessionId,traceId:randomUUID()}};}
 async function latest(id:string){return (await root.query<KbBuild>(`SELECT * FROM kb_content_asset_hybrid_builds WHERE source_id=$1 AND source_revision=(SELECT part_revision_id::text FROM content_asset_parts WHERE content_asset_id=$1 AND part='raw' ORDER BY revision DESC LIMIT 1) ORDER BY created_at DESC LIMIT 1`,[id])).rows[0]!;}
-async function runContentAsset(id:string,indexer=jobs){const b=await latest(id);const a=await vi.waitFor(async()=>{const claim=await engine.claim(b.task_id,randomUUID());expect(claim).toBeTruthy();return claim!;},{interval:20,timeout:3000});const r=await indexer.execute(a);expect(await engine.finish(a,r.digest,r.bytes)).toBe(true);return b;}
-async function create(body='PostgreSQL 数据库支持 MVCC 和 B-tree 索引。'){const f=await fixture();const contentAsset=await assets.createContentAsset(f.scope,f.workspaceId,{title:'KB fixture',parts:{raw:body}},randomUUID());return {...f,contentAsset};}
+async function runContentAsset(id:string,indexer=jobs){return runBuild(await latest(id),indexer);}
+async function runBuild(b:KbBuild,indexer:ContentAssetIndexJobs){const a=await vi.waitFor(async()=>{const claim=await engine.claim(b.task_id,randomUUID());expect(claim).toBeTruthy();return claim!;},{interval:20,timeout:3000});const r=await indexer.execute(a);expect(await engine.finish(a,r.digest,r.bytes)).toBe(true);return b;}
+async function create(body='PostgreSQL 数据库支持 MVCC 和 B-tree 索引。'){const f=await fixture(false);const contentAsset=await assets.createContentAsset(f.scope,{title:'KB fixture',parts:{raw:body}},randomUUID());return {...f,contentAsset};}
 beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:url}));await root.query(`UPDATE runtime_configuration SET "values"="values"||'{"features.contentAssetIndexing":true,"rag.embeddingBatchSize":2,"rag.embeddingMaxRetries":0}'::jsonb,revision=revision+1`);});
 afterAll(async()=>{await queries.close();await root.query(`UPDATE runtime_configuration SET "values"="values"-'features.contentAssetIndexing'-'rag.embeddingBatchSize'-'rag.embeddingMaxRetries',revision=revision+1`);await Promise.all([pool.end(),wp.end(),root.end()]);await rm(temp,{recursive:true,force:true});});
 describe('two-mode knowledge indexing with real dependencies and deterministic model',()=>{
@@ -87,9 +88,9 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   const f=await fixture(),a=randomUUID(),b=randomUUID();
   for(const id of [a,b])await root.query(`INSERT INTO resources(resource_id,user_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
    VALUES($1,$2,'fixture.png','image/png',1,$3,$1,'fixture','aliyun-oss',$4,'ready')`,[id,f.scope.userId,'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
-  const first=await imageAssets.createContentAsset(f.scope,f.workspaceId,{title:'A',parts:{raw:`imageselect ![A](asset://${a})`}},randomUUID());
+  const first=await imageAssets.createContentAsset(f.scope,{title:'A',parts:{raw:`imageselect ![A](asset://${a})`}},randomUUID());
   const inputBody=`imageselect ![B](asset://${b}) ![repeat](asset://${b})`;
-  const second=await imageAssets.createContentAsset(f.scope,f.workspaceId,{title:'B',parts:{raw:inputBody}},randomUUID());
+  const second=await imageAssets.createContentAsset(f.scope,{title:'B',parts:{raw:inputBody}},randomUUID());
   const body=second.parts.raw!.contentMarkdown;
   expect(body).toContain('<KBIMAGE');expect(body).not.toContain('![');
   await runContentAsset(first.contentAssetId);await runContentAsset(second.contentAssetId);
@@ -104,7 +105,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(ids.results[0]).toMatchObject({documentKey:second.contentAssetId,content:body,evidence:{child:body},images:[{resourceId:b},{resourceId:b}]});
    expect(resolveImages).not.toHaveBeenCalled();expect(ids.results[0]).not.toHaveProperty('displayMarkdown');
    const links=await q.query(f.scope,{query:'imageselect',mode:'hybrid',topK:1,assetMode:'links'});
-   expect(resolveImages).toHaveBeenCalledTimes(1);expect(resolveImages.mock.calls[0]![1]).toMatchObject([{sourceId:second.contentAssetId,resourceId:b,workspaceId:f.workspaceId}]);
+   expect(resolveImages).toHaveBeenCalledTimes(1);expect(resolveImages.mock.calls[0]![1]).toMatchObject([{sourceId:second.contentAssetId,resourceId:b}]);
    expect(resolveImages.mock.calls[0]![1]).toHaveLength(1);
    expect(links.results[0]).toMatchObject({content:body,evidence:{child:body},sourceStart:0,sourceEnd:body.length});
    expect(links.results[0]!.displayMarkdown).toContain(`https://preview.test/${b}`);
@@ -116,10 +117,10 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   const f=await fixture(),id=randomUUID();
   await root.query(`INSERT INTO resources(resource_id,user_id,file_name,mime_type,size_bytes,sha256,object_key,object_version,storage_driver,storage_bucket,status)
    VALUES($1,$2,'fixture.png','image/png',1,$3,$1,'fixture','aliyun-oss',$4,'ready')`,[id,f.scope.userId,'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
-  const contentAsset=await imageAssets.createContentAsset(f.scope,f.workspaceId,{title:'删除竞态',parts:{raw:`imagedelete ![图](asset://${id})`}},randomUUID());await runContentAsset(contentAsset.contentAssetId);
+  const contentAsset=await imageAssets.createContentAsset(f.scope,{title:'删除竞态',parts:{raw:`imagedelete ![图](asset://${id})`}},randomUUID());await runContentAsset(contentAsset.contentAssetId);
   const resolveImages=vi.fn(async()=>new Map());
   const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async texts=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(texts)},resolveImages,
-   rerank:{rerank:async(_query,candidates)=>{await imageAssets.deleteContentAsset(f.scope,f.workspaceId,contentAsset.contentAssetId,contentAsset.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
+   rerank:{rerank:async(_query,candidates)=>{await imageAssets.deleteContentAsset(f.scope,contentAsset.contentAssetId,contentAsset.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
   try{expect((await q.query(f.scope,{query:'imagedelete',mode:'hybrid',assetMode:'links',documentKey:contentAsset.contentAssetId})).results).toEqual([]);expect(resolveImages).not.toHaveBeenCalled();}finally{await q.close();}
  });
  it('associates OCR-only chunks with their whole KBIMAGE without parsing input Markdown at query time',async()=>{
@@ -128,7 +129,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    VALUES($1,$2,'fixture.png','image/png',1,$3,$1,'fixture','aliyun-oss',$4,'ready')`,[id,f.scope.userId,'a'.repeat(64),imageConfig.storageAliyunOss!.bucket]);
   const tag=`<KBIMAGE uuid="${id}" page="1"><![CDATA[${'crossimage '.repeat(150)}]]></KBIMAGE>`;
   const body=`正文\n\n${tag}\n\n尾部`,start=body.indexOf('<KBIMAGE'),end=start+tag.length;
-  const contentAsset=await imageAssets.createContentAsset(f.scope,f.workspaceId,{title:'OCR范围',parts:{raw:body}},randomUUID());await runContentAsset(contentAsset.contentAssetId);
+  const contentAsset=await imageAssets.createContentAsset(f.scope,{title:'OCR范围',parts:{raw:body}},randomUUID());await runContentAsset(contentAsset.contentAssetId);
   const resolveImages=vi.fn(async(_scope:unknown,images:RagImageRequest[])=>new Map(images.map(image=>[ragImageKey(image),{url:`https://preview.test/${image.resourceId}`,expiresAt:'2099-01-01T00:00:00.000Z'}])));
   const q=new RagQueryService(pool,config,{index:factory,resolveImages});
   const parseInput=vi.spyOn(markdownInput,'inputImages').mockImplementation(()=>{throw new Error('QUERY_MUST_NOT_PARSE_INPUT_MARKDOWN');});
@@ -157,7 +158,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  it('automatically indexes real content asset raw content and serves all recall modes through only the content asset collection',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);const before=targets.length;
   for(const mode of ['keyword','dense','hybrid'] as const){const r=await queries.query(f.scope,{query:'MVCC',mode,documentKey:f.contentAsset.contentAssetId});expect(r.results.length).toBeGreaterThan(0);expect(r.results[0]).toMatchObject({documentKey:f.contentAsset.contentAssetId,part:'raw',partRevisionId:f.contentAsset.parts.raw!.partRevisionId,revisionId:f.contentAsset.contentAssetRevisionId});}
-  expect(new Set(targets.slice(before))).toEqual(new Set([config.kb.contentAssetCollection]));
+  expect(new Set(targets.slice(before))).toEqual(new Set([snapshotForSource(config,'content_asset','markdown').target.collection]));
   expect((await root.query('SELECT * FROM kb_content_asset_hybrid_chunks WHERE build_id=$1',[(await latest(f.contentAsset.contentAssetId)).id])).rows.every(r=>r.index_status==='ready')).toBe(true);
  });
  it.each(['数据库','MVCC','B-tree 索引'])('recalls Chinese/English/mixed BM25 %s without any model calls',async query=>{
@@ -166,18 +167,18 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   try{expect((await q.query(f.scope,{query,mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);expect(embed).not.toHaveBeenCalled();}finally{await q.close();}
  });
  it('uses the App search part/revision identity and preserves permission filters',async()=>{
-  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);const r=await assets.search(f.scope,f.workspaceId,{query:'MVCC',mode:'hybrid'});
+  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);const r=await assets.search(f.scope,{query:'MVCC',mode:'hybrid'});
   expect(r.results[0]).toMatchObject({part:'raw',revisionId:f.contentAsset.contentAssetRevisionId,ownerRef:{id:f.contentAsset.contentAssetId}});
-  const read=await assets.contentAssetPart(f.scope,f.workspaceId,f.contentAsset.contentAssetId,r.results[0]!.part);expect(read.partRevisionId).toBe(f.contentAsset.parts.raw!.partRevisionId);
-  const other=await fixture();await expect(assets.search(other.scope,f.workspaceId,{query:'MVCC'})).rejects.toThrow();
+  const read=await assets.contentAssetPart(f.scope,f.contentAsset.contentAssetId,r.results[0]!.part);expect(read.partRevisionId).toBe(f.contentAsset.parts.raw!.partRevisionId);
+  const other=await fixture();expect((await assets.search(other.scope,{query:'MVCC'})).results).toEqual([]);
   expect((await queries.query(other.scope,{query:'MVCC',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);
-  const folder=await assets.createFolder(f.scope,f.workspaceId,{displayName:'Search placement'},randomUUID());
-  await assets.updateContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,{folderId:folder.folderId},f.contentAsset.etag,randomUUID());
-  const filtered=()=>assets.search(f.scope,f.workspaceId,{query:'MVCC',folderIds:[folder.folderId]});
+  const folder=await assets.createFolder(f.scope,{displayName:'Search placement'},randomUUID());
+  await assets.updateContentAsset(f.scope,f.contentAsset.contentAssetId,{folderId:folder.folderId},f.contentAsset.etag,randomUUID());
+  const filtered=()=>assets.search(f.scope,{query:'MVCC',folderIds:[folder.folderId]});
   expect((await filtered()).results.map(hit=>hit.ownerRef.id)).toEqual([f.contentAsset.contentAssetId]);
-  await assets.deleteFolder(f.scope,f.workspaceId,folder.folderId,folder.etag,randomUUID());
+  await assets.deleteFolder(f.scope,folder.folderId,folder.etag,randomUUID());
   expect((await filtered()).results).toEqual([]);
-  expect((await assets.search(f.scope,f.workspaceId,{query:'MVCC'})).results.map(hit=>hit.ownerRef.id)).toEqual([f.contentAsset.contentAssetId]);
+  expect((await assets.search(f.scope,{query:'MVCC'})).results.map(hit=>hit.ownerRef.id)).toEqual([f.contentAsset.contentAssetId]);
  });
  it('requires trusted user/session scope and rejects retired credentials for the Agent contract',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);
@@ -187,18 +188,18 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    for(const headers of [{},{authorization:'Bearer '+f.bearer},{'x-huahuo-service-key':'retired-service-key'}])expect((await api.inject({method:'POST',url:'/internal/v1/rag/query',headers,payload})).statusCode).toBe(401);
    const r=await api.inject({method:'POST',url:'/internal/v1/rag/query',headers:fixtureScopeHeaders(f.bearer),payload});
    expect(r.statusCode,r.body).toBe(200);expect(r.json().data.results.some((r:{documentKey:string})=>r.documentKey===f.contentAsset.contentAssetId)).toBe(true);
-   const detail=await api.inject({method:'GET',url:`/api/v1/workspaces/${f.workspaceId}/content-assets/${f.contentAsset.contentAssetId}?revisionId=${f.contentAsset.contentAssetRevisionId}`,headers:{...fixtureScopeHeaders(f.bearer)}});
+   const detail=await api.inject({method:'GET',url:`/api/v1/content-assets/${f.contentAsset.contentAssetId}?revisionId=${f.contentAsset.contentAssetRevisionId}`,headers:{...fixtureScopeHeaders(f.bearer)}});
    expect(detail.statusCode,detail.body).toBe(200);expect(detail.json().data.contentAssetRevisionId).toBe(f.contentAsset.contentAssetRevisionId);
-   const part=await api.inject({method:'GET',url:`/api/v1/workspaces/${f.workspaceId}/content-assets/${f.contentAsset.contentAssetId}/parts/raw`,headers:{...fixtureScopeHeaders(f.bearer)}});
+   const part=await api.inject({method:'GET',url:`/api/v1/content-assets/${f.contentAsset.contentAssetId}/parts/raw`,headers:{...fixtureScopeHeaders(f.bearer)}});
    expect(part.statusCode,part.body).toBe(200);expect(part.json().data.partRevisionId).toBe(f.contentAsset.parts.raw!.partRevisionId);
-   const wrong=await api.inject({method:'GET',url:`/api/v1/workspaces/${f.workspaceId}/content-assets/${f.contentAsset.contentAssetId}?revisionId=${randomUUID()}`,headers:{...fixtureScopeHeaders(f.bearer)}});expect(wrong.statusCode).toBe(409);
+   const wrong=await api.inject({method:'GET',url:`/api/v1/content-assets/${f.contentAsset.contentAssetId}?revisionId=${randomUUID()}`,headers:{...fixtureScopeHeaders(f.bearer)}});expect(wrong.statusCode).toBe(409);
 
   }finally{await api.close();}
  });
  it('reuses unchanged physical points on local edit, hides invalid revision immediately, and retires old-only points',async()=>{
   const original='# Stable\n'+('stable MVCC 文本。'.repeat(30))+'\n\n# Edit\nchange A';const f=await create(original);const old=await runContentAsset(f.contentAsset.contentAssetId);
   const oldIds=(await root.query('SELECT point_id FROM kb_content_asset_hybrid_chunks WHERE build_id=$1',[old.id])).rows.map(r=>r.point_id);
-  const changed=await assets.updateContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,{parts:{raw:original.replace('change A','change B')}},f.contentAsset.etag,randomUUID());
+  const changed=await assets.updateContentAsset(f.scope,f.contentAsset.contentAssetId,{parts:{raw:original.replace('change A','change B')}},f.contentAsset.etag,randomUUID());
   expect((await queries.query(f.scope,{query:'MVCC',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);
   const next=await runContentAsset(f.contentAsset.contentAssetId);const newIds=(await root.query('SELECT point_id FROM kb_content_asset_hybrid_chunks WHERE build_id=$1',[next.id])).rows.map(r=>r.point_id);
   expect(newIds.some(id=>oldIds.includes(id))).toBe(true);expect(newIds.some(id=>!oldIds.includes(id))).toBe(true);
@@ -214,7 +215,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    '# Remove\n\nretiredsection material\n\n','# Last\n\nanchoromega durable text'];
   const original=sections.join('');
   const f=await fixture();
-  const created=await assetService.createContentAsset(f.scope,f.workspaceId,{title:'Diff',parts:{raw:original}},randomUUID());
+  const created=await assetService.createContentAsset(f.scope,{title:'Diff',parts:{raw:original}},randomUUID());
   const assetId=created.contentAssetId;
   const embedded:string[]=[];
   const indexer=new ContentAssetIndexJobs(wp,workerSettings,{index:scopedFactory,embedding:snapshot=>{
@@ -244,7 +245,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
 
    embedded.length=0;
    const edited=original.replace('revisionold','revisionnew');
-   const update=await assetService.updateContentAsset(f.scope,f.workspaceId,assetId,{parts:{raw:edited}},created.etag,randomUUID());
+   const update=await assetService.updateContentAsset(f.scope,assetId,{parts:{raw:edited}},created.etag,randomUUID());
    const editedIds=await pointIds((await runContentAsset(assetId,indexer)).id);
    expect(embedded).toEqual([expect.stringContaining('revisionnew')]);
    expect(editedIds).toHaveLength(4);
@@ -253,7 +254,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    expect(await present([...new Set([...initialIds,...editedIds])])).toEqual([...editedIds].sort());
 
    embedded.length=0;
-   await assetService.updateContentAsset(f.scope,f.workspaceId,assetId,{parts:{raw:edited.replace(sections[2]!,'')}},update.etag,randomUUID());
+   await assetService.updateContentAsset(f.scope,assetId,{parts:{raw:edited.replace(sections[2]!,'')}},update.etag,randomUUID());
    const remainingIds=await pointIds((await runContentAsset(assetId,indexer)).id);
    expect(remainingIds).toEqual(editedIds.filter((_id,ordinal)=>ordinal!==2));
    expect(embedded).toHaveLength(0);
@@ -263,7 +264,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  it('deduplicates repeated source intent and never publishes a late task',async()=>{
   const f=await create('first revision');const first=await latest(f.contentAsset.contentAssetId);
   await transactionForSchedule(f);expect((await latest(f.contentAsset.contentAssetId)).id).toBe(first.id);
-  const a=await engine.claim(first.task_id,randomUUID());await assets.updateContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,{parts:{raw:'second revision'}},f.contentAsset.etag,randomUUID());
+  const a=await engine.claim(first.task_id,randomUUID());await assets.updateContentAsset(f.scope,f.contentAsset.contentAssetId,{parts:{raw:'second revision'}},f.contentAsset.etag,randomUUID());
   await expect(jobs.execute(a!)).rejects.toThrow('KB_SOURCE_SUPERSEDED');await runContentAsset(f.contentAsset.contentAssetId);
   expect((await queries.query(f.scope,{query:'second',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);
  });
@@ -274,7 +275,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   try{await expect(flaky.executeBuild(b.id,a!,'content_asset')).rejects.toThrow();expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);await jobs.execute(a!);expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);}finally{await real.close();}
  });
  it('deletion filters in-flight and future hits and cleanup protects no deleted points',async()=>{
-  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,f.contentAsset.etag,randomUUID());
+  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.contentAsset.contentAssetId,f.contentAsset.etag,randomUUID());
   expect((await queries.query(f.scope,{query:'MVCC',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);
   const task=(await root.query("SELECT * FROM tasks WHERE user_id=$1 AND kind='kb.content-asset-cleanup' ORDER BY created_at DESC LIMIT 1",[f.scope.userId])).rows[0];
   const a=await engine.claim(task.id,randomUUID());await jobs.executeCleanup(a!);
@@ -383,23 +384,23 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   }finally{await pipeline.close();}
  });
  it('restores a deleted content asset by recreating missing points rather than trusting retired metadata',async()=>{
-  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,f.contentAsset.etag,randomUUID());
+  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.contentAsset.contentAssetId,f.contentAsset.etag,randomUUID());
   const t=(await root.query("SELECT id FROM tasks WHERE user_id=$1 AND kind='kb.content-asset-cleanup'",[f.scope.userId])).rows[0];
   // claim can legitimately return null until the persisted available_at is due;
   // use the same bounded readiness check as runContentAsset instead of a non-null cast.
   const a=await vi.waitFor(async()=>{const claim=await engine.claim(t.id,randomUUID());expect(claim).toBeTruthy();return claim!;},{interval:20,timeout:3000});
   await jobs.executeCleanup(a);
-  const deleted=await assets.getContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,deleted.etag,randomUUID(),true);await runContentAsset(f.contentAsset.contentAssetId);
+  const deleted=await assets.getContentAsset(f.scope,f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.contentAsset.contentAssetId,deleted.etag,randomUUID(),true);await runContentAsset(f.contentAsset.contentAssetId);
   expect((await queries.query(f.scope,{query:'MVCC',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);
  });
  it('clears an empty edited body from recall immediately and schedules accurate point cleanup',async()=>{
-  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.updateContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,{parts:{raw:'  \n'}},f.contentAsset.etag,randomUUID());
+  const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.updateContentAsset(f.scope,f.contentAsset.contentAssetId,{parts:{raw:'  \n'}},f.contentAsset.etag,randomUUID());
   expect((await queries.query(f.scope,{query:'MVCC',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);
   const t=(await root.query("SELECT id FROM tasks WHERE user_id=$1 AND kind='kb.content-asset-cleanup'",[f.scope.userId])).rows[0];expect(t).toBeTruthy();const a=await engine.claim(t.id,randomUUID());await jobs.executeCleanup(a!);
  });
  it('rechecks current revision after rerank so an in-flight hit cannot reveal superseded content',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);
-  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async t=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(t)},rerank:{rerank:async(_q,candidates)=>{await assets.updateContentAsset(f.scope,f.workspaceId,f.contentAsset.contentAssetId,{parts:{raw:'entirely replaced'}},f.contentAsset.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
+  const q=new RagQueryService(pool,config,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:async t=>kbEmbedding(config,snapshotForSource(config,'content_asset','markdown')).embed(t)},rerank:{rerank:async(_q,candidates)=>{await assets.updateContentAsset(f.scope,f.contentAsset.contentAssetId,{parts:{raw:'entirely replaced'}},f.contentAsset.etag,randomUUID());return candidates.map(c=>({...c,rerankScore:1}));}}});
   try{expect((await q.query(f.scope,{query:'MVCC',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);}finally{await q.close();}
  });
  it('recovers a remote success before PG acknowledgement with the same IDs and fenced lease',async()=>{
@@ -414,7 +415,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it('does not let an old task publish or overwrite a replacement build with the same body revision',async()=>{
   const f=await create();const b=await latest(f.contentAsset.contentAssetId);const a=await engine.claim(b.task_id,randomUUID());const taskId=randomUUID(),inputId=randomUUID();let replaced=false;
-  const runner=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:snapshot=>{const real=requireIndexKind(factory(snapshot),'hybrid');return {kind:'hybrid',ensureReady:()=>real.ensureReady(),upsert:async rows=>{await real.upsert(rows);if(!replaced){replaced=true;await root.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,f.scope.userId,f.workspaceId,JSON.stringify({buildId:b.id})]);await root.query("INSERT INTO tasks(trace_id,id,user_id,workspace_id,kind,queue,input_id,state) VALUES(gen_random_uuid()::text,$1,$2,$3,'kb.content-asset-index','content',$4,'queued')",[taskId,f.scope.userId,f.workspaceId,inputId]);await root.query('UPDATE kb_content_asset_hybrid_builds SET task_id=$2 WHERE id=$1',[b.id,taskId]);}},search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:()=>real.close()};}});
+  const runner=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:snapshot=>{const real=requireIndexKind(factory(snapshot),'hybrid');return {kind:'hybrid',ensureReady:()=>real.ensureReady(),upsert:async rows=>{await real.upsert(rows);if(!replaced){replaced=true;await root.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',[inputId,f.scope.userId,JSON.stringify({buildId:b.id})]);await root.query("INSERT INTO tasks(trace_id,id,user_id,kind,queue,input_id,state) VALUES(gen_random_uuid()::text,$1,$2,'kb.content-asset-index','content',$3,'queued')",[taskId,f.scope.userId,inputId]);await root.query('UPDATE kb_content_asset_hybrid_builds SET task_id=$2 WHERE id=$1',[b.id,taskId]);}},search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:()=>real.close()};}});
   await expect(runner.executeBuild(b.id,a!,'content_asset')).rejects.toThrow('KB_SOURCE_SUPERSEDED');
   const current=(await root.query('SELECT task_id,status,published FROM kb_content_asset_hybrid_builds WHERE id=$1',[b.id])).rows[0];expect(current).toEqual({task_id:taskId,status:'indexing',published:false});
   await runContentAsset(f.contentAsset.contentAssetId);expect((await queries.query(f.scope,{query:'MVCC',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);
@@ -431,12 +432,14 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   const settings={...config,kb:{...config.kb,indexLayout:'sparse-v1' as const}};
   const workerSettings={...workerConfig,kb:{...workerConfig.kb,indexLayout:'sparse-v1' as const}};
   const tx=await pool.connect();
+  let scheduled:KbBuild|undefined;
   try{
    await tx.query('BEGIN');
-   await new ContentAssetIndexService(pool,settings).schedule(tx,f.scope,f.workspaceId,assetId);
+   scheduled=await new ContentAssetIndexService(pool,settings).schedule(tx,f.scope,assetId);
    await tx.query('COMMIT');
   }catch(error){await tx.query('ROLLBACK');throw error;}finally{tx.release();}
-  const rebuilt=await runContentAsset(assetId,new ContentAssetIndexJobs(wp,workerSettings));
+  expect(scheduled?.id).not.toBe(legacy.id);
+  const rebuilt=await runBuild(scheduled!,new ContentAssetIndexJobs(wp,workerSettings));
   expect(rebuilt.source_revision).toBe(legacy.source_revision);
   expect(rebuilt.config_hash).not.toBe(legacy.config_hash);
   const pointFor=async (buildId:string)=>(await root.query<{point_id:string}>(
@@ -493,7 +496,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    const extra=process.env.TEST_SEARCH_BENCHMARK==='true'?Array.from({length:5},(_,i)=>Array.from({length:42},(_,j)=>
     `# Part ${i} ${j}\n\n${distractors[(i+j)%distractors.length]!.repeat(7)}`).join('\n\n')):[];
    for(const body of [...samples.map(sample=>sample.body),...distractors,...extra]){
-    const asset=await sourceAssets.createContentAsset(f.scope,f.workspaceId,{title:'Search comparison',parts:{raw:body}},randomUUID());
+    const asset=await sourceAssets.createContentAsset(f.scope,{title:'Search comparison',parts:{raw:body}},randomUUID());
     await runContentAsset(asset.contentAssetId,buildJobs);
     ids.push(asset.contentAssetId);
    }
@@ -511,7 +514,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    for(const sourceType of ['content_asset','file'] as const){
     const snapshot=snapshotForSource(sparse.settings,sourceType,'markdown');
     const {schema}=await client.describeCollection({collection_name:snapshot.target.collection});
-    expect(schema.fields.map(f=>f.name).sort()).toEqual(['id','index_status','source_id','source_type','sparse_vector','user_id','workspace_id',...(sourceType==='content_asset'?['dense_vector']:[])].sort());
+    expect(schema.fields.map(f=>f.name).sort()).toEqual(['id','index_status','source_id','source_type','sparse_vector','user_id',...(sourceType==='content_asset'?['dense_vector']:['workspace_id'])].sort());
     expect(schema.enable_dynamic_field).toBe(false);
     expect(schema.functions??[]).toHaveLength(0);
    }
@@ -581,7 +584,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  it('real Milvus schema contains no dense field in document collection, while contentAsset uses FP16/1024',async()=>{
   if(!process.env.TEST_MILVUS_ADDRESS)return;
   const c=createMilvusClient(config.milvus);
-  try{await c.connectPromise;const doc=await c.describeCollection({collection_name:config.kb.documentCollection});expect(doc.schema.fields.some(f=>f.name==='dense_vector')).toBe(false);const contentAsset=await c.describeCollection({collection_name:config.kb.contentAssetCollection});const dense=contentAsset.schema.fields.find(f=>f.name==='dense_vector')!;expect([DataType.Float16Vector,'Float16Vector']).toContain(dense.data_type);expect(dense.type_params.find(p=>p.key==='dim')!.value).toBe('1024');}finally{await c.closeConnection();}
+  try{await c.connectPromise;const doc=await c.describeCollection({collection_name:config.kb.documentCollection});expect(doc.schema.fields.some(f=>f.name==='dense_vector')).toBe(false);const contentAsset=await c.describeCollection({collection_name:snapshotForSource(config,'content_asset','markdown').target.collection});expect(contentAsset.schema.fields.some(f=>f.name==='workspace_id')).toBe(false);const dense=contentAsset.schema.fields.find(f=>f.name==='dense_vector')!;expect([DataType.Float16Vector,'Float16Vector']).toContain(dense.data_type);expect(dense.type_params.find(p=>p.key==='dim')!.value).toBe('1024');}finally{await c.closeConnection();}
  });
 });
-async function transactionForSchedule(f:Awaited<ReturnType<typeof create>>){const tx=await pool.connect();try{await tx.query('BEGIN');await indexing.schedule(tx,f.scope,f.workspaceId,f.contentAsset.contentAssetId);await tx.query('COMMIT');}finally{tx.release();}}
+async function transactionForSchedule(f:Awaited<ReturnType<typeof create>>){const tx=await pool.connect();try{await tx.query('BEGIN');await indexing.schedule(tx,f.scope,f.contentAsset.contentAssetId);await tx.query('COMMIT');}finally{tx.release();}}

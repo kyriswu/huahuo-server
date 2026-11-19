@@ -173,4 +173,61 @@ describe('current-only note content and retired settings migrations',()=>{
   expect((await tx.query("UPDATE content_assets SET title='updated' WHERE content_asset_id=$1 RETURNING title",[assetId])).rows).toEqual([{title:'updated'}]);
   expect((await tx.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='content_asset_folders' AND column_name='deleted_by_folder_id'",[schema])).rows).toEqual([]);
  }));
+
+ it('moves populated current assets, labels, runs and index jobs onto account ownership',async()=>fixture(async(tx,schema)=>{
+  await tx.query(`SET LOCAL search_path TO ${schema}, pg_catalog`);
+  await tx.query('CREATE TABLE schema_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())');
+  for(const migration of migrations.filter(file=>file.version<=22))await tx.query(migration.sql.replace(/\bpublic\b/g,schema));
+
+  const userId=randomUUID(),firstWorkspace=randomUUID(),secondWorkspace=randomUUID(),assetId=randomUUID(),revision=randomUUID();
+  const folderId=randomUUID(),resourceId=randomUUID(),manualTag=randomUUID(),extractedTag=randomUUID();
+  const runId=randomUUID(),buildId=randomUUID(),oldTaskId=randomUUID(),inputId=randomUUID();
+  await tx.query(`INSERT INTO workspaces(id,user_id,display_name,bootstrap_receipt_id)
+   VALUES($1,$3,'first',gen_random_uuid()),($2,$3,'second',gen_random_uuid())`,[firstWorkspace,secondWorkspace,userId]);
+  await tx.query(`INSERT INTO content_assets(content_asset_id,user_id,title,content_asset_revision_id,etag,processing_status)
+   VALUES($1,$2,'existing asset',$3,'asset-etag','ready')`,[assetId,userId,revision]);
+  await tx.query('INSERT INTO content_asset_workspaces(workspace_id,content_asset_id) VALUES($1,$3),($2,$3)',[firstWorkspace,secondWorkspace,assetId]);
+  await tx.query(`INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256)
+   VALUES($1,$2,'raw',1,'existing body',repeat('a',64))`,[revision,assetId]);
+  await tx.query(`INSERT INTO asset_folders(folder_id,workspace_id,display_name,normalized_name,current_revision_id)
+   VALUES($1,$2,'drafts','drafts',gen_random_uuid())`,[folderId,firstWorkspace]);
+  await tx.query('INSERT INTO content_asset_folders(folder_id,content_asset_id) VALUES($1,$2)',[folderId,assetId]);
+  await tx.query(`INSERT INTO asset_tags(tag_id,workspace_id,normalized_name,display_name,source)
+    VALUES($1,$2,'draft','Draft','manual'),($3,$4,'draft','Draft','extracted')`,[manualTag,firstWorkspace,extractedTag,secondWorkspace]);
+  await tx.query(`INSERT INTO content_asset_tags(content_asset_id,tag_id,source)
+   VALUES($1,$2,'manual'),($1,$3,'extracted')`,[assetId,manualTag,extractedTag]);
+  await tx.query(`INSERT INTO resource_refs(resource_id,user_id,workspace_id,ref_kind,ref_id_external)
+   VALUES($1,$2,$3,'content_asset',$4)`,[resourceId,userId,firstWorkspace,assetId]);
+  await tx.query('INSERT INTO workspace_content_state(workspace_id,next_cursor) VALUES($1,3),($2,7)',[firstWorkspace,secondWorkspace]);
+  await tx.query(`INSERT INTO content_events(event_id,workspace_id,cursor,operation_id,object_kind,object_id,change_type)
+   SELECT gen_random_uuid(),workspace_id,1,gen_random_uuid(),'content_asset',$3,'created'
+   FROM unnest(ARRAY[$1::uuid,$2::uuid]) AS event(workspace_id)`,[firstWorkspace,secondWorkspace,assetId]);
+  await tx.query(`INSERT INTO ai_template_runs(id,user_id,workspace_id,scene_key,item_key,template_version,idempotency_key,request_hash,trace_id,deadline_at)
+   VALUES($1,$2,$3,'editor_polish','polish',1,'owned-run','request-hash','trace',now())`,[runId,userId,firstWorkspace]);
+  await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,userId,firstWorkspace,JSON.stringify({buildId})]);
+  await tx.query(`INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,trace_id)
+   VALUES($1,$2,$3,'kb.content-asset-index','content',$4,'queued',gen_random_uuid()::text)`,[oldTaskId,userId,firstWorkspace,inputId]);
+  await tx.query(`INSERT INTO kb_content_asset_hybrid_builds(id,source_type,source_id,source_revision,user_id,workspace_id,task_id,content_hash,config_hash,snapshot)
+   VALUES($1,'content_asset',$2,$3,$4,$5,$6,repeat('a',64),repeat('b',64),$7)`,
+  [buildId,assetId,revision,userId,firstWorkspace,oldTaskId,{mode:'hybrid',target:{collection:'fixture_sparse_v1'}}]);
+
+  await tx.query(sql(23,schema));
+
+  expect((await tx.query("SELECT to_regclass('content_asset_workspaces') AS old")).rows[0].old).toBeNull();
+  expect((await tx.query(`SELECT a.user_id,a.content_asset_revision_id,p.content_markdown,af.folder_id,r.resource_id,r.workspace_id
+   FROM content_assets a JOIN content_asset_parts p USING(content_asset_id) JOIN content_asset_folders af USING(content_asset_id)
+   JOIN resource_refs r ON r.ref_id_external=a.content_asset_id::text WHERE a.content_asset_id=$1`,[assetId])).rows[0]).toEqual({
+    user_id:userId,content_asset_revision_id:revision,content_markdown:'existing body',folder_id:folderId,resource_id:resourceId,workspace_id:null,
+  });
+  expect((await tx.query('SELECT t.tag_id,t.user_id,m.source FROM asset_tags t JOIN content_asset_tags m USING(tag_id)')).rows)
+   .toEqual([{tag_id:manualTag,user_id:userId,source:'manual'}]);
+  expect((await tx.query('SELECT user_id,next_cursor FROM account_content_state')).rows).toEqual([{user_id:userId,next_cursor:'7'}]);
+  expect((await tx.query('SELECT cursor FROM content_events WHERE user_id=$1 ORDER BY cursor',[userId])).rows).toEqual([{cursor:'1'},{cursor:'2'}]);
+  expect((await tx.query('SELECT id,user_id,idempotency_key FROM ai_template_runs')).rows).toEqual([{id:runId,user_id:userId,idempotency_key:'owned-run'}]);
+  expect((await tx.query("SELECT state FROM tasks WHERE id=$1",[oldTaskId])).rows[0]).toEqual({state:'cancelled'});
+  expect((await tx.query(`SELECT b.status,b.published,b.snapshot,t.state,t.workspace_id,(i.body::jsonb)->>'buildId' AS build_id
+   FROM kb_content_asset_hybrid_builds b JOIN tasks t ON t.id=b.task_id JOIN task_inputs i ON i.id=t.input_id JOIN task_outbox o ON o.task_id=t.id
+   WHERE b.id=$1`,[buildId])).rows).toEqual([{status:'pending',published:false,snapshot:{mode:'hybrid',target:{collection:'fixture_sparse_v1_account_v1'},accountScope:true},
+    state:'queued',workspace_id:null,build_id:buildId}]);
+ }));
 });

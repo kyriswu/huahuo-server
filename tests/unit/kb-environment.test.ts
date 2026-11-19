@@ -39,8 +39,10 @@ describe('knowledge deployment configuration contract', () => {
     const document = snapshotForSource(settings, 'file', 'markdown');
     expect(asset.mode).toBe('hybrid');
     expect(document.mode).toBe('keyword');
+    const { accountScope, ...stableAsset } = asset;
+    expect(accountScope).toBe(true);
     expect(asset.configHash).toBe(digest(JSON.stringify({
-      ...asset, mode: 'content-asset-hybrid',
+      ...stableAsset, mode: 'content-asset-hybrid',
       target: { ...asset.target, collection: 'huahuo_kb_note_hybrid_chunks' }, configHash: '',
     })));
     expect(document.configHash).toBe(digest(JSON.stringify({

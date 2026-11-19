@@ -28,16 +28,14 @@ const config = loadConfig('api-server', {
 const migrationConfig = loadConfig('migrate', { APP_ENV: 'test', DATABASE_URL: migrationUrl });
 const root = poolFor(migrationConfig), pool = poolFor(config);
 const contentAssets = new ContentAssetService(pool, config.appTokenSecret!);
-const userIds: string[] = [], workspaceIds: string[] = [], contentAssetIds: string[] = [];
+const userIds: string[] = [], contentAssetIds: string[] = [];
 
 beforeAll(() => migrate(migrationConfig));
 afterAll(async () => {
   try {
     await root.query('DELETE FROM content_asset_parts WHERE content_asset_id=ANY($1::uuid[])', [contentAssetIds]);
-    await root.query('DELETE FROM content_asset_workspaces WHERE content_asset_id=ANY($1::uuid[])', [contentAssetIds]);
     await root.query('DELETE FROM content_assets WHERE content_asset_id=ANY($1::uuid[])', [contentAssetIds]);
     await root.query('DELETE FROM user_sessions WHERE user_id=ANY($1::uuid[])', [userIds]);
-    await root.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])', [workspaceIds]);
     await root.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [userIds]);
   } finally {
     await Promise.all([pool.end(), root.end()]);
@@ -45,33 +43,30 @@ afterAll(async () => {
 });
 
 async function fixture() {
-  const userId = await insertFixtureUser(root), sessionId = randomUUID(), workspaceId = randomUUID();
-  userIds.push(userId); workspaceIds.push(workspaceId);
+  const userId = await insertFixtureUser(root), sessionId = randomUUID();
+  userIds.push(userId);
   const bearer = await insertFixtureSession(root, userId, sessionId);
-  await root.query("INSERT INTO workspaces(id,user_id,display_name,bootstrap_receipt_id) VALUES($1,$2,'contentAsset pagination',$3)", [workspaceId, userId, randomUUID()]);
-  return { workspaceId, bearer, scope: { userId, sessionId, traceId: randomUUID() } };
+  return { bearer, scope: { userId, sessionId, traceId: randomUUID() } };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function seed(f: Fixture, count: number, spacing: 'seconds' | 'same' | 'microseconds' = 'seconds') {
   const interval = spacing === 'same' ? '0 seconds' : spacing === 'microseconds' ? '1 microsecond' : '1 second';
-  const inserted = await root.query<{ content_asset_id: string }>(`WITH seeded AS (
-    INSERT INTO content_assets(content_asset_id,user_id,title,content_asset_revision_id,etag,updated_at)
+  const inserted = await root.query<{ content_asset_id: string }>(`INSERT INTO content_assets(content_asset_id,user_id,title,content_asset_revision_id,etag,updated_at)
     SELECT gen_random_uuid(),$1,'content-asset-'||i,gen_random_uuid(),'fixture-'||i,
       '2026-01-01T00:00:00.999999Z'::timestamptz-i*$3::interval
-    FROM generate_series(1,$2::int)i RETURNING content_asset_id
-  ) INSERT INTO content_asset_workspaces(workspace_id,content_asset_id) SELECT $4,content_asset_id FROM seeded RETURNING content_asset_id`,
-  [f.scope.userId, count, interval, f.workspaceId]);
+    FROM generate_series(1,$2::int)i RETURNING content_asset_id`,
+  [f.scope.userId, count, interval]);
   contentAssetIds.push(...inserted.rows.map(row => row.content_asset_id));
   return (await root.query<{ content_asset_id: string }>(
-    `SELECT n.content_asset_id FROM content_assets n JOIN content_asset_workspaces w ON w.content_asset_id=n.content_asset_id AND w.workspace_id=$1
-     ORDER BY n.updated_at DESC,n.content_asset_id ASC`, [f.workspaceId],
+    `SELECT n.content_asset_id FROM content_assets n WHERE user_id=$1
+     ORDER BY n.updated_at DESC,n.content_asset_id ASC`, [f.scope.userId],
   )).rows.map(row => row.content_asset_id);
 }
 async function pages(f: Fixture) {
   const result: Array<Awaited<ReturnType<ContentAssetService['listContentAssets']>>> = [];
   let cursor: string | undefined;
   do {
-    const page = await contentAssets.listContentAssets(f.scope, f.workspaceId, cursor);
+    const page = await contentAssets.listContentAssets(f.scope, cursor);
     result.push(page);
     // Bound the test if a broken cursor accidentally repeats a page forever.
     expect(result.length).toBeLessThanOrEqual(5);
@@ -94,9 +89,9 @@ it('returns 45 active contentAssets as 20, 20 and 5 without duplicates or missin
 
 it('returns no next cursor for an empty page or exactly 20 contentAssets', async () => {
   const f = await fixture();
-  expect(await contentAssets.listContentAssets(f.scope, f.workspaceId)).toEqual({ items: [], nextCursor: null });
+  expect(await contentAssets.listContentAssets(f.scope)).toEqual({ items: [], nextCursor: null });
   await seed(f, 20);
-  const page = await contentAssets.listContentAssets(f.scope, f.workspaceId);
+  const page = await contentAssets.listContentAssets(f.scope);
   expect(page.items).toHaveLength(20);
   expect(page.nextCursor).toBeNull();
 });
@@ -117,26 +112,25 @@ it('preserves PostgreSQL microseconds when the page boundary falls within one mi
 
 it('continues after the previous page anchor is deleted', async () => {
   const f = await fixture(), expected = await seed(f, 25);
-  const first = await contentAssets.listContentAssets(f.scope, f.workspaceId);
+  const first = await contentAssets.listContentAssets(f.scope);
   await root.query('DELETE FROM content_assets WHERE content_asset_id=$1', [first.items.at(-1)!.contentAssetId]);
-  const second = await contentAssets.listContentAssets(f.scope, f.workspaceId, first.nextCursor!);
+  const second = await contentAssets.listContentAssets(f.scope, first.nextCursor!);
   expect(second.items.map(item => item.contentAssetId)).toEqual(expected.slice(20));
   expect(second.nextCursor).toBeNull();
 });
 
-it('rejects malformed and cross-workspace cursors without exposing another user’s contentAssets', async () => {
+it('rejects malformed and cross-account cursors without exposing another user’s contentAssets', async () => {
   const f = await fixture(), other = await fixture();
   await seed(f, 21); const otherIds = await seed(other, 3);
-  const first = await contentAssets.listContentAssets(f.scope, f.workspaceId);
+  const first = await contentAssets.listContentAssets(f.scope);
   for (const cursor of [
     '', 'not-a-cursor', encode(null), encode({}),
-    encode({ wid: f.workspaceId, updatedAt: 'not-a-date', contentAssetId: randomUUID() }),
-    encode({ wid: f.workspaceId, updatedAt: '2026-02-30T00:00:00.000000Z', contentAssetId: randomUUID() }),
-    encode({ wid: f.workspaceId, updatedAt: '2026-01-01T00:00:00.000000Z', contentAssetId: 'not-a-uuid' }),
-  ]) await expect(contentAssets.listContentAssets(f.scope, f.workspaceId, cursor)).rejects.toMatchObject({ statusCode: 400, code: 'CONTENT_ASSET_CURSOR_INVALID' });
-  await expect(contentAssets.listContentAssets(other.scope, other.workspaceId, first.nextCursor!)).rejects.toMatchObject({ statusCode: 400, code: 'CONTENT_ASSET_CURSOR_INVALID' });
-  await expect(contentAssets.listContentAssets(other.scope, f.workspaceId)).rejects.toMatchObject({ code: 'WORKSPACE_NOT_FOUND' });
-  expect((await contentAssets.listContentAssets(other.scope, other.workspaceId)).items.map(item => item.contentAssetId)).toEqual(otherIds);
+    encode({ userId: f.scope.userId, updatedAt: 'not-a-date', contentAssetId: randomUUID() }),
+    encode({ userId: f.scope.userId, updatedAt: '2026-02-30T00:00:00.000000Z', contentAssetId: randomUUID() }),
+    encode({ userId: f.scope.userId, updatedAt: '2026-01-01T00:00:00.000000Z', contentAssetId: 'not-a-uuid' }),
+  ]) await expect(contentAssets.listContentAssets(f.scope, cursor)).rejects.toMatchObject({ statusCode: 400, code: 'CONTENT_ASSET_CURSOR_INVALID' });
+  await expect(contentAssets.listContentAssets(other.scope, first.nextCursor!)).rejects.toMatchObject({ statusCode: 400, code: 'CONTENT_ASSET_CURSOR_INVALID' });
+  expect((await contentAssets.listContentAssets(other.scope)).items.map(item => item.contentAssetId)).toEqual(otherIds);
 });
 
 it('keeps SQL round trips bounded and independent of page length', async () => {
@@ -151,7 +145,7 @@ it('keeps SQL round trips bounded and independent of page length', async () => {
     }) as typeof client.query);
     const countedPool = { connect: async () => client } as unknown as typeof pool;
     try {
-      const page = await new ContentAssetService(countedPool, config.appTokenSecret!).listContentAssets(f.scope, f.workspaceId);
+      const page = await new ContentAssetService(countedPool, config.appTokenSecret!).listContentAssets(f.scope);
       return { count, page };
     } finally { spy.mockRestore(); }
   };
@@ -165,7 +159,7 @@ it('keeps full Markdown in the separate contentAsset detail response', async () 
   const f = await fixture(), ids = await seed(f, 1), content = '完整正文\n'.repeat(2000);
   await root.query(`INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256)
     VALUES($1,$2,'raw',1,$3,$4)`, [randomUUID(), ids[0], content, createHash('sha256').update(content).digest('hex')]);
-  const contentAsset = await contentAssets.getContentAsset(f.scope, f.workspaceId, ids[0]!);
+  const contentAsset = await contentAssets.getContentAsset(f.scope, ids[0]!);
   expect(contentAsset.parts.raw!.contentMarkdown).toBe(content);
 });
 
@@ -178,7 +172,7 @@ it('serves 20 metadata summaries over HTTP while detail retains the complete lat
   }
   const app = await buildApiServer({ config });
   try {
-    const url = `/api/v1/workspaces/${f.workspaceId}/content-assets`, headers = fixtureScopeHeaders(f.bearer);
+    const url = `/api/v1/content-assets`, headers = fixtureScopeHeaders(f.bearer);
     const response = await app.inject({ method: 'GET', url, headers });
     expect(response.statusCode, response.body).toBe(200);
     const page = response.json().data;

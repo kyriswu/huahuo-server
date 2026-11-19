@@ -34,7 +34,7 @@ function imageTarget(value: string, config?: AppConfig): { id?: string; key?: st
   } catch { throw new DomainError(400, 'IMAGE_URL_INVALID'); }
 }
 
-export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, workspaceId: string, parts: Record<string, string>, config?: AppConfig, claims?: ResourceClaims): Promise<NormalizedImageParts> {
+export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, parts: Record<string, string>, config?: AppConfig, claims?: ResourceClaims, workspaceId?: string): Promise<NormalizedImageParts> {
   const parsed = Object.entries(parts).map(([part, text]) => ({ part, text, images: parseInputImages(text) }));
   const imageCount = parsed.reduce((total, part) => total + part.images.length, 0);
   if (imageCount > MAX_REFS) throw new DomainError(400, 'IMAGE_LIMIT_EXCEEDED');
@@ -49,15 +49,18 @@ export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, 
   }
   const ids = [...new Set([...targets.values()].flatMap(target => target.id ? [target.id] : []))];
   const keys = [...new Set([...targets.values()].flatMap(target => target.key && imageUuid(target.key) ? [target.key] : []))];
+  if (workspaceId && !claims && !(await tx.query(
+    "SELECT id FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready' FOR SHARE", [workspaceId, scope.userId],
+  )).rowCount) throw new DomainError(404, 'WORKSPACE_NOT_FOUND');
   await claims?.ensure(tx, scope, workspaceId, [...ids, ...keys]);
   // Object keys are UUIDs in the current schema. Keep the typed equality indexed;
   // arbitrary filenames still fail the owned lookup without reaching a UUID cast.
   const rows = (await tx.query<{ resource_id: string; object_key: string; mime_type: string }>(`SELECT r.resource_id,r.object_key,r.mime_type
-    FROM resources r JOIN workspaces w ON w.id=$2 AND w.user_id=r.user_id AND w.state='ready'
+    FROM resources r
     WHERE r.user_id=$1 AND r.status='ready'
-    AND r.storage_driver='aliyun-oss' AND r.storage_bucket=$5
-    AND (r.resource_id=ANY($3::uuid[]) OR r.object_key=ANY($4::uuid[])) ORDER BY r.resource_id FOR UPDATE OF r FOR SHARE OF w`,
-  [scope.userId, workspaceId, ids, keys, oss.bucket])).rows;
+    AND r.storage_driver='aliyun-oss' AND r.storage_bucket=$4
+    AND (r.resource_id=ANY($2::uuid[]) OR r.object_key=ANY($3::uuid[])) ORDER BY r.resource_id FOR UPDATE OF r`,
+  [scope.userId, ids, keys, oss.bucket])).rows;
   const byId = new Map(rows.map(row => [row.resource_id, row])), byKey = new Map(rows.map(row => [String(row.object_key), row]));
   const replacements = new Map<string, string>();
   for (const [url, target] of targets) {
