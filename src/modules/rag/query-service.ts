@@ -55,11 +55,8 @@ export class RagQueryService {
     :`LEFT JOIN rag_ingestion_versions v ON b.source_type='file' AND v.id=b.source_id AND v.user_id=b.user_id AND v.workspace_id=b.workspace_id AND v.content_hash=b.source_revision AND v.active AND v.deleted_at IS NULL AND v.status='SUCCEEDED'
       LEFT JOIN text_ingestion_jobs j ON b.source_type='text' AND j.id=b.source_id AND j.created_by=b.user_id AND j.workspace_id=b.workspace_id AND j.content_hash=b.source_revision AND j.ingest_status='success'`;
    if(type==='content_asset'){
-    if(input.filters?.folderIds?.length)sourceJoin+=` AND EXISTS(
-      SELECT 1 FROM content_asset_folders m JOIN asset_folders f ON f.folder_id=m.folder_id
-      WHERE m.content_asset_id=asset.content_asset_id AND f.user_id=b.user_id AND f.state='active'
-        AND m.folder_id=ANY($${values.push(input.filters.folderIds)}::uuid[])
-    )`;
+    if(input.filters?.folderIds?.length)sourceJoin+=` AND asset.folder_id=ANY($${values.push(input.filters.folderIds)}::uuid[])
+      AND EXISTS(SELECT 1 FROM asset_folders f WHERE f.folder_id=asset.folder_id AND f.user_id=asset.user_id AND f.state='active')`;
     if(input.filters?.sourceKinds?.length)sourceJoin+=` AND asset.source_kind=ANY($${values.push(input.filters.sourceKinds)}::text[])`;
     if(input.filters?.tagIds?.length)sourceJoin+=` AND EXISTS(SELECT 1 FROM content_asset_tags membership JOIN asset_tags at ON at.tag_id=membership.tag_id AND at.user_id=b.user_id WHERE membership.content_asset_id=asset.content_asset_id AND membership.tag_id=ANY($${values.push(input.filters.tagIds)}::uuid[]))`;
     if(input.filters?.from)sourceJoin+=` AND asset.updated_at >= $${values.push(input.filters.from)}::timestamptz`;

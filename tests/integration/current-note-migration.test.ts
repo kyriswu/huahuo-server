@@ -229,5 +229,47 @@ describe('current-only note content and retired settings migrations',()=>{
    FROM kb_content_asset_hybrid_builds b JOIN tasks t ON t.id=b.task_id JOIN task_inputs i ON i.id=t.input_id JOIN task_outbox o ON o.task_id=t.id
    WHERE b.id=$1`,[buildId])).rows).toEqual([{status:'pending',published:false,snapshot:{mode:'hybrid',target:{collection:'fixture_sparse_v1_account_v1'},accountScope:true},
     state:'queued',workspace_id:null,build_id:buildId}]);
+
+  const hiddenFolder=randomUUID(),hiddenAsset=randomUUID(),unfiledAsset=randomUUID();
+  await tx.query(`INSERT INTO asset_folders(folder_id,user_id,display_name,normalized_name,current_revision_id,state)
+   VALUES($1,$2,'retired','retired',gen_random_uuid(),'deleted')`,[hiddenFolder,userId]);
+  await tx.query(`INSERT INTO content_assets(content_asset_id,user_id,title,content_asset_revision_id,etag)
+   VALUES($1,$3,'hidden placement',gen_random_uuid(),'hidden'),($2,$3,'unfiled',gen_random_uuid(),'unfiled')`,[hiddenAsset,unfiledAsset,userId]);
+  await tx.query('INSERT INTO content_asset_folders(folder_id,content_asset_id) VALUES($1,$2)',[hiddenFolder,hiddenAsset]);
+
+  await tx.query(sql(24,schema));
+
+  expect((await tx.query("SELECT to_regclass('content_asset_folders') AS old")).rows[0].old).toBeNull();
+  const placements=(await tx.query('SELECT content_asset_id,folder_id FROM content_assets')).rows;
+  expect(placements).toHaveLength(3);
+  expect(placements).toEqual(expect.arrayContaining([
+   {content_asset_id:assetId,folder_id:folderId},
+   {content_asset_id:hiddenAsset,folder_id:hiddenFolder},
+   {content_asset_id:unfiledAsset,folder_id:null},
+  ]));
+ }));
+
+ it.each([
+  ['multiple folders', 'duplicate_assets=1, orphan_links=0, cross_account_links=0'],
+  ['missing folder', 'duplicate_assets=0, orphan_links=1, cross_account_links=0'],
+  ['missing asset', 'duplicate_assets=0, orphan_links=1, cross_account_links=0'],
+  ['another account', 'duplicate_assets=0, orphan_links=0, cross_account_links=1'],
+ ])('rejects legacy placement with %s before changing the schema',async (kind,error)=>fixture(async(tx,schema)=>{
+  await tx.query(`SET LOCAL search_path TO ${schema}, pg_catalog;
+   CREATE TABLE content_assets(content_asset_id uuid PRIMARY KEY,user_id uuid NOT NULL);
+   CREATE TABLE asset_folders(folder_id uuid PRIMARY KEY,user_id uuid NOT NULL);
+   CREATE TABLE content_asset_folders(folder_id uuid,content_asset_id uuid,PRIMARY KEY(folder_id,content_asset_id));`);
+  const owner=randomUUID(),other=randomUUID(),asset=randomUUID(),folder=randomUUID(),second=randomUUID();
+  await tx.query('INSERT INTO content_assets VALUES($1,$2)',[asset,owner]);
+  await tx.query('INSERT INTO asset_folders VALUES($1,$3),($2,$4)',[folder,second,owner,kind==='another account'?other:owner]);
+  if(kind==='multiple folders')await tx.query('INSERT INTO content_asset_folders VALUES($1,$3),($2,$3)',[folder,second,asset]);
+  else await tx.query('INSERT INTO content_asset_folders VALUES($1,$2)',[kind==='missing folder'?randomUUID():second,kind==='missing asset'?randomUUID():asset]);
+
+  await tx.query('SAVEPOINT invalid_placement');
+  await expect(tx.query(sql(24,schema))).rejects.toThrow(error);
+  await tx.query('ROLLBACK TO SAVEPOINT invalid_placement');
+  expect((await tx.query("SELECT to_regclass('content_asset_folders') AS old")).rows[0].old).toBe('content_asset_folders');
+  expect((await tx.query(`SELECT column_name FROM information_schema.columns
+   WHERE table_schema=$1 AND table_name='content_assets' AND column_name='folder_id'`,[schema])).rows).toEqual([]);
  }));
 });

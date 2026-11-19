@@ -179,6 +179,9 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   await assets.deleteFolder(f.scope,folder.folderId,folder.etag,randomUUID());
   expect((await filtered()).results).toEqual([]);
   expect((await assets.search(f.scope,{query:'MVCC'})).results.map(hit=>hit.ownerRef.id)).toEqual([f.contentAsset.contentAssetId]);
+  const deletedFolder=await assets.getFolder(f.scope,folder.folderId);
+  await assets.deleteFolder(f.scope,folder.folderId,deletedFolder.etag,randomUUID(),true);
+  expect((await filtered()).results.map(hit=>hit.ownerRef.id)).toEqual([f.contentAsset.contentAssetId]);
  });
  it('requires trusted user/session scope and rejects retired credentials for the Agent contract',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);

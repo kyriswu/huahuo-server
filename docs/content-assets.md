@@ -7,7 +7,7 @@
 | 资产身份与归属 | PostgreSQL 的 `content_assets.content_asset_id` 和 `user_id`。API 使用 `contentAssetId` 和 `contentAssetRevisionId`。 |
 | 正文 | `content_asset_parts` 保存各部分的当前内容。常用部分为 `raw`、`outline`、`germination`。正文部分的修订使用 `partRevisionId`。 |
 | 文件与录音原件 | `Resource`，表为 `resources`，API 使用 `resourceId`。`content_asset_resource_refs` 建立资产与原文件的引用。 |
-| 可见范围与整理 | 按登录账号读取资产。`content_asset_folders` 表示文件夹位置，`folderId` 是关系投影。 |
+| 可见范围与整理 | 按登录账号读取资产。`content_assets.folder_id` 保存唯一的可空文件夹位置。文件夹软删后，API 的 `folderId` 显示为空；恢复文件夹后重新显示原位置。 |
 | 标签与关系 | `content_asset_tags` 建立资产与标签的关联。`content_asset_relations` 保存资产间的显式关系。「我的标签」是 App 本机的最近使用记录。 |
 | 来源 | 资产的 `sourceKind`、`sourceRef` 描述来源。索引的 `source_type` 指定原始记录类别，取值为 `content_asset`、`file`、`text`。 |
 

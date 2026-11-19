@@ -117,6 +117,24 @@ it('folder deletion and restoration only affect organization and leave contentAs
  const events=(await root.query("SELECT change_type FROM content_events WHERE user_id=$1 AND object_id=$2 ORDER BY cursor",[u.userId,active.contentAssetId])).rows;
  expect(events.map(e=>e.change_type)).toEqual(['created']);
 });
+it('moves an asset between single folders and clears the placement through batch move',async()=>{
+ const u=await fixture(),asset=await makeContentAsset(u);
+ const first=await contentAssets.createFolder(u.scope,{displayName:'First'},randomUUID());
+ const second=await contentAssets.createFolder(u.scope,{displayName:'Second'},randomUUID());
+ const move=async(folderId:string|null,etag:string)=>{
+  const receipt=await contentAssets.moveContentAssets(u.scope,folderId,[{contentAssetId:asset.contentAssetId,etag}],randomUUID());
+  expect(receipt.contentAssets).toEqual([{contentAssetId:asset.contentAssetId,status:'moved',etag:expect.any(String)}]);
+  const detail=await contentAssets.getContentAsset(u.scope,asset.contentAssetId);
+  expect(detail.folderId).toBe(folderId);
+  return detail.etag;
+ };
+ const placed=await move(first.folderId,asset.etag);
+ const moved=await move(second.folderId,placed);
+ expect((await contentAssets.listContentAssets(u.scope)).items).toEqual(expect.arrayContaining([
+  expect.objectContaining({contentAssetId:asset.contentAssetId,folderId:second.folderId}),
+ ]));
+ await move(null,moved);
+});
 it('serializes opposing folder moves so they cannot introduce a cycle',async()=>{
  const u=await fixture(),a=await contentAssets.createFolder(u.scope,{displayName:'A'},randomUUID()),b=await contentAssets.createFolder(u.scope,{displayName:'B'},randomUUID());
  const results=await Promise.allSettled([contentAssets.moveFolder(u.scope,a.folderId,b.folderId,a.etag,randomUUID()),contentAssets.moveFolder(u.scope,b.folderId,a.folderId,b.etag,randomUUID())]);

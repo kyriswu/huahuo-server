@@ -1,45 +1,31 @@
 {
   "version": 1,
-  "id": "20261119-free-writing-account",
-  "baseRevision": "21dcb90610a7590d7f621cc6b4dfad2361a797e7",
-  "services": [
-    "api-server",
-    "admin",
-    "worker",
-    "scheduler"
-  ],
+  "id": "20261119-content-asset-folder-id",
+  "baseRevision": "f6a8ca09e7efa9e0f9a512b9b05a859cc1ce44d8",
+  "services": ["api-server", "admin", "worker", "scheduler"],
   "database": {
-    "migrations": [
-      "0023_free_writing_account_scope.sql"
-    ],
-    "verifySql": "scripts/release/changes/20261119-free-writing-account/verify-db.sql",
+    "migrations": ["0024_content_asset_folder_id.sql"],
+    "verifySql": "scripts/release/changes/20261119-content-asset-folder-id/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "Convert asset organization and run ownership to account scope, preserve business records, and queue derived search rebuilds for the new account-scope collection during a reviewed maintenance cutover."
+      "reason": "After draining old roles, audit and backfill one folder pointer per linked asset, verify the mapping, then drop the placement table in the same transaction. Confirm target volume and the lock budget before scheduling the cutover."
     }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [],
-    "reviewedFiles": [
-      "src/config/config.ts"
-    ]
+    "reviewedFiles": []
   },
-  "dependencies": [
-    {
-      "name": "milvus-account-asset-collection",
-      "checkFile": "scripts/release/changes/20261119-free-writing-account/verify-external.mjs"
-    }
-  ],
+  "dependencies": [],
   "backfill": {
     "required": false,
     "reference": null
   },
   "compatibility": {
     "database": false,
-    "api": false,
-    "tasks": false,
-    "configuration": false
+    "api": true,
+    "tasks": true,
+    "configuration": true
   },
   "smoke": "health"
 }
