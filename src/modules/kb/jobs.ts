@@ -36,6 +36,38 @@ export class KnowledgeIndexJobs {
    return createBuild(tx,source,attempt.task.id,snapshot);});
   return this.executeBuild(build.id,attempt,source.type);
  }
+ async refreshContentAssetMetadata(id:string,attempt:Attempt){
+  const type='content_asset',userId=attempt.task.user_id!,{builds}=tablesForSource(type);
+  return this.lock(type,id,async()=>{
+   const current=await transaction(this.pool,async tx=>{
+    const state=await sourceState(tx,{source_type:type,source_id:id,user_id:userId},true);
+    await this.lease(tx,attempt);
+    if(state.deleted||!state.assetMetadata)return;
+    const build=(await tx.query<KbBuild>(`SELECT * FROM ${builds} WHERE user_id=$1 AND source_id=$2
+     AND source_revision=$3 AND published AND status='ready' AND snapshot->>'assetMetadata'='true'`,[userId,id,state.revision])).rows[0];
+    if(build)return {build,metadata:{...state.assetMetadata,buildId:build.id}};
+   });
+   if(current){
+    const index=this.index(current.build.snapshot);
+    try{await this.updateMetadata(requireIndexKind(index,'hybrid'),current.build.id,current.metadata);}
+    finally{await index.close();}
+   }
+   return {digest:digest(id),bytes:0};
+  });
+ }
+ private async updateMetadata(index:HybridIndex,buildId:string,metadata:NonNullable<KbSource['assetMetadata']>&{buildId:string}){
+  if(!index.updateAssetMetadata)return;
+  const {chunks}=tablesForSource('content_asset');
+  let ordinal=-1;
+  while(true){
+   const points=(await this.pool.query<Pick<StoredChunk,'point_id'|'ordinal'>>(`SELECT point_id,ordinal FROM ${chunks}
+    WHERE build_id=$1 AND ordinal>$2 AND index_status='ready' ORDER BY ordinal LIMIT $3`,[buildId,ordinal,chunkWriteBatchSize])).rows;
+   if(!points.length)return;
+   await index.updateAssetMetadata(points.map(point=>point.point_id),metadata);
+   if(points.length<chunkWriteBatchSize)return;
+   ordinal=points.at(-1)!.ordinal;
+  }
+ }
  async executeBuild(id:string,attempt:Attempt,sourceType:KbSourceType){
   const {builds,chunks}=tablesForSource(sourceType);
   const document=sourceType!=='content_asset';
@@ -46,6 +78,7 @@ export class KnowledgeIndexJobs {
    let source:KbSource;
    try{source=await sourceContent(this.pool,this.config,build);}catch(e){if(e instanceof DomainError)throw new KbJobError(e.code,false);throw e;}
    const index=this.index(build.snapshot);
+   const assetMetadata=build.snapshot.assetMetadata&&source.assetMetadata?{...source.assetMetadata,buildId:id}:undefined;
    const check=async(tx:pg.PoolClient)=>{const state=await sourceState(tx,build,true);await this.lease(tx,attempt);const owner=(await tx.query(`SELECT task_id FROM ${builds} WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(owner?.task_id!==attempt.task.id)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);const newer=await tx.query(`SELECT 1 FROM ${builds} WHERE source_type=$1 AND source_id=$2 AND source_revision=$4 AND (created_at,id)>(SELECT created_at,id FROM ${builds} WHERE id=$3) LIMIT 1`,[build.source_type,build.source_id,id,build.source_revision]);if(state.deleted||state.revision!==build.source_revision||newer.rowCount)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);};
    try{
     if(!build.published){
@@ -89,7 +122,7 @@ export class KnowledgeIndexJobs {
        const hybrid=requireIndexKind(index,'hybrid');
        const draftsByOrdinal=new Map(drafts?.map(draft=>[draft.ordinal,draft]));
        const records=rows.map(row=>{const draft=draftsByOrdinal.get(row.ordinal)!;if(draft.contentHash!==row.content_hash)throw new KbJobError('KB_PLAN_CHANGED',false);return {id:row.point_id,embeddingText:draft.embeddingText,metadata:{content:draft.content}};});
-       const store:BoundVectorStoreAdapter={target:build.snapshot.target,upsert:async(vs,o)=>write(hybrid.upsert(vs.map(v=>({id:v.id,sourceId:source.id,sourceType:source.type,userId:source.userId,...(source.workspaceId?{workspaceId:source.workspaceId}:{}),content:String(v.metadata.content),embedding:v.embedding})),o)),delete:async selector=>{if(!selector.ids)throw new Error('KB_POINT_IDS_REQUIRED');await index.deletePoints(selector.ids);}};
+       const store:BoundVectorStoreAdapter={target:build.snapshot.target,upsert:async(vs,o)=>write(hybrid.upsert(vs.map(v=>({id:v.id,sourceId:source.id,sourceType:source.type,userId:source.userId,...(source.workspaceId?{workspaceId:source.workspaceId}:{}),content:String(v.metadata.content),embedding:v.embedding,...(assetMetadata?{assetMetadata}:{})})),o)),delete:async selector=>{if(!selector.ids)throw new Error('KB_POINT_IDS_REQUIRED');await index.deletePoints(selector.ids);}};
        items=(await indexChunks(records,{embeddingAdapter:embedder!,tokenizer:tokenizer!,vectorStoreAdapter:store,options:{...build.snapshot.indexing,maxEmbeddingTokens:tokenizer!.maxInputTokens}})).items;
       }else{
        const keyword=requireIndexKind(index,'keyword');
@@ -99,6 +132,13 @@ export class KnowledgeIndexJobs {
      }finally{await Promise.allSettled([...writes]);}
      await transaction(this.pool,async tx=>{await check(tx);await tx.query(`UPDATE ${chunks} SET index_status='ready' WHERE build_id=$1 AND point_id=ANY($2::text[])`,[id,items.filter(r=>r.status==='indexed').map(r=>r.id)]);});
      if(items.some(r=>r.status==='failed'))throw new KbJobError('KB_INDEX_PARTIAL_FAILURE');
+     if(assetMetadata){
+      const state=await transaction(this.pool,tx=>sourceState(tx,build));
+      if(state.deleted||state.revision!==build.source_revision)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);
+      if(state.assetMetadata&&(rows.length!==(drafts?.length??build.chunk_count)||build.planned||state.assetMetadata.updatedAt!==assetMetadata.updatedAt)){
+       await this.updateMetadata(requireIndexKind(index,'hybrid'),id,{...state.assetMetadata,buildId:id});
+      }
+     }
      await transaction(this.pool,async tx=>{await check(tx);
       const incomplete=await tx.query(`SELECT 1 FROM ${chunks} WHERE build_id=$1 AND index_status<>'ready' LIMIT 1`,[id]);if(incomplete.rowCount)throw new KbJobError('KB_INDEX_INCOMPLETE');
       await tx.query(`UPDATE ${builds} SET published=false,status='superseded',updated_at=now() WHERE source_type=$1 AND source_id=$2 AND published AND id<>$3`,[source.type,source.id,id]);

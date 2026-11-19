@@ -5,7 +5,8 @@ import {snapshotForSource,knowledgeIndex} from '../dist/modules/kb/profile.js';
 const config=loadConfig('api-server');
 const pool=poolFor(config);
 try {
- for(const sourceType of ['file','content_asset']){
+ const sources=process.argv.includes('--asset-only')?['content_asset']:['file','content_asset'];
+ for(const sourceType of sources){
   const snapshot=snapshotForSource(config,sourceType,'markdown');
   const {mode,indexLayout}=snapshot;
   const index=knowledgeIndex(config,snapshot,undefined,pool);

@@ -16,6 +16,7 @@ export interface TextPoint {
   readonly userId: string;
   readonly workspaceId?: string;
   readonly content: string;
+  readonly assetMetadata?: AssetIndexMetadata;
 }
 export interface KeywordPoint extends TextPoint { readonly embedding?: never; }
 export interface VectorPoint extends TextPoint { readonly embedding: readonly number[]; }
@@ -23,15 +24,22 @@ export type IndexPoint = KeywordPoint | VectorPoint;
 
 /** Supplied by the owning service after authorization/version checks. An empty
  * point set is invalid, never shorthand for searching all tenant data. */
-export interface RecallScope {
-  readonly userId: string;
-  readonly workspaceId?: string;
-  readonly pointIds: readonly string[];
+export type RecallScope = {readonly userId: string} & (
+  | {readonly workspaceId?: string; readonly pointIds: readonly string[]; readonly accountWide?: never}
+  | {readonly workspaceId?: never; readonly pointIds?: never; readonly accountWide: true}
+);
+export interface AssetIndexMetadata {
+  readonly assetKind: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly buildId: string;
 }
 /** Allowlisted metadata conditions. No raw engine expression or query DSL. */
 export interface RecallFilter {
   readonly sourceIds?: readonly string[];
   readonly sourceTypes?: readonly string[];
+  readonly assetKinds?: readonly string[];
+  readonly time?: {readonly field: 'created_at' | 'updated_at'; readonly from?: number; readonly to?: number};
 }
 export interface OperationOptions { readonly signal?: AbortSignal; }
 export interface SearchOptions extends OperationOptions {
@@ -76,6 +84,7 @@ export interface VectorIndex extends IndexLifecycle, VectorReader {
 export interface HybridIndex extends IndexLifecycle, KeywordReader, VectorReader {
   readonly kind: 'hybrid';
   upsert(points: readonly VectorPoint[], options?: OperationOptions): Promise<void>;
+  updateAssetMetadata?(ids: readonly string[], metadata: AssetIndexMetadata): Promise<void>;
   hybridSearch(vector: readonly number[], query: string, options: SearchOptions): Promise<RecallHit[]>;
 }
 export type SearchIndex = KeywordIndex | VectorIndex | HybridIndex;
@@ -90,8 +99,9 @@ export class SearchIndexError extends Error {
 export function validateScope(scope: RecallScope): void {
   if (!scope || typeof scope.userId !== 'string' || !scope.userId.trim()
     || (scope.workspaceId !== undefined && (typeof scope.workspaceId !== 'string' || !scope.workspaceId.trim()))
-    || !Array.isArray(scope.pointIds) || !scope.pointIds.length
-    || scope.pointIds.some(id => typeof id !== 'string' || !id.trim())) {
+    || (scope.accountWide === true
+      ? scope.workspaceId !== undefined || scope.pointIds !== undefined
+      : !Array.isArray(scope.pointIds) || !scope.pointIds.length || scope.pointIds.some(id => typeof id !== 'string' || !id.trim()))) {
     throw new SearchIndexError('SEARCH_INDEX_SCOPE_REQUIRED');
   }
 }
@@ -103,13 +113,21 @@ export function validateSearch(options: SearchOptions): void {
   if (options.filter !== undefined) {
     const filter = options.filter;
     if (!filter || typeof filter !== 'object' || Array.isArray(filter)
-      || Object.keys(filter).some(key => !['sourceIds', 'sourceTypes'].includes(key))) {
+      || Object.keys(filter).some(key => !['sourceIds', 'sourceTypes', 'assetKinds', 'time'].includes(key))) {
       throw new SearchIndexError('SEARCH_INDEX_FILTER_INVALID');
     }
-    for (const values of Object.values(filter)) {
-      if (!Array.isArray(values) || !values.length || values.some(v => typeof v !== 'string' || !v.trim())) {
+    for (const values of [filter.sourceIds, filter.sourceTypes, filter.assetKinds]) {
+      if (values !== undefined && (!Array.isArray(values) || !values.length || values.some(v => typeof v !== 'string' || !v.trim()))) {
         throw new SearchIndexError('SEARCH_INDEX_FILTER_INVALID');
       }
+    }
+    const time = filter.time;
+    if (time !== undefined && (!time || !['created_at', 'updated_at'].includes(time.field)
+      || (time.from === undefined && time.to === undefined)
+      || (time.from !== undefined && !Number.isSafeInteger(time.from))
+      || (time.to !== undefined && !Number.isSafeInteger(time.to))
+      || (time.from !== undefined && time.to !== undefined && time.from > time.to))) {
+      throw new SearchIndexError('SEARCH_INDEX_FILTER_INVALID');
     }
   }
   options.signal?.throwIfAborted();

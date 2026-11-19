@@ -9,12 +9,13 @@ try{
  await client.connectPromise;
  for(const sourceType of ['content_asset','file']){
   const {builds,chunks}=tablesForSource(sourceType);
-  const {mode,target:{collection}}=snapshotForSource(c,sourceType,'markdown');
-  const versions=(await pool.query(`SELECT * FROM ${builds} WHERE published AND status='ready'`)).rows;const ids=[];
+  const {mode,assetMetadata,target:{collection}}=snapshotForSource(c,sourceType,'markdown');
+  const versions=(await pool.query(`SELECT * FROM ${builds} WHERE published AND status='ready' AND snapshot #>> '{target,collection}'=$1`,[collection])).rows;const ids=[];
   for(const build of versions){const state=await sourceState(pool,build);if(state.deleted||state.revision!==build.source_revision)continue;ids.push(...(await pool.query(`SELECT point_id FROM ${chunks} WHERE build_id=$1 AND index_status='ready'`,[build.id])).rows.map(r=>r.point_id));}
   const pg=new Set(ids),found=new Set();
-  for(let offset=0;offset<ids.length;offset+=256){const r=await client.query({collection_name:collection,filter:`index_status == "ready" && id in [${ids.slice(offset,offset+256).map(JSON.stringify).join(',')}]`,output_fields:['id'],consistency_level:'Strong'});if(String(r.status?.error_code)!=='Success')throw new Error('MILVUS_QUERY_FAILED');for(const row of r.data)found.add(String(row.id));}
-  const logical=await client.query({collection_name:collection,filter:'index_status == "ready"',output_fields:['count(*)'],consistency_level:'Strong'});
+  const key=assetMetadata?'chunk_id':'id',ready='index_status == "ready"';
+  for(let offset=0;offset<ids.length;offset+=256){const r=await client.query({collection_name:collection,filter:`${assetMetadata?'':ready+' && '}${key} in [${ids.slice(offset,offset+256).map(JSON.stringify).join(',')}]`,output_fields:[key],consistency_level:'Strong'});if(String(r.status?.error_code)!=='Success')throw new Error('MILVUS_QUERY_FAILED');for(const row of r.data)found.add(String(row[key]));}
+  const logical=await client.query({collection_name:collection,...(assetMetadata?{}:{filter:ready}),output_fields:['count(*)'],consistency_level:'Strong'});
   if(String(logical.status?.error_code)!=='Success')throw new Error('MILVUS_QUERY_FAILED');
   const count=Number(logical.data[0]?.['count(*)']);
   const stats=await client.getCollectionStatistics({collection_name:collection});

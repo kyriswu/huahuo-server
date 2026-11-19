@@ -9,7 +9,7 @@ import { RagQueryService } from '../../src/modules/rag/query-service.js';
 import { fuseRankedRecall, type RerankAdapter } from '../../src/modules/rag/search.js';
 import { config } from '../helpers.js';
 
-it('fuses global branch ranks across point windows and retains each branch candidate budget', async () => {
+it('fuses global branch ranks without enumerating PostgreSQL points before recall', async () => {
  const settings=config();
  Object.assign(settings.milvus,{denseCandidates:3,bm25Candidates:4,hybridCandidates:4,rrfK:60});
  settings.rag.rerankProvider='disabled';
@@ -26,17 +26,14 @@ it('fuses global branch ranks across point windows and retains each branch candi
   content_hash:digest(content),snapshot,published:true,status:'ready',chunk_count:300,content_asset_revision_id:randomUUID(),cursor_created_at:'2026-01-01 00:00:00.000000+00'};
  const sql=vi.fn(async(query:string,values:unknown[]=[])=>{
   if(query.includes('FROM user_sessions'))return {rows:[{id:scope.sessionId}],rowCount:1};
+  if(query.includes('AS chunk'))return {rows:rows.filter(row=>(values[7] as string[]).includes(row.point_id)).map(chunk=>({...build,chunk}))};
   if(query.includes('SELECT b.*'))return {rows:[query.includes('AS source_body')?{...build,source_body:content}:build],rowCount:1};
-  if(query.includes('SELECT c.*')){
-   const start=values[3]===null?0:Number(values[3])+1;
-   return {rows:rows.slice(start,start+Number(values[4])),rowCount:Math.min(Number(values[4]),rows.length-start)};
-  }
   if(['BEGIN','COMMIT','ROLLBACK'].includes(query))return {rows:[],rowCount:0};
   throw new Error(`UNEXPECTED_SQL: ${query}`);
  });
  const pool={connect:async()=>Object.assign(new EventEmitter(),{query:sql,release:vi.fn()})} as unknown as pg.Pool;
  const denseScores:Record<string,number>={A:100,B:90,C:10},keywordScores:Record<string,number>={B:100,C:90,A:80};
- const recall=(scores:Record<string,number>,options:SearchOptions):RecallHit[]=>rows.filter(row=>options.scope.pointIds.includes(row.point_id))
+ const recall=(scores:Record<string,number>,options:SearchOptions):RecallHit[]=>rows.filter(row=>options.scope.accountWide||options.scope.pointIds.includes(row.point_id))
   .map(row=>({chunkKey:row.point_id,content:content.slice(row.source_start,row.source_end),score:scores[row.point_id]??0}))
   .sort((a,b)=>b.score-a.score||a.chunkKey.localeCompare(b.chunkKey)).slice(0,options.limit);
  const search=vi.fn(async(_vector:readonly number[],options:SearchOptions)=>recall(denseScores,options));
@@ -56,10 +53,11 @@ it('fuses global branch ranks across point windows and retains each branch candi
   const result=await service.query(scope,{query:'needle',mode:'hybrid',topK:1});
   expect(result.results).toHaveLength(1);expect(result.results[0]!.chunkKey).toBe('B');
   expect(result.results[0]!.rrfScore).toBeCloseTo(1/62+1/61);
-  expect(search.mock.calls.map(call=>call[1].scope.pointIds.length)).toEqual([256,44]);
-  expect(searchKeyword.mock.calls.map(call=>call[1].scope.pointIds.length)).toEqual([256,44]);
-  expect(search.mock.calls.map(call=>call[1].limit)).toEqual([3,3]);
-  expect(searchKeyword.mock.calls.map(call=>call[1].limit)).toEqual([4,4]);
+  const expectedScope={userId:scope.userId,accountWide:true};
+  expect(search.mock.calls.map(call=>call[1])).toEqual([{scope:expectedScope,filter:{},limit:3}]);
+  expect(searchKeyword.mock.calls.map(call=>call[1])).toEqual([{scope:expectedScope,filter:{},limit:4}]);
+  expect(sql.mock.calls.some(([statement])=>statement.includes('SELECT c.*'))).toBe(false);
+  expect(sql.mock.invocationCallOrder[sql.mock.calls.findIndex(([statement])=>statement.includes('AS chunk'))]).toBeGreaterThan(search.mock.invocationCallOrder[0]!);
   expect(hybridSearch).not.toHaveBeenCalled();
  }finally{await service.close();}
 });
@@ -79,7 +77,7 @@ it.each(['rerank','topK','refill'] as const)('hydrates only the ranked bodies ne
  });
  const sql=vi.fn(async(query:string,values:unknown[]=[])=>{
   if(query.includes('FROM user_sessions'))return {rows:[{id:scope.sessionId}],rowCount:1};
-  if(query.includes('SELECT c.*'))return {rows:fixtures.map(f=>f.row)};
+  if(query.includes('AS chunk'))return {rows:fixtures.map(f=>({...f.build,chunk:f.row}))};
   if(query.includes('SELECT b.*')){
    const ids=values[5] as string[]|null;
    const selected=ids?fixtures.filter(f=>ids.includes(f.build.id)):fixtures;
@@ -93,7 +91,7 @@ it.each(['rerank','topK','refill'] as const)('hydrates only the ranked bodies ne
   throw new Error(`UNEXPECTED_SQL: ${query}`);
  });
  const pool={connect:async()=>Object.assign(new EventEmitter(),{query:sql,release:vi.fn()})} as unknown as pg.Pool;
- const recall=(options:SearchOptions)=>fixtures.filter(f=>options.scope.pointIds.includes(f.row.point_id)).map(f=>f.hit);
+ const recall=(options:SearchOptions)=>fixtures.filter(f=>options.scope.accountWide||options.scope.pointIds.includes(f.row.point_id)).map(f=>f.hit);
  const index:HybridIndex={kind:'hybrid',ensureReady:async()=>{},upsert:async()=>{},deletePoints:async()=>{},close:async()=>{},
   search:async(_vector,options)=>recall(options),searchKeyword:async(_query,options)=>recall(options),hybridSearch:async()=>[]};
  const rerank=vi.fn<RerankAdapter['rerank']>(async(_query,candidates)=>candidates.map((candidate,i)=>({...candidate,rerankScore:i})));

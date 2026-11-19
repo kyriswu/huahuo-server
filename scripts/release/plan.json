@@ -1,22 +1,35 @@
 {
   "version": 1,
-  "id": "20261119-content-asset-folder-id",
+  "id": "20261119-content-asset-search",
   "baseRevision": "f6a8ca09e7efa9e0f9a512b9b05a859cc1ce44d8",
-  "services": ["api-server", "admin", "worker", "scheduler"],
+  "services": [
+    "api-server",
+    "admin",
+    "worker",
+    "scheduler"
+  ],
   "database": {
-    "migrations": ["0024_content_asset_folder_id.sql"],
-    "verifySql": "scripts/release/changes/20261119-content-asset-folder-id/verify-db.sql",
+    "migrations": [
+      "0024_content_asset_folder_id.sql",
+      "0025_content_asset_search_metadata.sql"
+    ],
+    "verifySql": "scripts/release/changes/20261119-content-asset-search/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "After draining old roles, audit and backfill one folder pointer per linked asset, verify the mapping, then drop the placement table in the same transaction. Confirm target volume and the lock budget before scheduling the cutover."
+      "reason": "Apply the folder and asset-kind migrations after old-role drain and verification that the test asset inventory is empty. Migration 0025 refuses a live legacy index and creates no model work."
     }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [],
-    "reviewedFiles": []
+    "reviewedFiles": ["src/config/config.ts"]
   },
-  "dependencies": [],
+  "dependencies": [
+    {
+      "name": "milvus-asset-v2",
+      "checkFile": "scripts/release/changes/20261119-content-asset-search/verify-external.mjs"
+    }
+  ],
   "backfill": {
     "required": false,
     "reference": null
@@ -24,7 +37,7 @@
   "compatibility": {
     "database": false,
     "api": true,
-    "tasks": true,
+    "tasks": false,
     "configuration": true
   },
   "smoke": "health"

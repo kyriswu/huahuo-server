@@ -272,4 +272,22 @@ describe('current-only note content and retired settings migrations',()=>{
   expect((await tx.query(`SELECT column_name FROM information_schema.columns
    WHERE table_schema=$1 AND table_name='content_assets' AND column_name='folder_id'`,[schema])).rows).toEqual([]);
  }));
+ it('requires legacy index maintenance and assigns types without creating rebuild tasks',async()=>fixture(async(tx,schema)=>{
+  await tx.query(`SET LOCAL search_path TO ${schema}, pg_catalog;
+   CREATE TABLE content_assets(content_asset_id uuid PRIMARY KEY,source_kind text);
+   CREATE TABLE kb_content_asset_hybrid_builds(id uuid);
+   CREATE TABLE kb_content_asset_hybrid_chunks(point_id text);
+   CREATE TABLE tasks(kind text,state text);
+   INSERT INTO content_assets VALUES(gen_random_uuid(),'recording'),(gen_random_uuid(),'photo'),(gen_random_uuid(),'manual');
+   INSERT INTO kb_content_asset_hybrid_builds VALUES(gen_random_uuid());`);
+  await tx.query('SAVEPOINT occupied');
+  await expect(tx.query(sql(25,schema))).rejects.toThrow('CONTENT_ASSET_LEGACY_INDEX_MAINTENANCE_REQUIRED');
+  await tx.query('ROLLBACK TO SAVEPOINT occupied');
+  await tx.query('DELETE FROM kb_content_asset_hybrid_builds');
+  await tx.query(sql(25,schema));
+  expect((await tx.query('SELECT asset_kind FROM content_assets ORDER BY asset_kind')).rows)
+   .toEqual([{asset_kind:'audio'},{asset_kind:'creative'},{asset_kind:'image'}]);
+  expect((await tx.query('SELECT * FROM tasks')).rows).toEqual([]);
+ }));
+
 });

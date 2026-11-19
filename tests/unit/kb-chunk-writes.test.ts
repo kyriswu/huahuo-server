@@ -37,7 +37,7 @@ function fixture(mode:IndexMode,options:{count?:number;failBatch?:number;leaseLo
   planned:options.planned??false,toc_status:'pending',toc:null};
  // Expected IDs use the existing persisted identity, including occurrence across
  // batch boundaries; repeated content must not collapse distinct occurrences.
- const pointIds=drafts.map((draft,occurrence)=>digest(JSON.stringify([source.type,source.id,build.config_hash,draft.contentHash+draft.inputHash,occurrence])));
+ const pointIds=drafts.map((draft,occurrence)=>digest(JSON.stringify([source.type,source.id,build.snapshot.pointIdentityHash??build.config_hash,draft.contentHash+draft.inputHash,occurrence])));
  const reusable=new Set([pointIds[0]!,pointIds[256]!]);
  const stored:Array<{ordinal:number;point_id:string;source_start:number;source_end:number;content_hash:string;index_status:string}>=options.planned
   ? [drafts.at(-1)!].map(draft=>({ordinal:draft.ordinal,point_id:pointIds[draft.ordinal]!,source_start:draft.start,source_end:draft.end,content_hash:options.changedHash?'changed':draft.contentHash,index_status:'pending'})):[];

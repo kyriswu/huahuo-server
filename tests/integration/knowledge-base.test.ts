@@ -12,6 +12,7 @@ import {ContentAssetService} from '../../src/modules/content-assets/service.js';
 import {ContentAssetIndexService} from '../../src/modules/ingestion/service.js';
 import {ContentAssetIndexJobs} from '../../src/modules/ingestion/jobs.js';
 import {KnowledgeIndexJobs} from '../../src/modules/kb/jobs.js';
+import {uuidFor} from '../../src/modules/kb/repository.js';
 import {snapshotForSource,kbEmbedding} from '../../src/modules/kb/profile.js';
 import {mockKnowledgeIndex} from '../support/kb-index.js';
 import {mockOssUploadConfig} from '../support/oss-upload.js';
@@ -47,7 +48,7 @@ const memory=mockKnowledgeIndex();
 const targets:string[]=[];
 const factory:IndexFactory=(snapshot:KbSnapshot)=>{
  targets.push(snapshot.target.collection);
- return process.env.TEST_MILVUS_ADDRESS?knowledgeIndex(config,snapshot):snapshot.mode==='hybrid'?memory:memory.keyword;
+ return process.env.TEST_MILVUS_ADDRESS?knowledgeIndex(config,snapshot,undefined,wp):snapshot.mode==='hybrid'?memory:memory.keyword;
 };
 const embeddings=vi.fn(async(s:KbSnapshot)=>kbEmbedding(config,s));
 const deps={index:factory,embedding:(s:KbSnapshot)=>{const e=kbEmbedding(config,s);return {...e,model:s.embedding!.model,dimensions:1024,embed:vi.fn(async(texts:string[])=>{await embeddings(s);return e.embed(texts);})};}};
@@ -233,10 +234,10 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    if(!client)return ids.filter(id=>memory.points.has(id)).sort();
    // Match the adapter's wire value because the SDK treats numeric Strong=0 as unset.
    const result=await client.query({collection_name:snapshotForSource(settings,'content_asset','markdown').target.collection,
-    filter:`id in [${ids.map(id=>JSON.stringify(id)).join(',')}]`,output_fields:['id'],
+    filter:`chunk_id in [${ids.map(id=>JSON.stringify(id)).join(',')}]`,output_fields:['chunk_id'],
     consistency_level:'Strong' as unknown as ConsistencyLevelEnum});
    expect(result.status.error_code).toBe('Success');
-   return result.data.map(row=>String(row.id)).sort();
+   return result.data.map(row=>String(row.chunk_id)).sort();
   };
   try{
    await client?.connectPromise;
@@ -267,7 +268,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  it('deduplicates repeated source intent and never publishes a late task',async()=>{
   const f=await create('first revision');const first=await latest(f.contentAsset.contentAssetId);
   await transactionForSchedule(f);expect((await latest(f.contentAsset.contentAssetId)).id).toBe(first.id);
-  const a=await engine.claim(first.task_id,randomUUID());await assets.updateContentAsset(f.scope,f.contentAsset.contentAssetId,{parts:{raw:'second revision'}},f.contentAsset.etag,randomUUID());
+  const a=await vi.waitFor(async()=>{const claimed=await engine.claim(first.task_id,randomUUID());expect(claimed).toBeTruthy();return claimed!;});await assets.updateContentAsset(f.scope,f.contentAsset.contentAssetId,{parts:{raw:'second revision'}},f.contentAsset.etag,randomUUID());
   await expect(jobs.execute(a!)).rejects.toThrow('KB_SOURCE_SUPERSEDED');await runContentAsset(f.contentAsset.contentAssetId);
   expect((await queries.query(f.scope,{query:'second',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);
  });
@@ -276,6 +277,36 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   const real=requireIndexKind(factory(b.snapshot),'hybrid');let writes=0;
   const flaky=new KnowledgeIndexJobs(wp,workerConfig,{...deps,index:()=>({...real,ensureReady:()=>real.ensureReady(),search:(...args)=>real.search(...args),searchKeyword:(...args)=>real.searchKeyword(...args),hybridSearch:(...args)=>real.hybridSearch(...args),deletePoints:ids=>real.deletePoints(ids),close:async()=>{},upsert:async(rows:readonly import('../../src/lib/search-index/types.js').VectorPoint[])=>{writes++;if(writes===2)throw Object.assign(new Error('batch failed'),{retryable:false});await real.upsert(rows);}})});
   try{await expect(flaky.executeBuild(b.id,a!,'content_asset')).rejects.toThrow();expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results).toEqual([]);await jobs.execute(a!);expect((await queries.query(f.scope,{query:'first',mode:'keyword',documentKey:f.contentAsset.contentAssetId})).results.length).toBeGreaterThan(0);}finally{await real.close();}
+ });
+ it('recalls owned chunks by asset kind and both timestamps, and refreshes metadata without re-embedding',async()=>{
+  const f=await fixture(false),other=await fixture(false);
+  const body='chronosearch exact body';
+  const make=(owner:typeof f,assetKind:'audio'|'image')=>assets.createContentAsset(owner.scope,{title:assetKind,assetKind,parts:{raw:body}},randomUUID());
+  const audio=await make(f,'audio'),image=await make(f,'image'),foreign=await make(other,'audio');
+  const day1='2026-01-01T00:00:00.000Z',day2='2026-02-01T00:00:00.000Z';
+  await root.query('UPDATE content_assets SET created_at=$1,updated_at=$2 WHERE content_asset_id=ANY($3::uuid[])',
+   [day1,day2,[audio.contentAssetId,image.contentAssetId,foreign.contentAssetId]]);
+  const build=await runContentAsset(audio.contentAssetId);await runContentAsset(image.contentAssetId);await runContentAsset(foreign.contentAssetId);
+  const query=(filters:NonNullable<import('../../src/modules/rag/query-service.js').RagQueryInput['filters']>,mode:'keyword'|'dense'|'hybrid'='keyword')=>
+   queries.query(f.scope,{query:'chronosearch',mode,filters});
+  for(const mode of ['keyword','dense','hybrid'] as const){
+   const result=await query({assetKinds:['audio'],from:day1,to:day1,timeField:'created_at'},mode);
+   expect(result.results).toHaveLength(1);
+   const chunk=(await root.query('SELECT point_id FROM kb_content_asset_hybrid_chunks WHERE build_id=$1',[build.id])).rows[0]!.point_id;
+   expect(result.results[0]).toMatchObject({chunkId:chunk,documentKey:audio.contentAssetId,content:body});
+  }
+  expect((await query({assetKinds:['audio'],from:day1,to:day1})).results).toEqual([]);
+  expect((await query({assetKinds:['audio'],from:day2,to:day2})).results).toHaveLength(1);
+  const calls=embeddings.mock.calls.length;
+  await assets.updateContentAsset(f.scope,audio.contentAssetId,{title:'new title'},audio.etag,randomUUID());
+  const refresh=(await root.query(`SELECT t.id FROM tasks t JOIN task_inputs i ON i.id=t.input_id
+   WHERE t.user_id=$1 AND i.body=$2`,[f.scope.userId,JSON.stringify({refreshAssetId:audio.contentAssetId})])).rows[0]!;
+  const attempt=await engine.claim(refresh.id,randomUUID());const result=await jobs.execute(attempt!);
+  expect(await engine.finish(attempt!,result.digest,result.bytes)).toBe(true);
+  expect(embeddings.mock.calls).toHaveLength(calls);
+  const updated=(await root.query('SELECT updated_at FROM content_assets WHERE content_asset_id=$1',[audio.contentAssetId])).rows[0]!.updated_at.toISOString();
+  expect((await query({assetKinds:['audio'],from:updated,to:updated})).results).toHaveLength(1);
+  expect((await query({assetKinds:['audio'],from:day2,to:day2})).results).toEqual([]);
  });
  it('deletion filters in-flight and future hits and cleanup protects no deleted points',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.contentAsset.contentAssetId,f.contentAsset.etag,randomUUID());
@@ -305,7 +336,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   try{
    const result=await q.query(f.scope,{query:'oldestneedle',sourceType:'file',topK:3});
    expect(result.results).toHaveLength(3);expect(result.results.every(r=>r.documentKey===entries[0]!.id&&r.sourceType==='text')).toBe(true);
-   const scopes=recall.mock.calls.map(call=>call[1].scope.pointIds);
+   const scopes=recall.mock.calls.map(call=>call[1].scope.pointIds!);
    expect(scopes.length).toBeGreaterThan(2);expect(scopes.every(ids=>ids.length<=256)).toBe(true);
    expect(new Set(scopes.flat()).size).toBe(615);
    const other=await fixture();expect((await q.query(other.scope,{query:'oldestneedle',sourceType:'file'})).results).toEqual([]);
@@ -431,6 +462,13 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
  });
  it.skipIf(!process.env.TEST_MILVUS_ADDRESS)('preserves stable point IDs across layouts and retires the superseded copy only',async()=>{
   const f=await create('跨集合稳定 ID 和 MVCC。'),assetId=f.contentAsset.contentAssetId;
+  const prior=await latest(assetId);
+  const priorSnapshot={...prior.snapshot,indexLayout:undefined,assetMetadata:undefined,pointIdentityHash:undefined,configHash:prior.snapshot.pointIdentityHash!,
+   target:{...prior.snapshot.target,collection:config.kb.contentAssetCollection+'_account_v1'}};
+  const legacyId=uuidFor(JSON.stringify(['content_asset',assetId,prior.source_revision,priorSnapshot.configHash]));
+  await root.query('UPDATE kb_content_asset_hybrid_builds SET id=$4,config_hash=$2,snapshot=$3 WHERE id=$1',
+   [prior.id,priorSnapshot.configHash,JSON.stringify(priorSnapshot),legacyId]);
+  await root.query('UPDATE task_inputs SET body=$2 WHERE id=(SELECT input_id FROM tasks WHERE id=$1)',[prior.task_id,JSON.stringify({buildId:legacyId})]);
   const legacy=await runContentAsset(assetId);
   const settings={...config,kb:{...config.kb,indexLayout:'sparse-v1' as const}};
   const workerSettings={...workerConfig,kb:{...workerConfig.kb,indexLayout:'sparse-v1' as const}};
@@ -454,8 +492,9 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   try{
    await client.connectPromise;
    const counts=[];
-   for(const collection_name of [legacy.snapshot.target.collection,rebuilt.snapshot.target.collection]){
-    const result=await client.query({collection_name,filter:`id == ${JSON.stringify(point)}`,output_fields:['id'],
+   for(const build of [legacy,rebuilt]){
+    const key=build.snapshot.assetMetadata?'chunk_id':'id';
+    const result=await client.query({collection_name:build.snapshot.target.collection,filter:`${key} == ${JSON.stringify(point)}`,output_fields:[key],
      consistency_level:'Strong' as unknown as ConsistencyLevelEnum});
     expect(result.status.error_code).toBe('Success');
     counts.push(result.data.length);
@@ -465,7 +504,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
     .toEqual({published:false,cleanup_status:'ready'});
   }finally{await client.closeConnection();}
  });
- it.skipIf(!process.env.TEST_MILVUS_ADDRESS)('compares textless keyword and hybrid recall against native BM25 with real Milvus',async()=>{
+ it.skipIf(!process.env.TEST_MILVUS_ADDRESS)('recalls textless assets alongside either document keyword layout with real Milvus',async()=>{
   const samples=[
    {body:'PostgreSQL 数据库事务采用 MVCC 管理并发版本。',query:'数据库事务'},
    {body:'The distributed workers were running isolated concurrent tasks.',query:'worker isolation'},
@@ -517,7 +556,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
    for(const sourceType of ['content_asset','file'] as const){
     const snapshot=snapshotForSource(sparse.settings,sourceType,'markdown');
     const {schema}=await client.describeCollection({collection_name:snapshot.target.collection});
-    expect(schema.fields.map(f=>f.name).sort()).toEqual(['id','index_status','source_id','source_type','sparse_vector','user_id',...(sourceType==='content_asset'?['dense_vector']:['workspace_id'])].sort());
+    expect(schema.fields.map(f=>f.name).sort()).toEqual((sourceType==='content_asset'?['chunk_id','source_id','user_id','asset_kind','created_at','updated_at','build_id','sparse_vector','dense_vector']:['id','index_status','source_id','source_type','sparse_vector','user_id','workspace_id']).sort());
     expect(schema.enable_dynamic_field).toBe(false);
     expect(schema.functions??[]).toHaveLength(0);
    }

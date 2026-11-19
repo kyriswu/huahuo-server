@@ -1,8 +1,8 @@
 import { ConsistencyLevelEnum, DataType, FunctionType, IndexType, MetricType, MilvusClient, RRFRanker, f32ArrayToF16Bytes, f16BytesToF32Array, type FieldSchema, type IndexDescription, type SparseVectorDic } from '@zilliz/milvus2-sdk-node';
 import { digest } from '../../lib/crypto.js';
 import type { MilvusConfig } from '../../config/config.js';
-import { SearchIndexError, validateSearch, type KeywordIndex, type VectorIndex, type HybridIndex, type IndexKind, type IndexPoint, type RecallHit, type RecallScope, type RecallFilter, type SearchOptions, type OperationOptions, type LexicalDictionary } from '../../lib/search-index/types.js';
-import { BM25_FUNCTION, buildMilvusSchema, DENSE_INDEX_NAME, detectChunkLanguage, MILVUS_OUTPUT_FIELDS, MILVUS_POINT_FIELDS, MULTI_ANALYZER_PARAMS, SPARSE_INDEX_NAME, SPARSE_IP_INDEX_NAME, type ChunkLanguage } from './milvus-schema.js';
+import { SearchIndexError, validateSearch, type KeywordIndex, type VectorIndex, type HybridIndex, type IndexKind, type IndexPoint, type RecallHit, type RecallScope, type RecallFilter, type SearchOptions, type OperationOptions, type LexicalDictionary, type AssetIndexMetadata } from '../../lib/search-index/types.js';
+import { BM25_FUNCTION, buildMilvusAssetSchema, buildMilvusSchema, DENSE_INDEX_NAME, detectChunkLanguage, MILVUS_OUTPUT_FIELDS, MILVUS_POINT_FIELDS, MULTI_ANALYZER_PARAMS, SPARSE_INDEX_NAME, SPARSE_IP_INDEX_NAME, type ChunkLanguage } from './milvus-schema.js';
 // SDK 2.6.17 treats numeric Strong=0 as falsy; send its supported wire enum name.
 const STRONG='Strong' as unknown as ConsistencyLevelEnum;
 export class MilvusError extends SearchIndexError {
@@ -26,10 +26,25 @@ function quote(value: string): string { return JSON.stringify(value); }
 
 export function milvusScopeFilter(scope:RecallScope,filter?:RecallFilter):string {
  validateSearch({scope,filter,limit:1});
+ if(scope.accountWide||filter?.assetKinds||filter?.time)throw new SearchIndexError('SEARCH_INDEX_SCOPE_REQUIRED');
  let expression=`user_id == ${quote(scope.userId)}${scope.workspaceId===undefined?'':` && workspace_id == ${quote(scope.workspaceId)}`} && index_status == "ready" && id in [${scope.pointIds.map(quote).join(',')}]`;
  if(filter?.sourceIds)expression+=` && source_id in [${filter.sourceIds.map(quote).join(',')}]`;
  if(filter?.sourceTypes)expression+=` && source_type in [${filter.sourceTypes.map(quote).join(',')}]`;
  return expression;
+}
+function assetScopeFilter(options: SearchOptions): string {
+ const {scope,filter}=options;
+ if(!scope.accountWide||filter?.sourceTypes)throw new SearchIndexError('SEARCH_INDEX_SCOPE_REQUIRED');
+ const conditions=[`user_id == ${quote(scope.userId)}`];
+ if(filter?.sourceIds)conditions.push(`source_id in [${filter.sourceIds.map(quote).join(',')}]`);
+ if(filter?.assetKinds)conditions.push(`asset_kind in [${filter.assetKinds.map(quote).join(',')}]`);
+ if(filter?.time?.from!==undefined)conditions.push(`${filter.time.field} >= ${filter.time.from}`);
+ if(filter?.time?.to!==undefined)conditions.push(`${filter.time.field} <= ${filter.time.to}`);
+ return conditions.join(' && ');
+}
+function assetFields(metadata: AssetIndexMetadata|undefined) {
+ if(!metadata?.assetKind||!metadata.buildId||!Number.isSafeInteger(metadata.createdAt)||!Number.isSafeInteger(metadata.updatedAt))incompatible('Incomplete asset metadata');
+ return {asset_kind:metadata.assetKind,created_at:metadata.createdAt,updated_at:metadata.updatedAt,build_id:metadata.buildId};
 }
 type KeywordRoute = {
   filter:string; data:string|SparseVectorDic[]; metric:MetricType;
@@ -67,6 +82,7 @@ export interface MilvusIndexConfig extends MilvusConfig {
  dimensions?:number;
  dictionary?:LexicalDictionary;
  accountScope?:boolean;
+ assetMetadata?:boolean;
 }
 class MilvusIndexDriver {
  private client:MilvusClient|undefined;private connectPromise:Promise<void>|undefined;private readyPromise:Promise<void>|undefined;
@@ -111,10 +127,11 @@ class MilvusIndexDriver {
     this.readyPromise = this.ensureReadyOnce().catch(error => { this.readyPromise = undefined; throw error; });
     return this.readyPromise;
   }
-  private get outputFields(){return this.config.dictionary?MILVUS_POINT_FIELDS:MILVUS_OUTPUT_FIELDS;}
+  private get outputFields(){return this.config.assetMetadata?['chunk_id']:this.config.dictionary?MILVUS_POINT_FIELDS:MILVUS_OUTPUT_FIELDS;}
   private async ensureReadyOnce(): Promise<void> {
     const sparse=!!this.config.dictionary;
-    const fields=buildMilvusSchema(this.config.kind,this.config.dimensions??1024,sparse,this.config.accountScope);
+    if(this.config.assetMetadata&&(!sparse||this.config.kind!=='hybrid'||!this.config.accountScope))incompatible('Asset collections require both vector types and account scope');
+    const fields=this.config.assetMetadata?buildMilvusAssetSchema(this.config.dimensions??1024):buildMilvusSchema(this.config.kind,this.config.dimensions??1024,sparse,this.config.accountScope);
     await this.operation('ensureReady', async client => {
       const exists = await client.hasCollection({ collection_name: this.collection }); ok(exists, 'hasCollection');
       if (!exists.value) {
@@ -204,6 +221,7 @@ class MilvusIndexDriver {
     });
   }
   private scopeFilter(options:SearchOptions):string {
+    if(this.config.assetMetadata)return assetScopeFilter(options);
     if(this.config.accountScope ? options.scope.workspaceId!==undefined : !options.scope.workspaceId)
       throw new SearchIndexError('SEARCH_INDEX_SCOPE_REQUIRED');
     return milvusScopeFilter(options.scope,options.filter);
@@ -213,6 +231,7 @@ class MilvusIndexDriver {
     if(!points.length)return;
     for(const point of points){
       if(!point.id||!point.sourceId||!point.sourceType||!point.userId||(this.config.accountScope?point.workspaceId!==undefined:!point.workspaceId)||!point.content.trim())incompatible('Incomplete point');
+      if(this.config.assetMetadata)assetFields(point.assetMetadata);
       if(Array.from(point.content).length>this.config.maxContentChars||Buffer.byteLength(point.content,'utf8')>65535)incompatible('Chunk exceeds configured storage limit');
       if(this.config.kind!=='keyword')this.validateVector(point.embedding??[],this.config.dimensions??1024);
       else if(point.embedding!==undefined)incompatible('Keyword collection does not accept dense vectors');
@@ -224,12 +243,28 @@ class MilvusIndexDriver {
       const sparse=this.config.dictionary?await this.encodePoints(client,points,languages):undefined;
       options?.signal?.throwIfAborted();
       const response=await client.upsert({collection_name:this.collection,data:points.map((p,i)=>({
-        id:p.id,source_id:p.sourceId,source_type:p.sourceType,user_id:p.userId,...(this.config.accountScope?{}:{workspace_id:p.workspaceId}),
-        ...(sparse?{sparse_vector:sparse[i]}:{text:p.content,language:languages[i]}),index_status:'ready',
+        source_id:p.sourceId,user_id:p.userId,
+        ...(this.config.assetMetadata?{chunk_id:p.id,...assetFields(p.assetMetadata)}
+          :{id:p.id,source_type:p.sourceType,index_status:'ready',...(this.config.accountScope?{}:{workspace_id:p.workspaceId})}),
+        ...(sparse?{sparse_vector:sparse[i]}:{text:p.content,language:languages[i]}),
         ...(this.config.kind!=='keyword'?{dense_vector:f32ArrayToF16Bytes([...p.embedding!])}:{}),
       }))});ok(response,'upsert');
       if(response.err_index?.length||Number(response.upsert_cnt)!==points.length)throw new MilvusError('MILVUS_UPSERT_INCOMPLETE','Incomplete index write');
     }));
+  }
+  async updateAssetMetadata(ids:readonly string[],metadata:AssetIndexMetadata):Promise<void>{
+    if(!this.config.assetMetadata)incompatible('Asset metadata schema is required');
+    if(!ids.length)return;
+    const fields=assetFields(metadata);
+    await this.ensureReady();
+    for(let offset=0;offset<ids.length;offset+=128){
+      const batch=ids.slice(offset,offset+128);
+      await this.gate.run(()=>this.operation('updateAssetMetadata',async client=>{
+        const response=await client.upsert({collection_name:this.collection,partial_update:true,data:batch.map(chunk_id=>({chunk_id,...fields}))});
+        ok(response,'updateAssetMetadata');
+        if(response.err_index?.length||Number(response.upsert_cnt)!==batch.length)throw new MilvusError('MILVUS_UPSERT_INCOMPLETE','Incomplete metadata update');
+      }));
+    }
   }
   async search(vector:readonly number[],options:SearchOptions):Promise<RecallHit[]>{
     validateSearch(options);if(this.config.kind==='keyword')incompatible('Dense search is not enabled');this.validateVector(vector,this.config.dimensions??1024);await this.ensureReady();
@@ -300,8 +335,8 @@ class MilvusIndexDriver {
     const unique=new Map<string,RecallHit>();
     for(const response of responses){ok(response,'search');const rows=record(response).results;
       if(!Array.isArray(rows))throw new MilvusError('MILVUS_RESPONSE_INVALID','Missing results',false);
-      for(const value of rows){const row=record(value);const id=String(row.id??'');const score=Number(row.score);
-        if(!id||!Number.isFinite(score)||row.index_status!=='ready'||(!this.config.dictionary&&typeof row.text!=='string'))continue;
+      for(const value of rows){const row=record(value);const id=String((this.config.assetMetadata?row.chunk_id:row.id)??'');const score=Number(row.score);
+        if(!id||!Number.isFinite(score)||(!this.config.assetMetadata&&row.index_status!=='ready')||(!this.config.dictionary&&typeof row.text!=='string'))continue;
         if(!unique.has(id)||unique.get(id)!.score<score)unique.set(id,{chunkKey:id,score,...(!this.config.dictionary?{content:String(row.text)}:{})});
       }
     }
@@ -310,7 +345,7 @@ class MilvusIndexDriver {
   async deletePoints(ids:readonly string[],options?:OperationOptions):Promise<void>{
     options?.signal?.throwIfAborted();
     for(let offset=0;offset<ids.length;offset+=128){const batch=ids.slice(offset,offset+128);if(batch.some(id=>!id))incompatible('Empty deletion ID');
-      await this.gate.run(()=>this.operation('delete',async c=>{options?.signal?.throwIfAborted();ok(await c.deleteEntities({collection_name:this.collection,expr:`id in [${batch.map(quote).join(',')}]`}), 'delete');}));
+      await this.gate.run(()=>this.operation('delete',async c=>{options?.signal?.throwIfAborted();ok(await c.deleteEntities({collection_name:this.collection,expr:`${this.config.assetMetadata?'chunk_id':'id'} in [${batch.map(quote).join(',')}]`}), 'delete');}));
     }
   }
 }
@@ -344,6 +379,7 @@ export function createMilvusHybridIndex(config:MilvusIndexConfig,clientFactory?:
   searchKeyword:(query,options)=>driver.searchKeyword(query,options),
   prepareKeywordSearch:query=>driver.prepareKeywordSearch(query),
   search:(vector,options)=>driver.search(vector,options),
+  ...(config.assetMetadata?{updateAssetMetadata:(ids,metadata)=>driver.updateAssetMetadata(ids,metadata)}:{}),
   hybridSearch:(vector,query,options)=>driver.hybridSearch(vector,query,options),
   deletePoints:(ids,options)=>driver.deletePoints(ids,options),close:()=>driver.close(),
  };

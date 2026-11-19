@@ -1,3 +1,4 @@
+import {inferAssetKind,type AssetKind} from './asset-kind.js';
 import { idempotent } from '../../lib/idempotency.js';
 import {resolveTraceId} from '../../lib/trace.js';
 import {tagGraph,type GraphQuery} from './tag-graph.js';
@@ -253,7 +254,7 @@ export class ContentAssetService {
   const contentAsset=await this.createContentAsset(scope,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:'ready',parts:{raw:input.content,outline:'',germination:''}},key);
   return {status:'ready' as const,contentAsset};
  }
- async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
+ async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];assetKind?:AssetKind;sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
   await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
@@ -265,8 +266,8 @@ export class ContentAssetService {
    await this.assertActiveFolder(tx, scope.userId, input.folderId ?? null);
    const id=randomUUID(),rid=randomUUID();
    await tx.query(
-    'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag,folder_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
-    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1),input.folderId??null],
+    'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag,folder_id,asset_kind) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1),input.folderId??null,input.assetKind??inferAssetKind(input.sourceKind)],
    );
    await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,input.processingStatus??(input.parts.raw?.trim()?'ready':'needs-processing')]);
    await syncContentAssetRefs(tx,scope,id,canonicalParts,input.resourceRefs);
@@ -323,6 +324,7 @@ export class ContentAssetService {
     await this.cursor(tx,scope.userId,'content_asset',id,'updated',false,rid,v,asset.content_asset_revision_id,Number(asset.content_asset_revision));
     if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
     if(rawChanged)await this.indexContentAsset(tx,scope,id);
+    else if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleMetadataRefresh(tx,scope,id);
     return this.contentAssetDto(tx,scope,id);
    });
   });
@@ -350,6 +352,7 @@ export class ContentAssetService {
      await tx.query('UPDATE content_assets SET content_asset_revision=$2,content_asset_revision_id=$3,etag=$4,folder_id=$5,updated_at=now() WHERE content_asset_id=$1',
       [item.contentAssetId,version,revisionId,nextEtag,folderId]);
      await this.cursor(tx,scope.userId,'content_asset',item.contentAssetId,'moved',false,revisionId,version,contentAsset.content_asset_revision_id,Number(contentAsset.content_asset_revision));
+     if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleMetadataRefresh(tx,scope,item.contentAssetId);
      receipts.push({contentAssetId:item.contentAssetId,status:'moved',etag:nextEtag});
     }
     return {contentAssets:receipts};
@@ -366,7 +369,10 @@ export class ContentAssetService {
   const id=asset.content_asset_id,version=Number(asset.content_asset_revision)+1,revisionId=randomUUID();
   await tx.query('UPDATE content_assets SET state=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
    [id,restore?'active':'deleted',version,revisionId,etag(id,version)]);
-  if(restore){await this.indexContentAsset(tx,scope,id);}
+  if(restore){
+   await this.indexContentAsset(tx,scope,id);
+   if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleMetadataRefresh(tx,scope,id);
+  }
   else if((await tx.query('SELECT 1 FROM kb_content_asset_hybrid_builds WHERE source_id=$1 LIMIT 1',[id])).rowCount){
    const taskId=randomUUID(),inputId=randomUUID();
    await tx.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',[inputId,scope.userId,JSON.stringify({contentAssetId:id})]);
@@ -387,7 +393,7 @@ export class ContentAssetService {
   });
  }
 
- async search(scope:Scope,input:{query:string;mode?:string;ownerKinds?:string[];contentAssetParts?:string[];folderIds?:string[];tagIds?:string[];sourceKinds?:string[];contentAssetTypeIds?:string[];from?:string;to?:string;limit?:number}){
+ async search(scope:Scope,input:{query:string;mode?:string;ownerKinds?:string[];contentAssetParts?:string[];folderIds?:string[];tagIds?:string[];sourceKinds?:string[];assetKinds?:AssetKind[];timeField?:'created_at'|'updated_at';contentAssetTypeIds?:string[];from?:string;to?:string;limit?:number}){
   await transaction(this.pool,async tx=>{await assertScope(tx,scope);});
   if(input.mode&&!['keyword','hybrid'].includes(input.mode))throw new DomainError(400,'SEARCH_MODE_INVALID');
   if(input.contentAssetParts?.some(p=>!['raw','outline','germination'].includes(p)))throw new DomainError(400,'CONTENT_ASSET_PART_INVALID');

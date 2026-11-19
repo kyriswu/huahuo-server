@@ -58,6 +58,20 @@ export const SPARSE_IP_INDEX_NAME = 'huahuo_sparse_ip';
 export const MILVUS_POINT_FIELDS = ['id','index_status'];
 export const MILVUS_OUTPUT_FIELDS = ['id','source_id','source_type','text','index_status'];
 
+export function buildMilvusAssetSchema(dimensions: number): FieldType[] {
+  return [
+    {name:'chunk_id',data_type:DataType.VarChar,is_primary_key:true,autoID:false,max_length:256},
+    {name:'source_id',data_type:DataType.VarChar,max_length:256},
+    {name:'user_id',data_type:DataType.VarChar,max_length:256},
+    {name:'asset_kind',data_type:DataType.VarChar,max_length:32},
+    {name:'created_at',data_type:DataType.Int64},
+    {name:'updated_at',data_type:DataType.Int64},
+    {name:'build_id',data_type:DataType.VarChar,max_length:64},
+    {name:'sparse_vector',data_type:DataType.SparseFloatVector},
+    {name:'dense_vector',data_type:DataType.Float16Vector,dim:dimensions},
+  ];
+}
+
 export function buildMilvusSchema(kind: IndexKind, dimensions=1024, sparse=false, accountScope=false): FieldType[] {
   return [
     {name:'id',data_type:DataType.VarChar,is_primary_key:true,autoID:false,max_length:256},

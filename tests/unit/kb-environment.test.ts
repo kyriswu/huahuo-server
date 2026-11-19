@@ -33,15 +33,17 @@ describe('knowledge deployment configuration contract', () => {
       || /^(?:MANUAL_TEXT_|RAG_CHILD_|RAG_PARENT_|DOCUMENT_PARSER_|DOCUMENT_EXTRACTION_|TASK_RETRY_|WORKER_CONCURRENCY_)/.test(key))).toBe(false);
   });
 
-  it('keeps the prior build and point identity inputs across index terminology changes', () => {
+  it('keeps prior chunk identities when the asset collection changes', () => {
     const settings = config();
     const asset = snapshotForSource(settings, 'content_asset', 'markdown');
     const document = snapshotForSource(settings, 'file', 'markdown');
     expect(asset.mode).toBe('hybrid');
     expect(document.mode).toBe('keyword');
-    const { accountScope, ...stableAsset } = asset;
-    expect(accountScope).toBe(true);
-    expect(asset.configHash).toBe(digest(JSON.stringify({
+    const { accountScope, assetMetadata, indexLayout, pointIdentityHash, ...stableAsset } = asset;
+    expect({accountScope,assetMetadata,indexLayout}).toEqual({accountScope:true,assetMetadata:true,indexLayout:'sparse-v1'});
+    expect(asset.target.collection).toBe(settings.kb.contentAssetCollection+'_asset_v2');
+    expect(asset.configHash).not.toBe(pointIdentityHash);
+    expect(pointIdentityHash).toBe(digest(JSON.stringify({
       ...stableAsset, mode: 'content-asset-hybrid',
       target: { ...asset.target, collection: 'huahuo_kb_note_hybrid_chunks' }, configHash: '',
     })));
