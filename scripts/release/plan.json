@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261119-content-assets",
-  "baseRevision": "740fb8b74c99ddb7668183194e78418f0e6de50e",
+  "id": "20261119-server-ci-build-cache",
+  "baseRevision": "687f27fce09e8e293f3b76acd78794c116031589",
   "services": [
     "api-server",
     "admin",
@@ -9,55 +9,18 @@
     "scheduler"
   ],
   "database": {
-    "migrations": [
-      "0019_note_ownership_and_organization.sql",
-      "0020_content_asset_naming.sql"
-    ],
-    "verifySql": "scripts/release/changes/20261119-content-assets/verify-db.sql",
+    "migrations": [],
+    "verifySql": "scripts/release/changes/20261119-server-ci-build-cache/verify-db.sql",
     "dataChange": {
-      "mode": "inline",
-      "reason": "Move ownership to the content asset and represent workspace visibility and folder placement as separate relations. Rename persisted asset identifiers, settings and task payloads in place. The test database preflight found no legacy assets, references, index builds or unfinished tasks, so no separate cleanup or backfill is scheduled. Stop all old Server roles and shared-database writers before the incompatible migrations. Preflight validates the complete runtime settings under the pending key rename before writing."
+      "mode": "none",
+      "reason": "CI scheduling and Docker dependency caching only. The database schema, migration history, data, Server code, task payloads and runtime configuration are identical to the deployed revision."
     }
   },
   "configuration": {
     "mode": "reuse",
-    "changes": [
-      {
-        "key": "KB_NOTE_HYBRID_COLLECTION",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "KB_CONTENT_ASSET_HYBRID_COLLECTION",
-        "operation": "add",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": true
-      }
-    ],
-    "reviewedFiles": [
-      "src/config/config.ts",
-      "compose.yaml",
-      ".env.example",
-      ".env.compose.cloud.example",
-      ".env.compose.local.example",
-      ".env.host.example",
-      "specs/backend-plan/examples/.env.compose.cloud.example",
-      "specs/backend-plan/examples/.env.compose.local.example"
-    ],
-    "verifyFile": "scripts/release/changes/20261119-content-assets/verify-config.mjs"
+    "changes": [],
+    "reviewedFiles": [],
+    "verifyFile": "scripts/release/changes/20261119-server-ci-build-cache/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {
@@ -65,10 +28,10 @@
     "reference": null
   },
   "compatibility": {
-    "database": false,
-    "api": false,
-    "tasks": false,
-    "configuration": false
+    "database": true,
+    "api": true,
+    "tasks": true,
+    "configuration": true
   },
   "smoke": "health"
 }

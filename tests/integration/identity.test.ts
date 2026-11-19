@@ -45,7 +45,16 @@ const auth=(s:Pick<Session, 'accessToken'>)=>({authorization:'Bearer '+s.accessT
 async function ticket(){const phone='1380000'+String(next++).padStart(4,'0');const r=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);const data=r.json().data;expect(data).toMatchObject({providerMode:'live'});expect(data).not.toHaveProperty('testCode');return {phone,...data,code:transport.codeFor(data.smsRequestId)};}
 function loginBody(t:{phone:string;smsRequestId:string;code:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.code,clientType:'app' as const,clientId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
 async function login():Promise<Session>{const t=await ticket(),r=await send(api,'/api/v1/auth/login',loginBody(t));expect(r.statusCode).toBe(200);return r.json().data;}
-beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));dependencies=createDependencies(apiConfig);api=await buildApiServer({config:apiConfig,sms:transport.sms,dependencies});admin=await buildAdminServer({config:adminConfig});},20000);
+beforeAll(async () => {
+ await migrate(loadConfig('migrate', { DATABASE_URL: migrationUrl }));
+ dependencies = createDependencies(apiConfig);
+ api = await buildApiServer({ config: apiConfig, sms: transport.sms, dependencies });
+ admin = await buildAdminServer({ config: adminConfig });
+ // Redis can be up while the Bearer cache's own connection is still opening.
+ await vi.waitFor(async () => {
+  expect(await dependencies.bearerCache!.ping()).toBe('PONG');
+ }, { timeout: 5000 });
+}, 20000);
 afterAll(async()=>{await api?.close();await admin?.close();await root.end();await adminPool.end();});
 describe('P02 real PG identity and scope',()=>{
  const bearerKey = (access: string) => `${apiConfig.queuePrefix}:auth:bearer:v1:${apiConfig.jwt.keyId}:${digest(access)}`;

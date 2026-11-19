@@ -5,13 +5,15 @@ RUN npm install -g pnpm@${PNPM_VERSION}
 WORKDIR /app
 FROM tooling AS build
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=huahuo-server-pnpm,target=/pnpm-store,sharing=locked \
+    pnpm install --frozen-lockfile --store-dir /pnpm-store
 COPY tsconfig*.json ./
 COPY scripts/clean-build.mjs ./scripts/clean-build.mjs
 COPY src ./src
 COPY resources ./resources
 COPY admin-ui ./admin-ui
-RUN pnpm build && pnpm prune --prod
+RUN --mount=type=cache,id=huahuo-server-pnpm,target=/pnpm-store,sharing=locked \
+    pnpm build && pnpm prune --prod --config.store-dir=/pnpm-store
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
