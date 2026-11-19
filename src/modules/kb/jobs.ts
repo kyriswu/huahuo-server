@@ -22,7 +22,7 @@ export class KnowledgeIndexJobs {
  async close():Promise<void>{}
  private index(snapshot:KbSnapshot):HybridIndex|KeywordIndex{return this.dependencies.index?.(snapshot)??knowledgeIndex(this.config,snapshot,undefined,this.pool);}
  private async lease(tx:pg.PoolClient|pg.Client,attempt:Attempt){
-  const r=await tx.query("SELECT id FROM tasks WHERE id=$1 AND workspace_id=$2 AND user_id=$3 AND state='running' AND lease_owner=$4 AND version=$5 AND attempt_no=$6 AND lease_until>clock_timestamp() FOR UPDATE",[attempt.task.id,attempt.task.workspace_id,attempt.task.user_id,attempt.owner,attempt.version,attempt.attempt]);
+  const r=await tx.query("SELECT id FROM tasks WHERE id=$1 AND workspace_id IS NOT DISTINCT FROM $2::uuid AND user_id=$3 AND state='running' AND lease_owner=$4 AND version=$5 AND attempt_no=$6 AND lease_until>clock_timestamp() FOR UPDATE",[attempt.task.id,attempt.task.workspace_id,attempt.task.user_id,attempt.owner,attempt.version,attempt.attempt]);
   if(!r.rowCount)throw new KbJobError('KB_LEASE_LOST');
  }
  private async lock<T>(type:KbSourceType,id:string,operation:()=>Promise<T>):Promise<T>{
@@ -31,14 +31,15 @@ export class KnowledgeIndexJobs {
   finally{await client.end().catch(()=>{});}
  }
  async indexSource(source:KbSource,attempt:Attempt,snapshot:KbSnapshot):Promise<{digest:string;bytes:number}>{
-  const build=await transaction(this.pool,async tx=>{const s=await sourceState(tx,{source_type:source.type,source_id:source.id,user_id:source.userId,workspace_id:source.workspaceId},true);await this.lease(tx,attempt);
+  const build=await transaction(this.pool,async tx=>{const s=await sourceState(tx,{source_type:source.type,source_id:source.id,user_id:source.userId,...(source.workspaceId?{workspace_id:source.workspaceId}:{})},true);await this.lease(tx,attempt);
    if(s.deleted||s.revision!==source.revision)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);
    return createBuild(tx,source,attempt.task.id,snapshot);});
   return this.executeBuild(build.id,attempt,source.type);
  }
  async executeBuild(id:string,attempt:Attempt,sourceType:KbSourceType){
   const {builds,chunks}=tablesForSource(sourceType);
-  const build=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE id=$1 AND user_id=$2 AND workspace_id=$3 AND task_id=$4 AND source_type=$5`,[id,attempt.task.user_id,attempt.task.workspace_id,attempt.task.id,sourceType])).rows[0];
+  const document=sourceType!=='content_asset';
+  const build=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE id=$1 AND user_id=$2 AND task_id=$4 AND source_type=$5 AND ${document?'workspace_id=$3':'$3::uuid IS NULL'}`,[id,attempt.task.user_id,attempt.task.workspace_id,attempt.task.id,sourceType])).rows[0];
   if(!build)throw new KbJobError('KB_BUILD_NOT_FOUND',false);
   const {mode}=build.snapshot;
   return this.lock(build.source_type,build.source_id,async()=>{
@@ -88,11 +89,11 @@ export class KnowledgeIndexJobs {
        const hybrid=requireIndexKind(index,'hybrid');
        const draftsByOrdinal=new Map(drafts?.map(draft=>[draft.ordinal,draft]));
        const records=rows.map(row=>{const draft=draftsByOrdinal.get(row.ordinal)!;if(draft.contentHash!==row.content_hash)throw new KbJobError('KB_PLAN_CHANGED',false);return {id:row.point_id,embeddingText:draft.embeddingText,metadata:{content:draft.content}};});
-       const store:BoundVectorStoreAdapter={target:build.snapshot.target,upsert:async(vs,o)=>write(hybrid.upsert(vs.map(v=>({id:v.id,sourceId:source.id,sourceType:source.type,userId:source.userId,workspaceId:source.workspaceId,content:String(v.metadata.content),embedding:v.embedding})),o)),delete:async selector=>{if(!selector.ids)throw new Error('KB_POINT_IDS_REQUIRED');await index.deletePoints(selector.ids);}};
+       const store:BoundVectorStoreAdapter={target:build.snapshot.target,upsert:async(vs,o)=>write(hybrid.upsert(vs.map(v=>({id:v.id,sourceId:source.id,sourceType:source.type,userId:source.userId,...(source.workspaceId?{workspaceId:source.workspaceId}:{}),content:String(v.metadata.content),embedding:v.embedding})),o)),delete:async selector=>{if(!selector.ids)throw new Error('KB_POINT_IDS_REQUIRED');await index.deletePoints(selector.ids);}};
        items=(await indexChunks(records,{embeddingAdapter:embedder!,tokenizer:tokenizer!,vectorStoreAdapter:store,options:{...build.snapshot.indexing,maxEmbeddingTokens:tokenizer!.maxInputTokens}})).items;
       }else{
        const keyword=requireIndexKind(index,'keyword');
-       const points=rows.map(row=>({id:row.point_id,sourceId:source.id,sourceType:source.type,userId:source.userId,workspaceId:source.workspaceId,content:source.content.slice(row.source_start,row.source_end)}));
+       const points=rows.map(row=>({id:row.point_id,sourceId:source.id,sourceType:source.type,userId:source.userId,...(source.workspaceId?{workspaceId:source.workspaceId}:{}),content:source.content.slice(row.source_start,row.source_end)}));
        items=await indexKeywordChunks(points,{kind:'keyword',ensureReady:()=>keyword.ensureReady(),upsert:(rows,o)=>write(keyword.upsert(rows,o)),deletePoints:(ids,o)=>keyword.deletePoints(ids,o),searchKeyword:(q,o)=>keyword.searchKeyword(q,o),close:()=>keyword.close()},{...build.snapshot.indexing,maxContentChars:build.snapshot.rules.maxChars});
       }
      }finally{await Promise.allSettled([...writes]);}
@@ -116,7 +117,7 @@ export class KnowledgeIndexJobs {
   const scope={source_type:type,source_id:id,user_id:attempt.task.user_id!,workspace_id:attempt.task.workspace_id!};
   const state=await transaction(this.pool,async tx=>{const s=await sourceState(tx,scope,true);await this.lease(tx,attempt);
    await tx.query(`UPDATE ${builds} SET published=false,status=$4 WHERE source_type=$1 AND source_id=$2 AND user_id=$3 AND (source_revision<>$5 OR $6)`,[type,id,scope.user_id,s.deleted?'deleted':'superseded',s.revision,s.deleted]);return s;});
-  const retired=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE source_type=$1 AND source_id=$2 AND user_id=$3 AND workspace_id=$4 AND NOT published AND cleanup_status<>'ready' AND (source_revision<>$5 OR $6 OR status='superseded')`,[type,id,scope.user_id,scope.workspace_id,state.revision,state.deleted])).rows;
+  const retired=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE source_type=$1 AND source_id=$2 AND user_id=$3 AND ${type==='content_asset'?'$4::uuid IS NULL':'workspace_id=$4'} AND NOT published AND cleanup_status<>'ready' AND (source_revision<>$5 OR $6 OR status='superseded')`,[type,id,scope.user_id,scope.workspace_id,state.revision,state.deleted])).rows;
   for(const b of retired){
    const ids=(await this.pool.query<{point_id:string}>(`SELECT c.point_id FROM ${chunks} c WHERE c.build_id=$1 AND NOT EXISTS(SELECT 1 FROM ${chunks} live JOIN ${builds} lb ON lb.id=live.build_id WHERE live.point_id=c.point_id AND lb.id<>$1 AND lb.status IN ('pending','indexing','ready') AND lb.config_hash=$2 AND lb.source_revision=$3)`,[b.id,b.config_hash,state.revision])).rows.map(r=>r.point_id);
    const index=this.index(b.snapshot);try{await index.deletePoints(ids);await this.pool.query(`UPDATE ${builds} SET cleanup_status='ready' WHERE id=$1 AND task_id=$2`,[b.id,b.task_id]);}finally{await index.close();}

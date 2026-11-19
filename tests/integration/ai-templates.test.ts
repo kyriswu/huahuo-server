@@ -56,15 +56,13 @@ let admin: Awaited<ReturnType<typeof buildAdminServer>>;
 let api: Awaited<ReturnType<typeof buildApiServer>>;
 let contentAssets: ContentAssetService;
 let auth: Record<string, string>;
-let fixture: Awaited<ReturnType<typeof workspace>>;
+let fixture: Awaited<ReturnType<typeof account>>;
 
-async function workspace() {
+async function account() {
   const userId = await insertFixtureUser(root);
-  const sessionId = randomUUID(), workspaceId = randomUUID();
+  const sessionId = randomUUID();
   const bearer = await insertFixtureSession(root, userId, sessionId);
-  await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'fixture',true,$3)",
-    [workspaceId, userId, randomUUID()]);
-  return { workspaceId, headers: fixtureScopeHeaders(bearer), scope: { userId, sessionId, traceId: randomUUID() } };
+  return { headers: fixtureScopeHeaders(bearer), scope: { userId, sessionId, traceId: randomUUID() } };
 }
 
 beforeAll(async () => {
@@ -88,7 +86,7 @@ beforeAll(async () => {
   const assetPool = poolFor(apiConfig);
   api.addHook('onClose', () => assetPool.end());
   contentAssets = new ContentAssetService(assetPool, apiConfig.appTokenSecret!);
-  fixture = await workspace();
+  fixture = await account();
 
   const username = 'ai-template-' + randomUUID().slice(0, 8);
   const password = 'fixture-editor-password';
@@ -112,7 +110,7 @@ afterAll(async () => {
 
 const editor = '/api/v1/ai-template-scenes/editor_polish/items';
 const adminEditor = '/admin/api/v1/ai-template-scenes/editor_polish';
-const runPath = () => `/api/v1/workspaces/${fixture.workspaceId}/ai-template-runs`;
+const runPath = () => `/api/v1/ai-template-runs`;
 const editorBody = { sceneKey: 'editor_polish', itemKey: 'relation_peer', input: { text: '一段原文' } };
 const generate = (payload: object, idempotency = randomUUID() as string, accept?: string) =>
   api.inject({
@@ -123,7 +121,7 @@ const generate = (payload: object, idempotency = randomUUID() as string, accept?
 describe('AI template configuration against isolated PostgreSQL', () => {
   it('publishes an operator draft atomically and chooses the response format per request', async () => {
     expect((await api.inject(editor)).statusCode).toBe(401);
-    expect(api.swagger().paths?.['/api/v1/workspaces/{workspaceId}/ai-template-runs']?.post).toMatchObject({
+    expect(api.swagger().paths?.['/api/v1/ai-template-runs']?.post).toMatchObject({
       description: expect.stringContaining('Accept: text/event-stream'),
       responses: { 200: { content: { 'application/json': expect.any(Object), 'text/event-stream': expect.any(Object) } } },
     });
@@ -187,6 +185,7 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     expect(streamed.body).toContain('"text":"花火"');
     expect(streamed.body).toContain('event: result\ndata:');
     expect(streamed.body).toContain('"text":"花火生成结果"');
+    expect(fakeCalls).toHaveLength(jsonCalls + 1);
     expect(fakeCalls.at(-1)?.stream).toBe(true);
     const streamedCalls = fakeCalls.length;
     const jsonReplay = await generate(editorBody, streamKey, 'text/event-stream;q=0, application/json');
@@ -219,12 +218,12 @@ describe('AI template configuration against isolated PostgreSQL', () => {
   });
 
   it('deduplicates generation, scopes results and invalidates outline status when raw content changes', async () => {
-    const contentAsset = await contentAssets.createContentAsset(fixture.scope, fixture.workspaceId, {
+    const contentAsset = await contentAssets.createContentAsset(fixture.scope, {
       title: '会议笔记', parts: { raw: '会议需要确认三项决定。' },
     }, randomUUID());
     const input = { contentAssetId: contentAsset.contentAssetId, sourceRevision: contentAsset.parts.raw!.partRevisionId };
     const payload = { sceneKey: 'content_asset_outline', itemKey: 'work_meeting', input };
-    const statePath = `/api/v1/workspaces/${fixture.workspaceId}/content-assets/${contentAsset.contentAssetId}/ai-outline-results`;
+    const statePath = `/api/v1/content-assets/${contentAsset.contentAssetId}/ai-outline-results`;
     const idempotency = randomUUID();
     const before = fakeCalls.length;
     const started = new Promise<void>(resolve => { arrived = resolve; });
@@ -251,19 +250,19 @@ describe('AI template configuration against isolated PostgreSQL', () => {
       expect.objectContaining({ runId: success.runId, itemKey: 'work_meeting' }),
     ]);
 
-    const foreign = await workspace();
+    const foreign = await account();
     const detailPath = runPath() + '/' + success.runId;
     expect((await api.inject({ url: detailPath, headers: foreign.headers })).statusCode).toBe(404);
     expect((await api.inject({ url: detailPath, headers: fixture.headers })).json().data).toEqual(success);
     const applied = await api.inject({
       method: 'PUT',
-      url: `/api/v1/workspaces/${fixture.workspaceId}/content-assets/${contentAsset.contentAssetId}/parts/outline`,
+      url: `/api/v1/content-assets/${contentAsset.contentAssetId}/parts/outline`,
       headers: { ...fixture.headers, 'if-match': contentAsset.etag, 'x-idempotency-key': randomUUID() },
       payload: { contentMarkdown: success.result.outlineMarkdown },
     });
     expect(applied.statusCode).toBe(200);
 
-    await contentAssets.updateContentAsset(fixture.scope, fixture.workspaceId, contentAsset.contentAssetId, { parts: { raw: '原文更新' } }, applied.json().data.etag, randomUUID());
+    await contentAssets.updateContentAsset(fixture.scope, contentAsset.contentAssetId, { parts: { raw: '原文更新' } }, applied.json().data.etag, randomUUID());
     expect((await api.inject({ url: statePath, headers: fixture.headers })).json().data.items).toEqual([]);
     const stale = await generate(payload);
     expect(stale.statusCode).toBe(409);

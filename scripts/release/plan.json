@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261119-milvus-textless",
-  "baseRevision": "3f751ac04a885a6099c8fc7048346256f79b257b",
+  "id": "20261119-free-writing-account",
+  "baseRevision": "21dcb90610a7590d7f621cc6b4dfad2361a797e7",
   "services": [
     "api-server",
     "admin",
@@ -10,58 +10,25 @@
   ],
   "database": {
     "migrations": [
-      "0022_kb_sparse_lexical_terms.sql"
+      "0023_free_writing_account_scope.sql"
     ],
-    "verifySql": "scripts/release/changes/20261119-milvus-textless/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261119-free-writing-account/verify-db.sql",
     "dataChange": {
-      "mode": "none",
-      "reason": ""
+      "mode": "inline",
+      "reason": "Convert asset organization and run ownership to account scope, preserve business records, and queue derived search rebuilds for the new account-scope collection during a reviewed maintenance cutover."
     }
   },
   "configuration": {
-    "mode": "candidate",
-    "changes": [
-      {
-        "key": "KB_INDEX_LAYOUT",
-        "operation": "add",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": true,
-        "hasDefault": true
-      },
-      {
-        "key": "RAG_RERANK_PROVIDER",
-        "operation": "change",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": true,
-        "hasDefault": true
-      }
-    ],
+    "mode": "reuse",
+    "changes": [],
     "reviewedFiles": [
-      "src/config/config.ts",
-      "compose.yaml",
-      ".env.example",
-      ".env.host.example",
-      ".env.compose.local.example",
-      ".env.compose.cloud.example",
-      "specs/backend-plan/examples/.env.compose.local.example",
-      "specs/backend-plan/examples/.env.compose.cloud.example"
-    ],
-    "verifyFile": "scripts/release/changes/20261119-milvus-textless/verify-config.mjs"
+      "src/config/config.ts"
+    ]
   },
   "dependencies": [
     {
-      "name": "milvus-textless-collections",
-      "checkFile": "scripts/release/changes/20261119-milvus-textless/verify-external.mjs"
+      "name": "milvus-account-asset-collection",
+      "checkFile": "scripts/release/changes/20261119-free-writing-account/verify-external.mjs"
     }
   ],
   "backfill": {
@@ -69,8 +36,8 @@
     "reference": null
   },
   "compatibility": {
-    "database": true,
-    "api": true,
+    "database": false,
+    "api": false,
     "tasks": false,
     "configuration": false
   },

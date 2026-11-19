@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { transaction, assertScope, audit, DomainError, type Scope } from '../identity/store.js';
 import { idempotent } from '../../lib/idempotency.js';
 import type { AdminScope } from '../admin/service.js';
-import { type TaskRow, event, enqueueIntent, newTaskMaxAttempts, taskDto, terminal } from './model.js';
+import { type TaskRow, event, enqueueIntent, newTaskMaxAttempts, taskDto, terminal, accountAssetTaskKinds } from './model.js';
 import type { BillingService } from '../billing/service.js';
 import { finalizeUnsuccessfulTaskTx } from './reservations.js';
 import {resolveTraceId} from '../../lib/trace.js';
@@ -11,7 +11,7 @@ export class TaskService {
  constructor(readonly pool:pg.Pool, private readonly secret:string, readonly billing?:BillingService){if(!secret||secret.length<32)throw new Error('IDEMPOTENCY_SECRET_REQUIRED');}
  async authorized(tx:pg.PoolClient,scope:Scope,id:string,locking=false) {
   await assertScope(tx,scope);
-  const r=await tx.query<TaskRow>(`SELECT t.* FROM tasks t JOIN workspaces w ON w.id=t.workspace_id AND w.user_id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND w.state='ready' ${locking?'FOR UPDATE OF t':''}`,[id,scope.userId]);
+  const r=await tx.query<TaskRow>(`SELECT t.* FROM tasks t LEFT JOIN workspaces w ON w.id=t.workspace_id AND w.user_id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND ((t.workspace_id IS NULL AND t.kind=ANY($3::text[])) OR w.state='ready') ${locking?'FOR UPDATE OF t':''}`,[id,scope.userId,accountAssetTaskKinds]);
   if(!r.rows[0])throw new DomainError(404,'TASK_NOT_FOUND');return r.rows[0];
  }
  async create(scope:Scope,input:{workspaceId:string;text:string},key:string) {
@@ -28,7 +28,7 @@ export class TaskService {
   });
  }
  async detail(scope:Scope,id:string){return transaction(this.pool,async tx=>{const t=await this.authorized(tx,scope,id);return {task:taskDto(t),retryActions:[{action:'runtime',title:'重试',allowed:t.kind==='demo.digest'&&t.state==='failed'&&t.retryable&&t.external_state==='none'&&t.attempt_no<9}]};});}
- async running(scope:Scope){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const r=await tx.query<TaskRow>("SELECT t.* FROM tasks t JOIN workspaces w ON w.id=t.workspace_id AND w.user_id=t.user_id WHERE t.user_id=$1 AND w.state='ready' AND t.state NOT IN ('succeeded','failed','cancelled') ORDER BY t.created_at LIMIT 100",[scope.userId]);return {items:r.rows.map(taskDto)};});}
+ async running(scope:Scope){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const r=await tx.query<TaskRow>("SELECT t.* FROM tasks t LEFT JOIN workspaces w ON w.id=t.workspace_id AND w.user_id=t.user_id WHERE t.user_id=$1 AND ((t.workspace_id IS NULL AND t.kind=ANY($2::text[])) OR w.state='ready') AND t.state NOT IN ('succeeded','failed','cancelled') ORDER BY t.created_at LIMIT 100",[scope.userId,accountAssetTaskKinds]);return {items:r.rows.map(taskDto)};});}
  async events(scope:Scope,id:string,after:number,limit:number){return transaction(this.pool,async tx=>{await this.authorized(tx,scope,id);const r=await tx.query('SELECT sequence,state,created_at FROM task_events WHERE task_id=$1 AND sequence>$2 ORDER BY sequence LIMIT $3',[id,after,limit+1]);const items=r.rows.slice(0,limit).map(e=>({sequence:e.sequence,state:e.state,createdAt:e.created_at.toISOString()}));return {taskId:id,items,nextSequence:items.at(-1)?.sequence??after,hasMore:r.rows.length>limit};});}
  async result(scope:Scope,id:string){return transaction(this.pool,async tx=>{const t=await this.authorized(tx,scope,id);if(t.state!=='succeeded')throw new DomainError(409,'TASK_RESULT_NOT_READY');const r=await tx.query('SELECT id,digest,byte_count FROM task_results WHERE task_id=$1 AND id=$2',[id,t.result_id]);if(!r.rows[0])throw new DomainError(409,'TASK_RESULT_NOT_READY');return {taskId:id,resultId:r.rows[0].id,digest:r.rows[0].digest,byteCount:r.rows[0].byte_count};});}
  async mutate(scope:Scope,id:string,action:'cancel'|'retry',key:string,input:unknown){return transaction(this.pool,async tx=>{

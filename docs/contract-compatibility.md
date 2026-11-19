@@ -2,11 +2,13 @@
 
 ## 当前资产契约
 
-Server 使用 `ContentAsset` 表达用户可以管理的资产，中文显示为「资产」。PostgreSQL 主表为 `content_assets`，归属字段为 `user_id`，标识字段为 `content_asset_id`。正文、原文件、工作区、文件夹和标签按关系挂到资产。上传原文件使用 `Resource` 和 `resourceId`。 [资产与搜索术语](content-assets.md)
+Server 使用 `ContentAsset` 表达用户可以管理的资产，中文显示为「资产」。PostgreSQL 主表为 `content_assets`，归属字段为 `user_id`，标识字段为 `content_asset_id`。正文、原文件、文件夹和标签按关系挂到资产。上传原文件使用 `Resource` 和 `resourceId`。 [资产与搜索术语](content-assets.md)
 
-资产管理入口为 `/api/v1/workspaces/{workspaceId}/content-assets`，资产 ID 和修订分别使用 `contentAssetId` 和 `contentAssetRevisionId`。全文查询入口为 `/api/v1/kb/content-assets/query`，业务来源为 `content_asset`。AI 纲要场景使用 `content_asset_outline`。编辑器润色继续用一次生成请求返回提示词定义的文本，支持 JSON 和 SSE。 [AI 模板](runbooks/ai-templates.md)
+资产管理入口为 `/api/v1/content-assets`，资产 ID 和修订分别使用 `contentAssetId` 和 `contentAssetRevisionId`。全文查询入口为 `/api/v1/kb/content-assets/query`，业务来源为 `content_asset`。AI 纲要场景使用 `content_asset_outline`。编辑器润色继续用一次生成请求返回提示词定义的文本，支持 JSON 和 SSE。 [AI 模板](runbooks/ai-templates.md)
 
 `0020` 完成业务表、字段和任务命名收敛。本地候选 `0021` 更正索引列名和存量快照，底层索引使用 `hybrid`、`keyword`，集合按业务来源绑定。资产默认集合名随已有集合原地更名生效。 [索引与切换](runbooks/milvus.md)
+
+`0023` 把资产保存、图片引用、标签关系、索引和 AI 运行切到登录账号，移除资产工作区关系表与相关字段。独立文档入库继续走各自的业务读写范围。「我的标签」是 App 本机记录，已应用的资产标签可用于检索。 [索引迁移](runbooks/milvus.md)
 
 以下带日期的段落记录当时的实现与验收，保留对应版本的协议和数据库命名。
 
@@ -370,7 +372,7 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 
 ## P06 个人资产、文件夹、检索与图谱
 
-以下路径以 `/api/v1/workspaces/{workspaceId}` 为前缀。写入沿用幂等键，更新资产及正文部分携带当前资产 ETag。
+以下路径以 `/api/v1` 为前缀，按登录账号鉴权。写入沿用幂等键，更新资产及正文部分携带当前资产 ETag。
 
 | API | Server 当前行为 |
 |---|---|
@@ -378,8 +380,8 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 | `GET/PATCH/DELETE /content-assets/{contentAssetId}` | 资产详情、编辑与删除。返回 `contentAssetRevisionId`、`etag`、`resourceRefs` 和 `sourceRef`。整篇读取可校验 `revisionId`。 |
 | `GET/PUT /content-assets/{contentAssetId}/parts/{part}` | 读取或更新当前正文部分，读取返回 `contentMarkdown`、`partRevisionId`、`contentSha256`。 |
 | `POST /content-asset-imports` | 将纯文本或 Markdown 写为资产，可引用已有原文件。 |
-| `POST /content-assets/batch-move` | 修改工作区内文件夹位置，逐项返回结果。 |
-| `POST /search` | 当前支持 `keyword`、`hybrid`，以及标签、来源、日期和文件夹过滤。返回 `ownerRef.kind=content_asset`、`part=raw` 和整篇资产修订。 |
+| `POST /content-assets/batch-move` | 修改账号下资产的文件夹位置，逐项返回结果。 |
+| `POST /content-assets/search` | 当前支持 `keyword`、`hybrid`，以及标签、来源、日期和文件夹过滤。返回 `ownerRef.kind=content_asset`、`part=raw` 和整篇资产修订。 |
 | `GET /content-navigation/{map}` | 返回有界的资产与标签节点、共同标签边和 `totalContentAssets`。 |
 | `GET/POST /content-assets/{contentAssetId}/relations` | 读取或创建资产间的显式关系，创建使用 `targetContentAssetId`。 |
 | `DELETE /content-asset-relations/{relationId}` | 按关系 ETag 删除显式关系。 |

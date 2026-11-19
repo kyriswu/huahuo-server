@@ -63,10 +63,10 @@ describe('database cleanup invariants', () => {
         GROUP BY i.indexrelid,t.relname,am.amname,i.indisunique`,
     );
     expect(indexes.rows).toEqual(expect.arrayContaining([
-      { table_name: 'content_events', method: 'btree', is_unique: true, column_names: ['workspace_id', 'cursor'] },
+      { table_name: 'content_events', method: 'btree', is_unique: true, column_names: ['user_id', 'cursor'] },
       { table_name: 'kb_content_asset_hybrid_chunks', method: 'btree', is_unique: true, column_names: ['build_id', 'ordinal'] },
     ]));
-    const state = await pool.query("SELECT to_regclass('public.workspace_content_state') IS NOT NULL AS present");
+    const state = await pool.query("SELECT to_regclass('public.account_content_state') IS NOT NULL AS present");
     expect(state.rows[0]).toEqual({ present: true });
   });
 

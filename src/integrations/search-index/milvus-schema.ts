@@ -58,13 +58,13 @@ export const SPARSE_IP_INDEX_NAME = 'huahuo_sparse_ip';
 export const MILVUS_POINT_FIELDS = ['id','index_status'];
 export const MILVUS_OUTPUT_FIELDS = ['id','source_id','source_type','text','index_status'];
 
-export function buildMilvusSchema(kind: IndexKind, dimensions=1024, sparse=false): FieldType[] {
+export function buildMilvusSchema(kind: IndexKind, dimensions=1024, sparse=false, accountScope=false): FieldType[] {
   return [
     {name:'id',data_type:DataType.VarChar,is_primary_key:true,autoID:false,max_length:256},
     {name:'source_id',data_type:DataType.VarChar,max_length:256},
     {name:'source_type',data_type:DataType.VarChar,max_length:32},
     {name:'user_id',data_type:DataType.VarChar,max_length:256},
-    {name:'workspace_id',data_type:DataType.VarChar,max_length:256},
+    ...(!accountScope?[{name:'workspace_id',data_type:DataType.VarChar,max_length:256}]:[]),
     ...(!sparse?[{name:'text',data_type:DataType.VarChar,max_length:65535,enable_analyzer:true,multi_analyzer_params:structuredClone(MULTI_ANALYZER_PARAMS)}]:[]),
     ...(!sparse?[{name:'language',data_type:DataType.VarChar,max_length:16}]:[]),
     {name:'index_status',data_type:DataType.VarChar,max_length:16},

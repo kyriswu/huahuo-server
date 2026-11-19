@@ -74,7 +74,7 @@ export class TextIngestionService {
       const workspace = (await tx.query<{ id: string }>("SELECT id FROM workspaces WHERE user_id=$1 AND is_default AND state='ready'", [scope.userId])).rows[0];
       if (!workspace) throw new DomainError(409, 'WORKSPACE_NOT_READY');
       const prepared = input.source_type === TextIngestionSourceType.MANUAL_INPUT
-        ? await normalizeOwnedImageParts(tx, scope, workspace.id, { raw: input.raw_content }, this.config, this.resourceClaims)
+        ? await normalizeOwnedImageParts(tx, scope, { raw: input.raw_content }, this.config, this.resourceClaims, workspace.id)
         : undefined;
       const sourceResourceId = input.source_type === TextIngestionSourceType.FILE_UPLOAD ? ownedObjectKey(input.origin_resource_uri, this.config) : undefined;
       if (sourceResourceId !== undefined) {
@@ -134,7 +134,7 @@ export class TextIngestionService {
       // Removing the last image also updates its resource count. Use the same
       // account-before-business-row order as edits that claim new images.
       if(current.raw_content&&kbImages(current.raw_content).length)await this.resourceClaims?.lockAccount(tx,scope);
-      const prepared = await normalizeOwnedImageParts(tx, scope, current.workspace_id, { raw: input.raw_content }, this.config, this.resourceClaims);
+      const prepared = await normalizeOwnedImageParts(tx, scope, { raw: input.raw_content }, this.config, this.resourceClaims, current.workspace_id);
       const stableInput = { raw_content: prepared.parts.raw, imageOrigins: prepared.imageOrigins };
       return idempotent(tx, this.config.appTokenSecret!, scope.userId, `text-ingestion.update:${id}`, key, { input: stableInput, ifMatch }, async () => {
         const row = await this.owned(tx, scope, id, true);

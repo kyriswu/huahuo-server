@@ -14,7 +14,7 @@ export interface TextPoint {
   readonly sourceId: string;
   readonly sourceType: string;
   readonly userId: string;
-  readonly workspaceId: string;
+  readonly workspaceId?: string;
   readonly content: string;
 }
 export interface KeywordPoint extends TextPoint { readonly embedding?: never; }
@@ -25,7 +25,7 @@ export type IndexPoint = KeywordPoint | VectorPoint;
  * point set is invalid, never shorthand for searching all tenant data. */
 export interface RecallScope {
   readonly userId: string;
-  readonly workspaceId: string;
+  readonly workspaceId?: string;
   readonly pointIds: readonly string[];
 }
 /** Allowlisted metadata conditions. No raw engine expression or query DSL. */
@@ -89,7 +89,7 @@ export class SearchIndexError extends Error {
 
 export function validateScope(scope: RecallScope): void {
   if (!scope || typeof scope.userId !== 'string' || !scope.userId.trim()
-    || typeof scope.workspaceId !== 'string' || !scope.workspaceId.trim()
+    || (scope.workspaceId !== undefined && (typeof scope.workspaceId !== 'string' || !scope.workspaceId.trim()))
     || !Array.isArray(scope.pointIds) || !scope.pointIds.length
     || scope.pointIds.some(id => typeof id !== 'string' || !id.trim())) {
     throw new SearchIndexError('SEARCH_INDEX_SCOPE_REQUIRED');

@@ -18,21 +18,25 @@ describe('current business contracts',()=>{
   registerContentAssetRoutes(app,{search,deleteFolder} as unknown as ContentAssetService,{} as StorageService);
   registerTaskRoutes(app,{} as TaskService,false);
   try{
-   expect((await app.inject({method:'POST',url:`/api/v1/workspaces/${id}/search`,payload:{query:'text',keywordAttemptId:'old'}})).statusCode).toBe(400);
+   expect((await app.inject({method:'POST',url:`/api/v1/content-assets/search`,payload:{query:'text',keywordAttemptId:'old'}})).statusCode).toBe(400);
+   expect((await app.inject({method:'POST',url:'/api/v1/content-assets',payload:{title:'draft',parts:{raw:'text'},workspaceId:id}})).statusCode).toBe(400);
+   expect((await app.inject({url:`/api/v1/workspaces/${id}/content-assets`})).statusCode).toBe(404);
+   expect((await app.inject({url:'/api/v1/tags'})).statusCode).toBe(404);
    for(const payload of [{parentFolderId:null},{overrideParentFolder:true}]){
-    expect((await app.inject({method:'POST',url:`/api/v1/workspaces/${id}/folders/${id}/restore`,payload})).statusCode).toBe(400);
+    expect((await app.inject({method:'POST',url:`/api/v1/folders/${id}/restore`,payload})).statusCode).toBe(400);
    }
    expect((await app.inject({method:'POST',url:`/api/v1/tasks/${id}/regenerate`,payload:{}})).statusCode).toBe(404);
    expect(search).not.toHaveBeenCalled();expect(deleteFolder).not.toHaveBeenCalled();
   }finally{await app.close();}
  });
  it('does not advertise the demo retry operation for a real failed task',async()=>{
-  const task={id,user_id:id,workspace_id:id,kind:'content-asset.tag-extract',state:'failed',retryable:true,external_state:'none',attempt_no:3,resume_count:0,version:1,result_id:null,created_at:new Date(),updated_at:new Date(),error_code:'TAG_PROVIDER_UNAVAILABLE'} as TaskRow;
+  const task={id,user_id:id,workspace_id:null,kind:'content-asset.tag-extract',state:'failed',retryable:true,external_state:'none',attempt_no:3,resume_count:0,version:1,result_id:null,created_at:new Date(),updated_at:new Date(),error_code:'TAG_PROVIDER_UNAVAILABLE'} as TaskRow;
   const client={on:vi.fn(),removeListener:vi.fn(),release:vi.fn(),query:vi.fn(async(sql:string)=>({rows:sql.includes('SELECT t.*')?[task]:[{id}],rowCount:1}))};
   const service=new TaskService({connect:async()=>client} as unknown as pg.Pool,'unit-secret-'.repeat(4));
   const detail=await service.detail({userId:id,sessionId:id,traceId:'unit'},id);
   expect(detail.retryActions).toEqual([{action:'runtime',title:'重试',allowed:false}]);
   expect(detail.task).toMatchObject({state:'failed'});expect(detail.task).not.toHaveProperty('status');
+  expect(detail.task).not.toHaveProperty('workspaceId');
   await expect(service.change(client as unknown as pg.PoolClient,task,'retry')).rejects.toMatchObject({code:'TASK_RETRY_NOT_ALLOWED'});
  });
 });

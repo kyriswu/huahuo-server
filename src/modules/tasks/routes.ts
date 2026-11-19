@@ -6,7 +6,7 @@ import { Envelope,Id,Text,Strict,Nullable } from '../identity/schemas.js';
 import { idempotencyKey } from '../identity/routes.js';
 import { DomainError } from '../identity/store.js';
 import { TaskService } from './service.js';
-export const TaskSchema=Type.Object({taskId:Id,taskType:Type.String(),state:Type.String(),workspaceId:Nullable(Id),version:Type.Integer(),attempt:Type.Integer(),resultId:Nullable(Id),createdAt:Type.String(),updatedAt:Type.String(),error:Type.Optional(Type.Object({code:Type.String(),userMessage:Type.String(),retryable:Type.Boolean()}))});
+export const TaskSchema=Type.Object({taskId:Id,taskType:Type.String(),state:Type.String(),workspaceId:Type.Optional(Nullable(Id)),version:Type.Integer(),attempt:Type.Integer(),resultId:Nullable(Id),createdAt:Type.String(),updatedAt:Type.String(),error:Type.Optional(Type.Object({code:Type.String(),userMessage:Type.String(),retryable:Type.Boolean()}))});
 export const MutationSchema=Type.Object({task:TaskSchema});
 export const taskErrors={400:ErrorSchema,401:ErrorSchema,403:ErrorSchema,404:ErrorSchema,409:ErrorSchema,429:ErrorSchema,503:ErrorSchema};
 export function registerTaskRoutes(app:FastifyInstance,service:TaskService,demoEnabled:boolean){

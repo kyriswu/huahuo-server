@@ -31,8 +31,8 @@ function fixture(mode:IndexMode,options:{count?:number;failBatch?:number;leaseLo
  const drafts:KbDraft[]=Array.from({length:options.count??513},(_,ordinal)=>({ordinal,start:ordinal*body.length,end:(ordinal+1)*body.length,
   coreStart:ordinal*body.length,coreEnd:(ordinal+1)*body.length,sectionId:null,headingPath:[],content:body,embeddingText:body,
   contentHash:digest(body),inputHash:digest(body),charCount:body.length,tokenCount:body.length}));
- const source:KbSource={type:sourceType,id:'source',revision:'revision',userId:'user',workspaceId:'workspace',content:body.repeat(drafts.length),format:'markdown'};
- const build:KbBuild={id:'build',source_type:source.type,source_id:source.id,source_revision:source.revision,user_id:source.userId,workspace_id:source.workspaceId,
+ const source:KbSource={type:sourceType,id:'source',revision:'revision',userId:'user',...(sourceType==='text'?{workspaceId:'workspace'}:{}),content:body.repeat(drafts.length),format:'markdown'};
+ const build:KbBuild={id:'build',source_type:source.type,source_id:source.id,source_revision:source.revision,user_id:source.userId,...(source.workspaceId?{workspace_id:source.workspaceId??null}:{}),
   task_id:'task',content_hash:digest(source.content),config_hash:snapshot.configHash,snapshot,status:'pending',published:false,cleanup_status:'pending',chunk_count:drafts.length,
   planned:options.planned??false,toc_status:'pending',toc:null};
  // Expected IDs use the existing persisted identity, including occurrence across
@@ -76,7 +76,7 @@ function fixture(mode:IndexMode,options:{count?:number;failBatch?:number;leaseLo
  const tokenizer={id:'fixture',model:'fixture',maxInputTokens:1000,count:async(text:string)=>text.length};
  const embed=vi.fn(async(texts:string[])=>texts.map(()=>[1,0]));
  const jobs=new KnowledgeIndexJobs(pool,settings,{index:()=>index,tokenizer:async()=>tokenizer,embedding:()=>({model:'fixture',dimensions:2,embed})});
- const attempt={task:{id:build.task_id,user_id:source.userId,workspace_id:source.workspaceId},owner:'owner',version:1,attempt:1} as Attempt;
+ const attempt={task:{id:build.task_id,user_id:source.userId,workspace_id:source.workspaceId??null},owner:'owner',version:1,attempt:1} as Attempt;
  return {run:()=>jobs.executeBuild(build.id,attempt,sourceType),sql,inserts,reuses,stored,pointIds,reusable,upsert,embed,close,build};
 }
 

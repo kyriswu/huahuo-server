@@ -9,9 +9,12 @@ export const uuidFor=(value:string)=>{const h=digest(value);return `${h.slice(0,
 export async function createBuild(tx:pg.PoolClient,source:KbSource,taskId:string,snapshot:KbSnapshot):Promise<KbBuild>{
  const {builds,chunks}=tablesForSource(source.type);
  const id=uuidFor(JSON.stringify([source.type,source.id,source.revision,snapshot.configHash]));
- const row=(await tx.query<KbBuild>(`INSERT INTO ${builds}(id,source_type,source_id,source_revision,user_id,workspace_id,task_id,content_hash,config_hash,snapshot)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT(id) DO UPDATE SET task_id=EXCLUDED.task_id,updated_at=now() RETURNING *`,
- [id,source.type,source.id,source.revision,source.userId,source.workspaceId,taskId,digest(source.content),snapshot.configHash,JSON.stringify(snapshot)])).rows[0]!;
+ const fields = [id,source.type,source.id,source.revision,source.userId,taskId,digest(source.content),snapshot.configHash,JSON.stringify(snapshot)];
+ const document = source.type !== 'content_asset';
+ if(document&&!source.workspaceId)throw new Error('KB_DOCUMENT_WORKSPACE_REQUIRED');
+ const row=(await tx.query<KbBuild>(`INSERT INTO ${builds}(id,source_type,source_id,source_revision,user_id,task_id,content_hash,config_hash,snapshot${document?",workspace_id":""})
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb${document?",$10":""}) ON CONFLICT(id) DO UPDATE SET task_id=EXCLUDED.task_id,updated_at=now() RETURNING *`,
+ document?[...fields,source.workspaceId]:fields)).rows[0]!;
  if(!row.published&&(row.status==='deleted'||row.cleanup_status==='ready')){
   await tx.query(`DELETE FROM ${chunks} WHERE build_id=$1`,[row.id]);
   await tx.query(`UPDATE ${builds} SET planned=false,status='pending',cleanup_status='pending',chunk_count=0 WHERE id=$1`,[row.id]);
@@ -23,11 +26,10 @@ export async function sourceState(tx:pg.PoolClient,build:Pick<KbBuild,'source_ty
  const params=[build.source_id,build.user_id,build.workspace_id];
  if(build.source_type==='content_asset'){
   const row=(await tx.query(`SELECT asset.state,asset.processing_status,p.part_revision_id::text AS revision,p.content_markdown AS content
-   FROM content_assets asset JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$3
-   JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=asset.user_id AND w.state='ready'
+   FROM content_assets asset
    JOIN users u ON u.id=asset.user_id AND u.status='active' AND u.deleted_at IS NULL
    LEFT JOIN content_asset_parts p ON p.content_asset_id=asset.content_asset_id AND p.part='raw'
-   WHERE asset.content_asset_id=$1 AND asset.user_id=$2 ${lock?'FOR UPDATE OF asset':''}`,params)).rows[0];
+   WHERE asset.content_asset_id=$1 AND asset.user_id=$2 ${lock?'FOR UPDATE OF asset':''}`,params.slice(0,2))).rows[0];
   if(!row)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
   return {revision:row.revision??'',content:row.content??'',deleted:row.state!=='active'||row.processing_status!=='ready'||!String(row.content??'').trim(),format:'markdown'};
  }
@@ -48,7 +50,7 @@ export async function sourceContent(pool:pg.Pool,config:AppConfig,build:KbBuild)
  const state=await transaction(pool,tx=>sourceState(tx,build));
  if(state.deleted||state.revision!==build.source_revision)throw new DomainError(409,'KB_SOURCE_SUPERSEDED');
  const content=await readSourceBody(config,build.content_hash,state);
- return {type:build.source_type,id:build.source_id,revision:build.source_revision,userId:build.user_id,workspaceId:build.workspace_id,content,format:build.snapshot.format};
+ return {type:build.source_type,id:build.source_id,revision:build.source_revision,userId:build.user_id,...(build.workspace_id?{workspaceId:build.workspace_id}:{}),content,format:build.snapshot.format};
 }
 export async function readSourceBody(config:AppConfig,expectedHash:string,state:{content?:string|null;uri?:string|null}):Promise<string>{
  let content=state.content??undefined;

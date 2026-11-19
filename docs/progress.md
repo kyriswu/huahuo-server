@@ -1,3 +1,11 @@
+## 自由创作按账号归属（2026-11-19，本地候选）
+
+用 CodeGraph 追踪资产保存与图片认领、Task/Outbox 到 Milvus、全文回读和 AI 运行。使用无工作区的登录账号验证创作和查询，并检查跨账号隔离。资产标签用于归类和搜索，「我的标签」由 App 本机记录。编辑器润色沿用一次 SSE 生成，内容、建议及理由由后台发布的提示词组织。 [当前契约](contract-compatibility.md) · [AI 模板](runbooks/ai-templates.md)
+
+隔离演练从 0022 升到 0023，复跑无待迁移项。含数据的迁移用例验证正文、图片引用、目录、标签、AI 运行和待索引任务。只读核对 App 提交 `fe6a02c` 的本地创作和通用上传。OSS 与 AI 使用测试替身，PostgreSQL、Redis 和 Milvus 使用临时实例。 [迁移用例](../tests/integration/current-note-migration.test.ts) · [索引验证](../tests/integration/knowledge-base.test.ts)
+
+类型检查、Lint、构建、1199 项单元与契约测试和 499 项隔离集成测试通过。业务 schema 物理外键为零。本次交付停在本地验收。
+
 ## Milvus 无正文检索（2026-11-19，测试发布候选）
 
 Server 提供独立的无正文资产和文档集合，支持稀疏关键词与 RRF 混合召回。默认候选关闭外部重排，正文按最终候选批量读取并按排名补齐失效片段。0022 在隔离 PostgreSQL 升级验证通过，复跑无待应用迁移。测试环境只读核对两套旧集合均为零点，已发布构建与待索引任务均为零，已确认 Jieba 可用。切换和退役继续走现有审核、CI 与维护门禁。 [候选与验收](runbooks/milvus-textless-search.md)

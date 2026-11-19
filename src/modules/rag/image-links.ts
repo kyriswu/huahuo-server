@@ -30,11 +30,9 @@ export class RagImageLinks {
     const requests = [...new Map(input.map(image => [ragImageKey(image), image])).values()];
     const result = new Map<string, RagImageLink>();
     const contentAssets = requests.filter(image => image.sourceType === 'content_asset');
-    // Keep workspace ownership in the batched lookup, including multi-workspace searches.
-    for (const workspaceId of new Set(contentAssets.map(image => image.workspaceId))) {
-      const group = contentAssets.filter(image => image.workspaceId === workspaceId);
-      const links = new Map((await this.storage.playbacks(scope, group.map(image => image.resourceId), workspaceId)).filter(link => link.mimeType.startsWith('image/')).map(link => [link.resourceId, link]));
-      for (const image of group) { const link = links.get(image.resourceId); if (link) result.set(ragImageKey(image), { url: link.url, expiresAt: link.expiresAt }); }
+    if (contentAssets.length) {
+      const links = new Map((await this.storage.playbacks(scope, contentAssets.map(image => image.resourceId))).filter(link => link.mimeType.startsWith('image/')).map(link => [link.resourceId, link]));
+      for (const image of contentAssets) { const link = links.get(image.resourceId); if (link) result.set(ragImageKey(image), { url: link.url, expiresAt: link.expiresAt }); }
     }
     const files = requests.filter(image => image.sourceType === 'file');
     if (files.length) {

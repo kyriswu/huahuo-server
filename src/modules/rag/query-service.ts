@@ -13,8 +13,8 @@ import {SearchQueryTiming} from './query-timing.js';
 import { CONTENT_ASSET_EMBEDDING_MODEL, CONTENT_ASSET_EMBEDDING_PROFILE } from './model-profile.js';
 import {kbImages,renderKbImages,type KbImage} from '../../lib/kb-images.js';
 export type RagQueryMode='keyword'|'dense'|'hybrid';
-export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:'content_asset'|'file';topK?:number;documentKey?:string;workspaceId?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
-export interface RagImageRequest{sourceType:KbSourceType;sourceId:string;workspaceId:string;sourceRevision:string;resourceId:string;}
+export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:'content_asset'|'file';topK?:number;documentKey?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
+export interface RagImageRequest{sourceType:KbSourceType;sourceId:string;workspaceId?:string;sourceRevision:string;resourceId:string;}
 export interface RagImageLink{url:string;expiresAt:string;}
 export const ragImageKey=(image:RagImageRequest)=>JSON.stringify([image.sourceType,image.sourceId,image.workspaceId,image.sourceRevision,image.resourceId]);
 export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveImages?:(scope:Scope,images:RagImageRequest[])=>Promise<ReadonlyMap<string,RagImageLink>>;}
@@ -49,29 +49,28 @@ export class RagQueryService {
   {cursor,ids,includeBody=false}:{cursor?:{createdAt:string;id:string};ids?:string[];includeBody?:boolean}={}){
   const {builds}=tablesForSource(type);
   return transaction(this.pool,async tx=>{await assertScope(tx,scope);
-   const values:unknown[]=[scope.userId,type==='content_asset'?['content_asset']:['file','text'],input.documentKey??null,input.workspaceId??null,cursor?.createdAt??null,cursor?.id??null,ids??null,ids?.length??sourcePageSize];
+   const values:unknown[]=[scope.userId,type==='content_asset'?['content_asset']:['file','text'],input.documentKey??null,cursor?.createdAt??null,cursor?.id??null,ids??null,ids?.length??sourcePageSize];
    let sourceJoin=type==='content_asset'?`JOIN content_assets asset ON asset.content_asset_id=b.source_id AND asset.user_id=b.user_id AND asset.state='active' AND asset.processing_status='ready'
-     JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=b.workspace_id
      JOIN content_asset_parts p ON p.content_asset_id=asset.content_asset_id AND p.part='raw' AND p.part_revision_id::text=b.source_revision`
     :`LEFT JOIN rag_ingestion_versions v ON b.source_type='file' AND v.id=b.source_id AND v.user_id=b.user_id AND v.workspace_id=b.workspace_id AND v.content_hash=b.source_revision AND v.active AND v.deleted_at IS NULL AND v.status='SUCCEEDED'
       LEFT JOIN text_ingestion_jobs j ON b.source_type='text' AND j.id=b.source_id AND j.created_by=b.user_id AND j.workspace_id=b.workspace_id AND j.content_hash=b.source_revision AND j.ingest_status='success'`;
    if(type==='content_asset'){
     if(input.filters?.folderIds?.length)sourceJoin+=` AND EXISTS(
       SELECT 1 FROM content_asset_folders m JOIN asset_folders f ON f.folder_id=m.folder_id
-      WHERE m.content_asset_id=asset.content_asset_id AND f.workspace_id=b.workspace_id AND f.state='active'
+      WHERE m.content_asset_id=asset.content_asset_id AND f.user_id=b.user_id AND f.state='active'
         AND m.folder_id=ANY($${values.push(input.filters.folderIds)}::uuid[])
     )`;
     if(input.filters?.sourceKinds?.length)sourceJoin+=` AND asset.source_kind=ANY($${values.push(input.filters.sourceKinds)}::text[])`;
-    if(input.filters?.tagIds?.length)sourceJoin+=` AND EXISTS(SELECT 1 FROM content_asset_tags membership JOIN asset_tags at ON at.tag_id=membership.tag_id AND at.workspace_id=b.workspace_id WHERE membership.content_asset_id=asset.content_asset_id AND membership.tag_id=ANY($${values.push(input.filters.tagIds)}::uuid[]))`;
+    if(input.filters?.tagIds?.length)sourceJoin+=` AND EXISTS(SELECT 1 FROM content_asset_tags membership JOIN asset_tags at ON at.tag_id=membership.tag_id AND at.user_id=b.user_id WHERE membership.content_asset_id=asset.content_asset_id AND membership.tag_id=ANY($${values.push(input.filters.tagIds)}::uuid[]))`;
     if(input.filters?.from)sourceJoin+=` AND asset.updated_at >= $${values.push(input.filters.from)}::timestamptz`;
     if(input.filters?.to)sourceJoin+=` AND asset.updated_at <= $${values.push(input.filters.to)}::timestamptz`;
    }
    const bodyProjection=type==='content_asset'?',p.content_markdown AS source_body':',j.raw_content AS source_body,v.canonical_content_uri AS source_uri';
-   return (await tx.query<EligibleBuild>(`SELECT b.*,to_char(b.created_at,'YYYY-MM-DD HH24:MI:SS.USOF') AS cursor_created_at${type==='content_asset'?',asset.content_asset_revision_id::text AS content_asset_revision_id':''}${includeBody?bodyProjection:''} FROM ${builds} b JOIN workspaces w ON w.id=b.workspace_id AND w.user_id=b.user_id AND w.state='ready'
+   return (await tx.query<EligibleBuild>(`SELECT b.*,to_char(b.created_at,'YYYY-MM-DD HH24:MI:SS.USOF') AS cursor_created_at${type==='content_asset'?',asset.content_asset_revision_id::text AS content_asset_revision_id':''}${includeBody?bodyProjection:''} FROM ${builds} b ${type==='file'?`JOIN workspaces w ON w.id=b.workspace_id AND w.user_id=b.user_id AND w.state='ready'`:''}
      ${sourceJoin} WHERE b.user_id=$1 AND b.source_type=ANY($2::text[]) AND ($3::text IS NULL OR b.source_id::text=$3)
-     AND ($4::uuid IS NULL OR b.workspace_id=$4) AND ($5::timestamptz IS NULL OR (b.created_at,b.id)<($5::timestamptz,$6::uuid))
-     AND ($7::uuid[] IS NULL OR b.id=ANY($7::uuid[])) ${type==='file'?'AND (v.id IS NOT NULL OR j.id IS NOT NULL)':''}
-     AND b.published AND b.status='ready' ORDER BY b.created_at DESC,b.id DESC LIMIT $8`,values)).rows;
+     AND ($4::timestamptz IS NULL OR (b.created_at,b.id)<($4::timestamptz,$5::uuid))
+     AND ($6::uuid[] IS NULL OR b.id=ANY($6::uuid[])) ${type==='file'?'AND (v.id IS NOT NULL OR j.id IS NOT NULL)':''}
+     AND b.published AND b.status='ready' ORDER BY b.created_at DESC,b.id DESC LIMIT $7`,values)).rows;
   });
  }
  private async chunkPage(scope:Scope,sourceType:KbSourceType,builds:EligibleBuild[],size:number,cursor?:{buildId:string;ordinal:number}){
@@ -135,11 +134,11 @@ export class RagQueryService {
     while(true){
      const rows=await timing.measure('pg_scope',()=>this.chunkPage(scope,sourceType,builds,pointPageSize,cursor));
      if(!rows.length)break;
-     const byPoint=new Map(rows.map(row=>[row.point_id,row])),byWorkspace=new Map<string,ChunkRow[]>();
+     const byPoint=new Map(rows.map(row=>[row.point_id,row])),byWorkspace=new Map<string|undefined,ChunkRow[]>();
      for(const row of rows){const workspaceId=byBuild.get(row.build_id)!.workspace_id;const group=byWorkspace.get(workspaceId)??[];group.push(row);byWorkspace.set(workspaceId,group);}
      for(const [workspaceId,group]of byWorkspace){
       // Published PostgreSQL chunks authorize these point IDs independently of stored index labels.
-      const recallScope={userId:scope.userId,workspaceId,pointIds:group.map(row=>row.point_id)};
+      const recallScope={userId:scope.userId,...(workspaceId?{workspaceId}:{}),pointIds:group.map(row=>row.point_id)};
       const allowed=new Set(recallScope.pointIds);
       const collect=async(target:Map<string,Candidate>,budget:number,kind:'dense'|'keyword')=>{
        const options={scope:recallScope,limit:budget};
@@ -228,7 +227,7 @@ export class RagQueryService {
     if(!all){all=kbImages(loaded.get(build.id)!);parsed.set(build.id,all);}
     const start=Number(c.metadata!.sourceStart),end=Number(c.metadata!.sourceEnd);
     const images=all.filter(image=>image.nodeStart<end&&image.nodeEnd>start).map(image=>{
-     const request={sourceType:build.source_type,sourceId:build.source_id,workspaceId:build.workspace_id,sourceRevision:build.source_revision,resourceId:image.resourceId};
+     const request={sourceType:build.source_type,sourceId:build.source_id,...(build.workspace_id?{workspaceId:build.workspace_id}:{}),sourceRevision:build.source_revision,resourceId:image.resourceId};
      requests.set(ragImageKey(request),request);return {image,request};
     });
     return {c,build,start,end,images};

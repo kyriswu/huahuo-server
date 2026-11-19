@@ -6,7 +6,7 @@
 
 | 来源 | 索引模式 | 现有处理 | 默认集合 |
 | --- | --- | --- | --- |
-| 资产正文 | `hybrid` | 保存当前 raw，按配置创建 Task/Outbox，分段、Embedding、写索引 | `huahuo_kb_content_asset_hybrid_chunks` |
+| 资产正文 | `hybrid` | 保存当前 raw，按配置创建 Task/Outbox，分段、Embedding、写索引 | `huahuo_kb_content_asset_hybrid_chunks_account_v1` |
 | OSS 文件 | `keyword` | 外部解析器读取 OSS URL，保存规范正文、目录与图片回执，分段写入 | `huahuo_kb_keyword_chunks` |
 | 独立导入文本 | `keyword` | 保存原文，按现有分段规则写入 | `huahuo_kb_keyword_chunks` |
 
@@ -17,7 +17,7 @@
 - `/api/v1/rag/query` 与 `/internal/v1/rag/query` 使用同一个 RagQueryService。
 - `/api/v1/kb/content-assets/query` 查询已发布的资产正文，支持 `keyword`、`dense` 和 `hybrid`。
 - `/api/v1/kb/documents/query` 按 `keyword` 查询文件和独立文本，结果保留 `file` 或 `text` 来源。
-- `/api/v1/workspaces/:workspaceId/search` 复用资产查询，支持 `keyword` 和 `hybrid`。
+- `/api/v1/content-assets/search` 复用资产查询，支持 `keyword` 和 `hybrid`。
 - 当前实现保留来源分页、精确已发布point范围、正文/哈希/权限复核、全局分支融合及可选重排；它们不是产品需求决定。
 - 当前 App 首页搜索仍为本地筛选，未接这些接口。本轮未接线 App 或其他项目。
 
@@ -48,3 +48,9 @@ Embedding仍用现有百炼同步接口，单HTTP批次最多20条；输入预�
 pnpm test:integration --milvus 创建本项目独立临时 PostgreSQL/Redis/Milvus，不读取业务 .env。验证解析、写入、索引发布、重复执行、失败恢复、删除、权限和普通CRUD；模型/解析/OSS使用明确替身。adapter级读回用于确认索引内容，不代表搜索产品需求或真实业务验收已确定。
 
 脚本 rag:consistency 和 rag:verify-milvus 用于索引一致性与 schema 检查；真实目标操作仍须按具体授权执行，不因本地测试通过自行访问或修改共享集合。
+
+## 0023 资产索引改用账号归属
+
+资产集合的物理名称由 `snapshotForSource` 计算。原生 BM25 使用配置前缀加 `_account_v1`，`sparse-v1` 使用前缀加 `_sparse_v1_account_v1`。新集合用 `user_id` 和 PostgreSQL 当前已发布点 ID 限制召回范围。独立文档集合沿用现有方案。
+
+维护时先核对旧资产构建的快照目标是否与部署配置一致，按当前索引布局准备并验证新的资产集合。0023 会让旧资产点退出服务，并把当前构建重新排队。已存在的命中可能在重建完成前暂时不可用。上线验收包括检查重建积压、真实查询和跨账号隔离；旧集合的云端清理由后续维护处理。

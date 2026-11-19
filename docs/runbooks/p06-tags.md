@@ -2,13 +2,13 @@
 
 当前候选（2026-11-18）：`features.tagProvider=disabled` 时保存或编辑资产时跳过自动标签任务；显式提取在权限/归属校验后返回 `503 TAG_PROVIDER_UNAVAILABLE`，已有成功幂等 key 仍可重放。启用后对新操作恢复调度，不批量补提旧素材；手动标签、内容保存和索引照常。见[写入优化验收](../acceptance/pg-row-growth-optimization-20261118.md)。下文的 HTTP 契约使用当前资产命名。
 
-有效标签来自 `content_asset_tags`。资产图谱按当前标签关系计算。`content_asset_relations` 维护资产间的显式关系。
+有效标签来自 `content_asset_tags`。「我的标签」由 App 在本机记录最近用过的标签。资产图谱按当前标签关系计算。`content_asset_relations` 维护资产间的显式关系。
 
 ## HTTP 接口
 
-资产列表使用 `GET /api/v1/workspaces/:workspaceId/content-assets`固定每页 20 条，下一页原样传回`nextCursor`，返回null时结束。列表仅返回元信息与最多200字的纯文本`preview`，正文及资源引用通过独立资产详情读取；`preview`可能为空。更新时间降序、ID升序；翻页期间编辑或新增的资产通过刷新首屏读取，无跨请求快照。详情和part接口保持完整正文，见[分页验收](../acceptance/note-pagination.md)。此列表页大小不改变下方图谱预算。
+资产列表使用 `GET /api/v1/content-assets`固定每页 20 条，下一页原样传回`nextCursor`，返回null时结束。列表仅返回元信息与最多200字的纯文本`preview`，正文及资源引用通过独立资产详情读取；`preview`可能为空。更新时间降序、ID升序；翻页期间编辑或新增的资产通过刷新首屏读取，无跨请求快照。详情和part接口保持完整正文，见[分页验收](../acceptance/note-pagination.md)。此列表页大小不改变下方图谱预算。
 
-基础路径 `/api/v1/workspaces/:workspaceId/content-assets/:contentAssetId`，Bearer 对应的工作区所有者才能访问。所有写请求带 `Idempotency-Key` 或兼容的 `X-Idempotency-Key`；标签改写额外带最新 `If-Match: <tagEtag>`，不可用 contentAssetEtag 替代。
+基础路径 `/api/v1/content-assets/:contentAssetId`，Bearer 对应的登录账号只能访问自己的资产。所有写请求带 `Idempotency-Key` 或兼容的 `X-Idempotency-Key`；标签改写额外带最新 `If-Match: <tagEtag>`，不可用 contentAssetEtag 替代。
 
 | 方法/相对路径 | 输入 | 语义 |
 |---|---|---|
@@ -22,7 +22,7 @@
 
 标签 1–24 Unicode 字符；NFKC/trim/小写去重，不做语义合并。人工最多 20 个（与 App 源码一致）；自动结果最多 5 个，允许 0 个。412 表示标签版本冲突，重读后由用户选择；幂等键重放返回原结果，同键不同请求 409。
 
-图谱：`GET /api/v1/workspaces/:workspaceId/content-navigation/:map`，map=`overview|graph|tags` 是同一投影。可选 `tagId|contentAssetId|cursor|maxNodes|maxEdges`，默认/最大 100 节点、200 边，每页最多 50 篇资产。无标签资产也返回，共享标签边提供 `evidence`。`totalContentAssets` 为当前授权查询的全量活跃资产数，主题 `count` 为全工作区活跃资产数（非 revision 数）；`hasMore/nextCursor/truncated/edgesTruncated` 明确局部截断。只计算当前页资产之间的边，不生成全库两两关系。
+图谱：`GET /api/v1/content-navigation/:map`，map=`overview|graph|tags` 是同一投影。可选 `tagId|contentAssetId|cursor|maxNodes|maxEdges`，默认/最大 100 节点、200 边，每页最多 50 篇资产。无标签资产也返回，共享标签边提供 `evidence`。`totalContentAssets` 为当前授权查询的全量活跃资产数，主题 `count` 为当前账号的活跃资产数（非 revision 数）；`hasMore/nextCursor/truncated/edgesTruncated` 明确局部截断。只计算当前页资产之间的边，不生成全库两两关系。
 
 标签写入后的新读取直接使用 PostgreSQL 一致性快照，HTTP 返回 `Cache-Control: no-store`。旧游标遇到 `contentCursor` 变化返回 `409 GRAPH_CURSOR_STALE`，客户端从首页重新获取。 [App 实际参照](../app-reference.md)
 

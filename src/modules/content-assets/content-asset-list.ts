@@ -7,9 +7,9 @@ export const CONTENT_ASSET_PREVIEW_LENGTH = 200;
 const previewSourceLength = 2048;
 const markdown = new MarkdownIt({ html: true });
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/iu;
-interface Cursor { wid: string; updatedAt: string; contentAssetId: string }
+interface Cursor { userId: string; updatedAt: string; contentAssetId: string }
 
-function decodeCursor(value: string | undefined, wid: string): Cursor | undefined {
+function decodeCursor(value: string | undefined, userId: string): Cursor | undefined {
   if (value === undefined) return;
   try {
     if (!/^[A-Za-z0-9_-]{1,512}$/u.test(value)) throw new Error();
@@ -18,11 +18,11 @@ function decodeCursor(value: string | undefined, wid: string): Cursor | undefine
     const cursor: unknown = JSON.parse(bytes.toString('utf8'));
     if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) throw new Error();
     const c = cursor as Record<string, unknown>;
-    if (Object.keys(c).length !== 3 || c.wid !== wid || typeof c.contentAssetId !== 'string' || !uuid.test(c.contentAssetId)
+    if (Object.keys(c).length !== 3 || c.userId !== userId || typeof c.contentAssetId !== 'string' || !uuid.test(c.contentAssetId)
       || typeof c.updatedAt !== 'string' || !/^[1-9]\d{3}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u.test(c.updatedAt)) throw new Error();
     // Validate the calendar date while preserving the SQL timestamp's microseconds.
     if (new Date(c.updatedAt).toISOString() !== `${c.updatedAt.slice(0, 23)}Z`) throw new Error();
-    return { wid, updatedAt: c.updatedAt, contentAssetId: c.contentAssetId };
+    return { userId, updatedAt: c.updatedAt, contentAssetId: c.contentAssetId };
   } catch {
     throw new DomainError(400, 'CONTENT_ASSET_CURSOR_INVALID');
   }
@@ -48,40 +48,40 @@ interface ContentAssetListRow {
   cursor_updated_at: string; content_cursor: string; preview_markdown: string | null;
 }
 
-/** Called after session/workspace authorization, on the same transaction connection. */
-export async function listContentAssetPage(tx: pg.PoolClient, userId: string, wid: string, cursor?: string) {
-  const after = decodeCursor(cursor, wid);
+/** Called after session authorization, on the same transaction connection. */
+export async function listContentAssetPage(tx: pg.PoolClient, userId: string, cursor?: string) {
+  const after = decodeCursor(cursor, userId);
   // The time upper bound lets content_assets_scope start at the requested page, including
   // deep pages. The UUID breaks timestamp ties without depending on anchor existence.
-  const boundary = after ? 'AND asset.updated_at <= $3::timestamptz AND (asset.updated_at < $3::timestamptz OR asset.content_asset_id > $4::uuid)' : '';
+  const boundary = after ? 'AND asset.updated_at <= $2::timestamptz AND (asset.updated_at < $2::timestamptz OR asset.content_asset_id > $3::uuid)' : '';
   const result = await tx.query<ContentAssetListRow>(`SELECT page.*,
-    coalesce((SELECT next_cursor::text FROM workspace_content_state WHERE workspace_id=$1), '0') AS content_cursor,
+    coalesce((SELECT next_cursor::text FROM account_content_state WHERE user_id=$1), '0') AS content_cursor,
     (SELECT f.folder_id FROM content_asset_folders f JOIN asset_folders a ON a.folder_id=f.folder_id
-      WHERE f.content_asset_id=page.content_asset_id AND a.workspace_id=$1 AND a.state='active' ORDER BY f.folder_id LIMIT 1) AS folder_id,
+      WHERE f.content_asset_id=page.content_asset_id AND a.user_id=$1 AND a.state='active' ORDER BY f.folder_id LIMIT 1) AS folder_id,
     part.preview_markdown
     FROM (
       SELECT asset.content_asset_id,asset.title,asset.state,asset.content_asset_revision_id,asset.etag,asset.source_kind,asset.source_id,asset.created_at,asset.updated_at,
         to_char(asset.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_updated_at
-      FROM content_assets asset JOIN content_asset_workspaces w ON w.content_asset_id=asset.content_asset_id AND w.workspace_id=$1
-      WHERE asset.user_id=$2 AND asset.state='active' ${boundary}
+      FROM content_assets asset
+      WHERE asset.user_id=$1 AND asset.state='active' ${boundary}
       ORDER BY asset.updated_at DESC,asset.content_asset_id ASC LIMIT ${CONTENT_ASSET_PAGE_SIZE + 1}
     ) page
     LEFT JOIN LATERAL (
       SELECT left(content_markdown, ${previewSourceLength}) AS preview_markdown FROM content_asset_parts
       WHERE content_asset_id=page.content_asset_id AND part='raw'
     ) part ON true
-    ORDER BY page.updated_at DESC,page.content_asset_id ASC`, after ? [wid, userId, after.updatedAt, after.contentAssetId] : [wid, userId]);
+    ORDER BY page.updated_at DESC,page.content_asset_id ASC`, after ? [userId, after.updatedAt, after.contentAssetId] : [userId]);
   const rows = result.rows.slice(0, CONTENT_ASSET_PAGE_SIZE);
   const last = rows.at(-1);
   return {
     items: rows.map(asset => ({
-      contentAssetId: asset.content_asset_id, workspaceId: wid, folderId: asset.folder_id, title: asset.title, state: asset.state,
+      contentAssetId: asset.content_asset_id, folderId: asset.folder_id, title: asset.title, state: asset.state,
       contentAssetRevisionId: asset.content_asset_revision_id, etag: asset.etag, contentCursor: asset.content_cursor,
       sourceKind: asset.source_kind, sourceRef: asset.source_id ? { kind: asset.source_kind, id: asset.source_id } : null,
       createdAt: asset.created_at.toISOString(), updatedAt: asset.updated_at.toISOString(), preview: preview(asset.preview_markdown ?? ''),
     })),
     nextCursor: result.rows.length > CONTENT_ASSET_PAGE_SIZE && last
-      ? Buffer.from(JSON.stringify({ wid, updatedAt: last.cursor_updated_at, contentAssetId: last.content_asset_id } satisfies Cursor)).toString('base64url')
+      ? Buffer.from(JSON.stringify({ userId, updatedAt: last.cursor_updated_at, contentAssetId: last.content_asset_id } satisfies Cursor)).toString('base64url')
       : null,
   };
 }

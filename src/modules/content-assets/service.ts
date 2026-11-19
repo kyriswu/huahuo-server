@@ -48,35 +48,33 @@ function checkContentAssetParts(values:Record<string,string>,mode:'create'|'upda
 }
 export class ContentAssetService {
  constructor(readonly pool:pg.Pool,readonly secret:string,readonly config?:AppConfig,private readonly ragQuery?:RagQueryService,private readonly resourceClaims?:ResourceClaims){}
- private async indexContentAsset(tx:pg.PoolClient,scope:Scope,wid:string,contentAssetId:string){if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).schedule(tx,scope,wid,contentAssetId);}
- private async workspace(tx:pg.PoolClient,scope:Scope,id:string){const r=await tx.query("SELECT id FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready'",[id,scope.userId]);if(!r.rowCount)throw new DomainError(404,'WORKSPACE_NOT_FOUND');}
+ private async indexContentAsset(tx:pg.PoolClient,scope:Scope,contentAssetId:string){if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).schedule(tx,scope,contentAssetId);}
  // Serialize placements with folder tree changes. ContentAsset mutations may share the
  // fence so independent account/resource and contentAsset row locks retain their order.
- private async lockTree(tx:pg.PoolClient,wid:string,shared=false){await tx.query(`SELECT ${shared?'pg_advisory_xact_lock_shared':'pg_advisory_xact_lock'}(hashtextextended($1,0))`,[`asset-tree:${wid}`]);}
- private async findContentAsset(tx: pg.PoolClient, scope: Scope, workspaceId: string, contentAssetId: string,
+ private async lockTree(tx:pg.PoolClient,userId:string,shared=false){await tx.query(`SELECT ${shared?'pg_advisory_xact_lock_shared':'pg_advisory_xact_lock'}(hashtextextended($1,0))`,[`asset-tree:${userId}`]);}
+ private async findContentAsset(tx: pg.PoolClient, scope: Scope, contentAssetId: string,
   lock: '' | 'FOR SHARE OF asset' | 'FOR UPDATE OF asset' = '') {
   const { rows: [contentAsset] } = await tx.query<ContentAssetRow>(
    `SELECT asset.* FROM content_assets asset
-    JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
-    WHERE asset.content_asset_id=$1 AND asset.user_id=$3 ${lock}`,
-   [contentAssetId, workspaceId, scope.userId],
+    WHERE asset.content_asset_id=$1 AND asset.user_id=$2 ${lock}`,
+   [contentAssetId, scope.userId],
   );
   return contentAsset;
  }
- private async assertActiveFolder(tx: pg.PoolClient, workspaceId: string, folderId: string | null) {
+ private async assertActiveFolder(tx: pg.PoolClient, userId: string, folderId: string | null) {
   if (folderId === null) return;
   const result = await tx.query(
-   "SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active' FOR SHARE",
-   [folderId, workspaceId],
+   "SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active' FOR SHARE",
+   [folderId, userId],
   );
   if (!result.rowCount) throw new DomainError(404, 'FOLDER_NOT_FOUND');
  }
- private async setContentAssetFolder(tx: pg.PoolClient, workspaceId: string, contentAssetId: string, folderId: string | null) {
-  // The existing move action replaces placements in its own workspace.
+ private async setContentAssetFolder(tx: pg.PoolClient, userId: string, contentAssetId: string, folderId: string | null) {
+  // The existing move action replaces placements for the owning account.
   const removed = await tx.query(
    `DELETE FROM content_asset_folders m USING asset_folders f
-    WHERE m.content_asset_id=$1 AND m.folder_id=f.folder_id AND f.workspace_id=$2
-      AND m.folder_id IS DISTINCT FROM $3::uuid`, [contentAssetId, workspaceId, folderId],
+    WHERE m.content_asset_id=$1 AND m.folder_id=f.folder_id AND f.user_id=$2
+      AND m.folder_id IS DISTINCT FROM $3::uuid`, [contentAssetId, userId, folderId],
   );
   if (folderId === null) return Boolean(removed.rowCount);
   const added = await tx.query(
@@ -84,14 +82,14 @@ export class ContentAssetService {
   );
   return Boolean(added.rowCount || removed.rowCount);
  }
- private async cursor(tx:pg.PoolClient,workspaceId:string,kind:string,id:string,change:string,tombstone:boolean,revisionId:string|null,version:number|null,previousRevisionId:string|null,previousVersion:number|null){await tx.query('INSERT INTO workspace_content_state(workspace_id) VALUES($1) ON CONFLICT DO NOTHING',[workspaceId]);const c=await tx.query<{next_cursor:string}>("UPDATE workspace_content_state SET next_cursor=next_cursor+1,updated_at=now() WHERE workspace_id=$1 RETURNING next_cursor",[workspaceId]);const cursor=String(c.rows[0]!.next_cursor),eventId=randomUUID(),operationId=randomUUID();await tx.query('INSERT INTO content_events(event_id,workspace_id,cursor,operation_id,object_kind,object_id,change_type,tombstone,revision_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[eventId,workspaceId,cursor,operationId,kind,id,change,tombstone,revisionId]);return {eventId,workspaceId,cursor,operationId,occurredAt:new Date().toISOString(),objectKind:kind,objectId:id,changeType:change,tombstone,resourcePinDelta:{added:[],released:[]},...(revisionId?{revisionId}:{}) ,...(previousRevisionId?{previousRevisionId}:{}),...(version!==null?{version}:{}) ,...(previousVersion!==null?{previousVersion}:{})};}
- private async contentAssetDto(tx: pg.PoolClient, scope: Scope, workspaceId: string, contentAssetId: string) {
-  const contentAsset = await this.findContentAsset(tx, scope, workspaceId, contentAssetId);
+ private async cursor(tx:pg.PoolClient, userId: string,kind:string,id:string,change:string,tombstone:boolean,revisionId:string|null,version:number|null,previousRevisionId:string|null,previousVersion:number|null){await tx.query('INSERT INTO account_content_state(user_id) VALUES($1) ON CONFLICT DO NOTHING',[userId]);const c=await tx.query<{next_cursor:string}>("UPDATE account_content_state SET next_cursor=next_cursor+1,updated_at=now() WHERE user_id=$1 RETURNING next_cursor",[userId]);const cursor=String(c.rows[0]!.next_cursor),eventId=randomUUID(),operationId=randomUUID();await tx.query('INSERT INTO content_events(event_id,user_id,cursor,operation_id,object_kind,object_id,change_type,tombstone,revision_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[eventId,userId,cursor,operationId,kind,id,change,tombstone,revisionId]);return {eventId,cursor,operationId,occurredAt:new Date().toISOString(),objectKind:kind,objectId:id,changeType:change,tombstone,resourcePinDelta:{added:[],released:[]},...(revisionId?{revisionId}:{}) ,...(previousRevisionId?{previousRevisionId}:{}),...(version!==null?{version}:{}) ,...(previousVersion!==null?{previousVersion}:{})};}
+ private async contentAssetDto(tx: pg.PoolClient, scope: Scope, contentAssetId: string) {
+  const contentAsset = await this.findContentAsset(tx, scope, contentAssetId);
   if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
   const { rows: [folder] } = await tx.query<{ folder_id: string }>(
    `SELECT f.folder_id FROM content_asset_folders m JOIN asset_folders f ON f.folder_id=m.folder_id
-    WHERE m.content_asset_id=$1 AND f.workspace_id=$2 AND f.state='active' ORDER BY f.folder_id LIMIT 1`,
-   [contentAssetId, workspaceId],
+    WHERE m.content_asset_id=$1 AND f.user_id=$2 AND f.state='active' ORDER BY f.folder_id LIMIT 1`,
+   [contentAssetId, scope.userId],
   );
   const savedParts = await tx.query(
    'SELECT part,part_revision_id,content_markdown,content_sha256 FROM content_asset_parts WHERE content_asset_id=$1', [contentAssetId],
@@ -103,10 +101,10 @@ export class ContentAssetService {
     WHERE ref.content_asset_id=$1 ORDER BY ref.ref_order`, [contentAssetId, scope.userId],
   );
   const { rows: [cursor] } = await tx.query<{ next_cursor: string }>(
-   'SELECT next_cursor FROM workspace_content_state WHERE workspace_id=$1', [workspaceId],
+   'SELECT next_cursor FROM account_content_state WHERE user_id=$1', [scope.userId],
   );
   return {
-   contentAssetId: contentAsset.content_asset_id, workspaceId, folderId: folder?.folder_id ?? null, title: contentAsset.title, state: contentAsset.state,
+   contentAssetId: contentAsset.content_asset_id, folderId: folder?.folder_id ?? null, title: contentAsset.title, state: contentAsset.state,
    contentAssetRevisionId: contentAsset.content_asset_revision_id,
    parts: Object.fromEntries(parts.map(part => {
     const saved = currentParts.get(part);
@@ -123,64 +121,64 @@ export class ContentAssetService {
    createdAt: contentAsset.created_at.toISOString(), updatedAt: contentAsset.updated_at.toISOString(),
   };
  }
- private async folderDto(tx:pg.PoolClient,id:string){const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1',[id])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');return {folderId:f.folder_id,workspaceId:f.workspace_id,parentFolderId:f.parent_folder_id,displayName:f.display_name,normalizedName:f.normalized_name,state:f.state,currentRevisionId:f.current_revision_id,etag:folderEtag(f.folder_id,Number(f.revision)),contentCursor:String((await tx.query('SELECT coalesce(next_cursor,0) c FROM workspace_content_state WHERE workspace_id=$1',[f.workspace_id])).rows[0]?.c??0)};}
- async getFolder(scope:Scope,wid:string,id:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);const f=await tx.query('SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2',[id,wid]);if(!f.rowCount)throw new DomainError(404,'FOLDER_NOT_FOUND');return this.folderDto(tx,id);});}
- async listFolders(scope:Scope,wid:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);const r=await tx.query('SELECT * FROM asset_folders WHERE workspace_id=$1 ORDER BY parent_folder_id NULLS FIRST,normalized_name,folder_id',[wid]);return {folders:await Promise.all(r.rows.map(x=>this.folderDto(tx,x.folder_id)))};});}
- async createFolder(scope:Scope,wid:string,input:{displayName:string;parentFolderId?:string|null},key:string){if(!input.displayName.trim())throw new DomainError(400,'FOLDER_NAME_INVALID');return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'folder.create',key,input,async()=>{if(input.parentFolderId){const p=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active'",[input.parentFolderId,wid]);if(!p.rowCount)throw new DomainError(404,'PARENT_FOLDER_NOT_FOUND');}const id=randomUUID(),rev=randomUUID();try{await tx.query('INSERT INTO asset_folders(folder_id,workspace_id,parent_folder_id,display_name,normalized_name,current_revision_id) VALUES($1,$2,$3,$4,$5,$6)',[id,wid,input.parentFolderId??null,input.displayName.trim(),normalize(input.displayName),rev]);}catch(e){if((e as {code?:string}).code==='23505')throw new DomainError(409,'FOLDER_NAME_CONFLICT');throw e;}await this.cursor(tx,wid,'folder',id,'created',false,rev,1,null,null);return this.folderDto(tx,id);});});}
- async updateFolder(scope:Scope,wid:string,id:string,displayName:string,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'folder.update',key,{id,displayName,ifMatch},async()=>{const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state=\'active\' FOR UPDATE',[id,wid])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');if(folderEtag(id,Number(f.revision))!==ifMatch)throw new DomainError(412,'FOLDER_REVISION_MISMATCH');const rev=randomUUID(),v=Number(f.revision)+1;await tx.query('UPDATE asset_folders SET display_name=$2,normalized_name=$3,current_revision_id=$4,revision=$5,updated_at=now() WHERE folder_id=$1',[id,displayName.trim(),normalize(displayName),rev,v]);await this.cursor(tx,wid,'folder',id,'updated',false,rev,v,f.current_revision_id,Number(f.revision));return this.folderDto(tx,id);});});}
- private async assertNoCycle(tx:pg.PoolClient,wid:string,id:string,parent:string|null){if(!parent)return;const r=await tx.query(`WITH RECURSIVE chain(id) AS (SELECT $1::uuid UNION ALL SELECT parent_folder_id FROM asset_folders f JOIN chain c ON f.folder_id=c.id WHERE f.parent_folder_id IS NOT NULL) SELECT 1 FROM chain WHERE id=$2 LIMIT 1`,[parent,id]);if(r.rowCount)throw new DomainError(409,'FOLDER_CYCLE');const p=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active'",[parent,wid]);if(!p.rowCount)throw new DomainError(404,'PARENT_FOLDER_NOT_FOUND');}
- async moveFolder(scope:Scope,wid:string,id:string,parent:string|null,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'folder.move',key,{id,parent,ifMatch},async()=>{const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state=\'active\' FOR UPDATE',[id,wid])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');if(folderEtag(id,Number(f.revision))!==ifMatch)throw new DomainError(412,'FOLDER_REVISION_MISMATCH');await this.assertNoCycle(tx,wid,id,parent);const rev=randomUUID(),v=Number(f.revision)+1;await tx.query('UPDATE asset_folders SET parent_folder_id=$2,current_revision_id=$3,revision=$4,updated_at=now() WHERE folder_id=$1',[id,parent,rev,v]);return this.cursor(tx,wid,'folder',id,'moved',false,rev,v,f.current_revision_id,Number(f.revision));});});}
- async deleteFolder(scope:Scope,wid:string,id:string,ifMatch:string,key:string,restore=false){
+ private async folderDto(tx:pg.PoolClient,id:string){const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1',[id])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');return {folderId:f.folder_id,parentFolderId:f.parent_folder_id,displayName:f.display_name,normalizedName:f.normalized_name,state:f.state,currentRevisionId:f.current_revision_id,etag:folderEtag(f.folder_id,Number(f.revision)),contentCursor:String((await tx.query('SELECT coalesce(next_cursor,0) c FROM account_content_state WHERE user_id=$1',[f.user_id])).rows[0]?.c??0)};}
+ async getFolder(scope:Scope,id:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const f=await tx.query('SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2',[id,scope.userId]);if(!f.rowCount)throw new DomainError(404,'FOLDER_NOT_FOUND');return this.folderDto(tx,id);});}
+ async listFolders(scope:Scope){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const r=await tx.query('SELECT * FROM asset_folders WHERE user_id=$1 ORDER BY parent_folder_id NULLS FIRST,normalized_name,folder_id',[scope.userId]);return {folders:await Promise.all(r.rows.map(x=>this.folderDto(tx,x.folder_id)))};});}
+ async createFolder(scope:Scope,input:{displayName:string;parentFolderId?:string|null},key:string){if(!input.displayName.trim())throw new DomainError(400,'FOLDER_NAME_INVALID');return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.lockTree(tx,scope.userId);return idempotent(tx,this.secret,scope.userId,'folder.create',key,input,async()=>{if(input.parentFolderId){const p=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active'",[input.parentFolderId,scope.userId]);if(!p.rowCount)throw new DomainError(404,'PARENT_FOLDER_NOT_FOUND');}const id=randomUUID(),rev=randomUUID();try{await tx.query('INSERT INTO asset_folders(folder_id,user_id,parent_folder_id,display_name,normalized_name,current_revision_id) VALUES($1,$2,$3,$4,$5,$6)',[id,scope.userId,input.parentFolderId??null,input.displayName.trim(),normalize(input.displayName),rev]);}catch(e){if((e as {code?:string}).code==='23505')throw new DomainError(409,'FOLDER_NAME_CONFLICT');throw e;}await this.cursor(tx,scope.userId,'folder',id,'created',false,rev,1,null,null);return this.folderDto(tx,id);});});}
+ async updateFolder(scope:Scope,id:string,displayName:string,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.lockTree(tx,scope.userId);return idempotent(tx,this.secret,scope.userId,'folder.update',key,{id,displayName,ifMatch},async()=>{const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state=\'active\' FOR UPDATE',[id,scope.userId])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');if(folderEtag(id,Number(f.revision))!==ifMatch)throw new DomainError(412,'FOLDER_REVISION_MISMATCH');const rev=randomUUID(),v=Number(f.revision)+1;await tx.query('UPDATE asset_folders SET display_name=$2,normalized_name=$3,current_revision_id=$4,revision=$5,updated_at=now() WHERE folder_id=$1',[id,displayName.trim(),normalize(displayName),rev,v]);await this.cursor(tx,scope.userId,'folder',id,'updated',false,rev,v,f.current_revision_id,Number(f.revision));return this.folderDto(tx,id);});});}
+ private async assertNoCycle(tx:pg.PoolClient,userId:string,id:string,parent:string|null){if(!parent)return;const r=await tx.query(`WITH RECURSIVE chain(id) AS (SELECT $1::uuid UNION ALL SELECT parent_folder_id FROM asset_folders f JOIN chain c ON f.folder_id=c.id WHERE f.parent_folder_id IS NOT NULL) SELECT 1 FROM chain WHERE id=$2 LIMIT 1`,[parent,id]);if(r.rowCount)throw new DomainError(409,'FOLDER_CYCLE');const p=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active'",[parent,userId]);if(!p.rowCount)throw new DomainError(404,'PARENT_FOLDER_NOT_FOUND');}
+ async moveFolder(scope:Scope,id:string,parent:string|null,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.lockTree(tx,scope.userId);return idempotent(tx,this.secret,scope.userId,'folder.move',key,{id,parent,ifMatch},async()=>{const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state=\'active\' FOR UPDATE',[id,scope.userId])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');if(folderEtag(id,Number(f.revision))!==ifMatch)throw new DomainError(412,'FOLDER_REVISION_MISMATCH');await this.assertNoCycle(tx,scope.userId,id,parent);const rev=randomUUID(),v=Number(f.revision)+1;await tx.query('UPDATE asset_folders SET parent_folder_id=$2,current_revision_id=$3,revision=$4,updated_at=now() WHERE folder_id=$1',[id,parent,rev,v]);return this.cursor(tx,scope.userId,'folder',id,'moved',false,rev,v,f.current_revision_id,Number(f.revision));});});}
+ async deleteFolder(scope:Scope,id:string,ifMatch:string,key:string,restore=false){
   return transaction(this.pool,async tx=>{
-   await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid);
-   return idempotent(tx,this.secret,`${scope.userId}:${wid}`,restore?'folder.restore':'folder.delete',key,{id,ifMatch},async()=>{
-    const root=(await tx.query<FolderStateRow>('SELECT * FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 FOR UPDATE',[id,wid])).rows[0];
+   await assertScope(tx,scope);await this.lockTree(tx,scope.userId);
+   return idempotent(tx,this.secret,scope.userId,restore?'folder.restore':'folder.delete',key,{id,ifMatch},async()=>{
+    const root=(await tx.query<FolderStateRow>('SELECT * FROM asset_folders WHERE folder_id=$1 AND user_id=$2 FOR UPDATE',[id,scope.userId])).rows[0];
     if(!root)throw new DomainError(404,'FOLDER_NOT_FOUND');
     if(folderEtag(id,Number(root.revision))!==ifMatch)throw new DomainError(412,'FOLDER_REVISION_MISMATCH');
     if(root.state!==(restore?'deleted':'active'))throw new DomainError(409,'FOLDER_STATE_CONFLICT');
-    if(restore&&root.parent_folder_id&&!(await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND workspace_id=$2 AND state='active' FOR SHARE",[root.parent_folder_id,wid])).rowCount)throw new DomainError(409,'PARENT_FOLDER_DELETED');
+    if(restore&&root.parent_folder_id&&!(await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active' FOR SHARE",[root.parent_folder_id,scope.userId])).rowCount)throw new DomainError(409,'PARENT_FOLDER_DELETED');
     const folders=(await tx.query<FolderStateRow>(restore?
-     `SELECT * FROM asset_folders WHERE workspace_id=$2 AND state='deleted' AND (folder_id=$1 OR deleted_by_folder_id=$1) ORDER BY folder_id FOR UPDATE`:
-     `WITH RECURSIVE tree(id) AS (SELECT $1::uuid UNION SELECT f.folder_id FROM asset_folders f JOIN tree t ON f.parent_folder_id=t.id WHERE f.workspace_id=$2)
-      SELECT f.* FROM asset_folders f JOIN tree t ON t.id=f.folder_id WHERE f.workspace_id=$2 AND f.state='active' ORDER BY f.folder_id FOR UPDATE OF f`,[id,wid])).rows;
+     `SELECT * FROM asset_folders WHERE user_id=$2 AND state='deleted' AND (folder_id=$1 OR deleted_by_folder_id=$1) ORDER BY folder_id FOR UPDATE`:
+     `WITH RECURSIVE tree(id) AS (SELECT $1::uuid UNION SELECT f.folder_id FROM asset_folders f JOIN tree t ON f.parent_folder_id=t.id WHERE f.user_id=$2)
+      SELECT f.* FROM asset_folders f JOIN tree t ON t.id=f.folder_id WHERE f.user_id=$2 AND f.state='active' ORDER BY f.folder_id FOR UPDATE OF f`,[id,scope.userId])).rows;
     const state=restore?'active':'deleted';
     const receipts=[];
     for(const folder of folders){
      const revision=Number(folder.revision)+1,revisionId=randomUUID();
      await tx.query('UPDATE asset_folders SET state=$2,deleted_by_folder_id=$3,revision=$4,current_revision_id=$5,updated_at=now() WHERE folder_id=$1',[folder.folder_id,state,restore?null:id,revision,revisionId]);
-     receipts.push(await this.cursor(tx,wid,'folder',folder.folder_id,restore?'restored':'deleted',!restore,revisionId,revision,folder.current_revision_id,Number(folder.revision)));
+     receipts.push(await this.cursor(tx,scope.userId,'folder',folder.folder_id,restore?'restored':'deleted',!restore,revisionId,revision,folder.current_revision_id,Number(folder.revision)));
     }
     return {affectedObjectCount:receipts.length,firstContentCursor:receipts[0]!.cursor,contentCursor:receipts.at(-1)!.cursor};
    });
   });
  }
 
- async listContentAssets(scope:Scope,wid:string,cursor?:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return listContentAssetPage(tx,scope.userId,wid,cursor);});}
- async getContentAsset(scope: Scope, wid: string, id: string, revisionId?: string) {
+ async listContentAssets(scope:Scope,cursor?:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return listContentAssetPage(tx,scope.userId,cursor);});}
+ async getContentAsset(scope: Scope, id: string, revisionId?: string) {
   return transaction(this.pool, async tx => {
    await assertScope(tx, scope);
-   await this.workspace(tx, scope, wid);
-   const contentAsset = await this.findContentAsset(tx, scope, wid, id, 'FOR SHARE OF asset');
+
+   const contentAsset = await this.findContentAsset(tx, scope, id, 'FOR SHARE OF asset');
    if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
    if (revisionId && (contentAsset.content_asset_revision_id !== revisionId || contentAsset.state !== 'active')) {
     throw new DomainError(409, 'CONTENT_ASSET_REVISION_MISMATCH');
    }
-   return this.contentAssetDto(tx, scope, wid, id);
+   return this.contentAssetDto(tx, scope, id);
   });
  }
- private async task(tx:pg.PoolClient,scope:Scope,wid:string,contentAssetId:string,contentAssetRevisionId:string){
-  const tagSetVersion = Number((await this.findContentAsset(tx, scope, wid, contentAssetId))?.tag_set_version ?? 0);
+ private async task(tx:pg.PoolClient,scope:Scope,contentAssetId:string,contentAssetRevisionId:string){
+  const tagSetVersion = Number((await this.findContentAsset(tx, scope, contentAssetId))?.tag_set_version ?? 0);
   // task_inputs also contains plain text. Materialize the scoped tag jobs before
   // parsing their JSON so the planner cannot cast an unrelated task's body.
   const existing=(await tx.query(`WITH eligible AS MATERIALIZED (
     SELECT c.task_id,i.body FROM content_jobs c JOIN tasks t ON t.id=c.task_id JOIN task_inputs i ON i.id=t.input_id
     WHERE c.content_asset_id=$1 AND c.content_asset_revision_id=$2 AND c.operation='tag_extract' AND t.kind='content-asset.tag-extract'
-      AND t.state IN ('queued','running','retry_scheduled') AND t.user_id=$4 AND t.workspace_id=$5
-  ) SELECT task_id FROM eligible WHERE (body::jsonb->>'tagSetVersion')::bigint=$3 LIMIT 1`,[contentAssetId,contentAssetRevisionId,tagSetVersion,scope.userId,wid])).rows[0];
+      AND t.state IN ('queued','running','retry_scheduled') AND t.user_id=$4 AND t.workspace_id IS NULL
+  ) SELECT task_id FROM eligible WHERE (body::jsonb->>'tagSetVersion')::bigint=$3 LIMIT 1`,[contentAssetId,contentAssetRevisionId,tagSetVersion,scope.userId])).rows[0];
   if(existing)return existing.task_id as string;
   const inputId=randomUUID(),taskId=randomUUID();
-  await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,scope.userId,wid,JSON.stringify({contentAssetId,contentAssetRevisionId,tagSetVersion})]);
-  await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,state,input_id,trace_id,max_attempts) VALUES($1,$2,$3,'content-asset.tag-extract','content','queued',$4,$5,$6)",[taskId,scope.userId,wid,inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
+  await tx.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',[inputId,scope.userId,JSON.stringify({contentAssetId,contentAssetRevisionId,tagSetVersion})]);
+  await tx.query("INSERT INTO tasks(id,user_id,kind,queue,state,input_id,trace_id,max_attempts) VALUES($1,$2,'content-asset.tag-extract','content','queued',$3,$4,$5)",[taskId,scope.userId,inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
   await tx.query("INSERT INTO content_jobs(task_id,content_asset_id,content_asset_revision_id,operation) VALUES($1,$2,$3,'tag_extract')",[taskId,contentAssetId,contentAssetRevisionId]);
   await enqueueIntent(tx,taskId);await event(tx,taskId);return taskId;
  }
@@ -195,39 +193,39 @@ export class ContentAssetService {
   if(result.length>20)throw new DomainError(400,'TAG_LIMIT_EXCEEDED');
   return result;
  }
- private async tagDto(tx:pg.PoolClient,scope:Scope,wid:string,contentAssetId:string){
-  const asset=await this.findContentAsset(tx,scope,wid,contentAssetId);
+ private async tagDto(tx:pg.PoolClient,scope:Scope,contentAssetId:string){
+  const asset=await this.findContentAsset(tx,scope,contentAssetId);
   if(!asset)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
-  const tags=await tx.query(`SELECT t.tag_id,t.display_name,t.normalized_name,membership.source FROM content_asset_tags membership JOIN asset_tags t ON t.tag_id=membership.tag_id AND t.workspace_id=$2 WHERE membership.content_asset_id=$1 ORDER BY t.normalized_name,t.tag_id`,[contentAssetId,wid]);
-  const suggestions=await tx.query(`SELECT suggestion_id,content_asset_revision_id,labels,provider,status,created_at FROM content_asset_tag_suggestions WHERE content_asset_id=$1 AND workspace_id=$2 AND status='pending' AND content_asset_revision_id=$3 AND expected_tag_set_version=$4 ORDER BY created_at DESC LIMIT 10`,[contentAssetId,wid,asset.content_asset_revision_id,asset.tag_set_version]);
-  const job=(await tx.query(`SELECT c.task_id,c.outcome,c.provider,t.state,t.error_code FROM content_jobs c JOIN tasks t ON t.id=c.task_id WHERE c.content_asset_id=$1 AND t.user_id=$2 AND t.workspace_id=$3 ORDER BY t.created_at DESC,t.id DESC LIMIT 1`,[contentAssetId,scope.userId,wid])).rows[0];
+  const tags=await tx.query(`SELECT t.tag_id,t.display_name,t.normalized_name,membership.source FROM content_asset_tags membership JOIN asset_tags t ON t.tag_id=membership.tag_id AND t.user_id=$2 WHERE membership.content_asset_id=$1 ORDER BY t.normalized_name,t.tag_id`,[contentAssetId,scope.userId]);
+  const suggestions=await tx.query(`SELECT suggestion_id,content_asset_revision_id,labels,provider,status,created_at FROM content_asset_tag_suggestions WHERE content_asset_id=$1 AND user_id=$2 AND status='pending' AND content_asset_revision_id=$3 AND expected_tag_set_version=$4 ORDER BY created_at DESC LIMIT 10`,[contentAssetId,scope.userId,asset.content_asset_revision_id,asset.tag_set_version]);
+  const job=(await tx.query(`SELECT c.task_id,c.outcome,c.provider,t.state,t.error_code FROM content_jobs c JOIN tasks t ON t.id=c.task_id WHERE c.content_asset_id=$1 AND t.user_id=$2 AND t.workspace_id IS NULL ORDER BY t.created_at DESC,t.id DESC LIMIT 1`,[contentAssetId,scope.userId])).rows[0];
   return {contentAssetId,tags:tags.rows.map(x=>({tagId:x.tag_id,displayName:x.display_name,normalizedName:x.normalized_name,source:x.source})),tagSetVersion:Number(asset.tag_set_version),tagEtag:`"tags-${contentAssetId}-${asset.tag_set_version}"`,manualOverride:asset.tag_manual_override,suggestions:suggestions.rows.map(x=>({suggestionId:x.suggestion_id,contentAssetRevisionId:x.content_asset_revision_id,labels:x.labels as string[],provider:x.provider,status:x.status,createdAt:x.created_at.toISOString()})),contentAssetEtag:asset.etag,processingStatus:asset.processing_status as string,extraction:job?{taskId:job.task_id as string,status:job.state as string,outcome:job.outcome as string|null,provider:job.provider as string|null,errorCode:job.error_code as string|null}:null};
  }
- private async applyTagSetTx(tx:pg.PoolClient,wid:string,contentAssetId:string,names:string[]){
+ private async applyTagSetTx(tx:pg.PoolClient,userId:string,contentAssetId:string,names:string[]){
   const normalized=this.normalizeTagNames(names);
   const ids:string[]=[];
-  // Stable lock ordering for shared workspace labels.
+  // Stable lock ordering for shared account labels.
   for(const displayName of normalized.sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()))){
-   const row=(await tx.query(`INSERT INTO asset_tags(tag_id,workspace_id,normalized_name,display_name,source) VALUES($1,$2,$3,$4,'manual') ON CONFLICT(workspace_id,normalized_name) DO UPDATE SET display_name=asset_tags.display_name RETURNING tag_id`,[randomUUID(),wid,displayName.toLowerCase(),displayName])).rows[0];ids.push(row.tag_id);
+   const row=(await tx.query(`INSERT INTO asset_tags(tag_id,user_id,normalized_name,display_name,source) VALUES($1,$2,$3,$4,'manual') ON CONFLICT(user_id,normalized_name) DO UPDATE SET display_name=asset_tags.display_name RETURNING tag_id`,[randomUUID(),userId,displayName.toLowerCase(),displayName])).rows[0];ids.push(row.tag_id);
   }
   await tx.query(`DELETE FROM content_asset_tags membership USING asset_tags t
-   WHERE membership.content_asset_id=$1 AND membership.tag_id=t.tag_id AND t.workspace_id=$2`,[contentAssetId,wid]);
+   WHERE membership.content_asset_id=$1 AND membership.tag_id=t.tag_id AND t.user_id=$2`,[contentAssetId,userId]);
   for(const tagId of ids)await tx.query("INSERT INTO content_asset_tags(content_asset_id,tag_id,source) VALUES($1,$2,'manual')",[contentAssetId,tagId]);
   const updated=(await tx.query('UPDATE content_assets SET tag_set_version=tag_set_version+1,tag_manual_override=true WHERE content_asset_id=$1 RETURNING tag_set_version',[contentAssetId])).rows[0];
   await tx.query("UPDATE content_asset_tag_suggestions SET status='stale' WHERE content_asset_id=$1 AND status='pending'",[contentAssetId]);
-  await this.cursor(tx,wid,'content_asset',contentAssetId,'updated',false,null,Number(updated.tag_set_version),null,null);
+  await this.cursor(tx,userId,'content_asset',contentAssetId,'updated',false,null,Number(updated.tag_set_version),null,null);
  }
- async contentAssetTags(scope:Scope,wid:string,contentAssetId:string){return transaction(this.pool,async tx=>{
-  await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await assertScope(tx,scope);await this.workspace(tx,scope,wid);return this.tagDto(tx,scope,wid,contentAssetId);
+ async contentAssetTags(scope:Scope,contentAssetId:string){return transaction(this.pool,async tx=>{
+  await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await assertScope(tx,scope);return this.tagDto(tx,scope,contentAssetId);
  });}
- private async mutateTags(scope:Scope,wid:string,contentAssetId:string,change:{replace?:string[];add?:string;remove?:string;rename?:{tagId:string;name:string};suggestionId?:string},ifMatch:string,key:string){
+ private async mutateTags(scope:Scope,contentAssetId:string,change:{replace?:string[];add?:string;remove?:string;rename?:{tagId:string;name:string};suggestionId?:string},ifMatch:string,key:string){
   return transaction(this.pool,async tx=>{
-   await assertScope(tx,scope);await this.workspace(tx,scope,wid);
-   return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.tags.mutate',key,{contentAssetId,change,ifMatch},async()=>{
-    const asset=await this.findContentAsset(tx,scope,wid,contentAssetId,'FOR UPDATE OF asset');
+   await assertScope(tx,scope);
+   return idempotent(tx,this.secret,scope.userId,'content-asset.tags.mutate',key,{contentAssetId,change,ifMatch},async()=>{
+    const asset=await this.findContentAsset(tx,scope,contentAssetId,'FOR UPDATE OF asset');
     if(!asset||asset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
     if(ifMatch!==`"tags-${contentAssetId}-${asset.tag_set_version}"`)throw new DomainError(412,'TAG_REVISION_MISMATCH');
-    const view=await this.tagDto(tx,scope,wid,contentAssetId);let names=view.tags.map(t=>t.displayName as string);
+    const view=await this.tagDto(tx,scope,contentAssetId);let names=view.tags.map(t=>t.displayName as string);
     if(change.replace)names=change.replace;
     if(change.add!==undefined)names.push(change.add);
     if(change.remove||change.rename){
@@ -236,98 +234,96 @@ export class ContentAssetService {
      names=view.tags.flatMap(t=>t.tagId!==id?[t.displayName as string]:change.rename?[change.rename.name]:[]);
     }
     if(change.suggestionId){
-     const suggestion=(await tx.query("SELECT * FROM content_asset_tag_suggestions WHERE suggestion_id=$1 AND content_asset_id=$2 AND workspace_id=$3 FOR UPDATE",[change.suggestionId,contentAssetId,wid])).rows[0];
+     const suggestion=(await tx.query("SELECT * FROM content_asset_tag_suggestions WHERE suggestion_id=$1 AND content_asset_id=$2 AND user_id=$3 FOR UPDATE",[change.suggestionId,contentAssetId,scope.userId])).rows[0];
      if(!suggestion)throw new DomainError(404,'TAG_SUGGESTION_NOT_FOUND');
      if(suggestion.status!=='pending'||suggestion.content_asset_revision_id!==asset.content_asset_revision_id||Number(suggestion.expected_tag_set_version)!==Number(asset.tag_set_version))throw new DomainError(409,'TAG_SUGGESTION_STALE');
      names=suggestion.labels;
     }
-    await this.applyTagSetTx(tx,wid,contentAssetId,names);
+    await this.applyTagSetTx(tx,scope.userId,contentAssetId,names);
     if(change.suggestionId)await tx.query("UPDATE content_asset_tag_suggestions SET status='applied',applied_at=now() WHERE suggestion_id=$1",[change.suggestionId]);
-    return this.tagDto(tx,scope,wid,contentAssetId);
+    return this.tagDto(tx,scope,contentAssetId);
    });
   });
  }
- async replaceContentAssetTags(scope:Scope,wid:string,contentAssetId:string,names:string[],ifMatch:string,key:string){return this.mutateTags(scope,wid,contentAssetId,{replace:names},ifMatch,key);}
- async addContentAssetTag(scope:Scope,wid:string,contentAssetId:string,name:string,ifMatch:string,key:string){return this.mutateTags(scope,wid,contentAssetId,{add:name},ifMatch,key);}
- async removeContentAssetTag(scope:Scope,wid:string,contentAssetId:string,tagId:string,ifMatch:string,key:string){return this.mutateTags(scope,wid,contentAssetId,{remove:tagId},ifMatch,key);}
- async renameContentAssetTag(scope:Scope,wid:string,contentAssetId:string,tagId:string,name:string,ifMatch:string,key:string){return this.mutateTags(scope,wid,contentAssetId,{rename:{tagId,name}},ifMatch,key);}
- async applyTagSuggestion(scope:Scope,wid:string,contentAssetId:string,suggestionId:string,ifMatch:string,key:string){return this.mutateTags(scope,wid,contentAssetId,{suggestionId},ifMatch,key);}
- async requestTagExtraction(scope:Scope,wid:string,contentAssetId:string,key:string){return transaction(this.pool,async tx=>{
-  await assertScope(tx,scope);await this.workspace(tx,scope,wid);
-  return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.tags.extract',key,{contentAssetId},async()=>{
-   const asset=await this.findContentAsset(tx,scope,wid,contentAssetId,'FOR UPDATE OF asset');
+ async replaceContentAssetTags(scope:Scope,contentAssetId:string,names:string[],ifMatch:string,key:string){return this.mutateTags(scope,contentAssetId,{replace:names},ifMatch,key);}
+ async addContentAssetTag(scope:Scope,contentAssetId:string,name:string,ifMatch:string,key:string){return this.mutateTags(scope,contentAssetId,{add:name},ifMatch,key);}
+ async removeContentAssetTag(scope:Scope,contentAssetId:string,tagId:string,ifMatch:string,key:string){return this.mutateTags(scope,contentAssetId,{remove:tagId},ifMatch,key);}
+ async renameContentAssetTag(scope:Scope,contentAssetId:string,tagId:string,name:string,ifMatch:string,key:string){return this.mutateTags(scope,contentAssetId,{rename:{tagId,name}},ifMatch,key);}
+ async applyTagSuggestion(scope:Scope,contentAssetId:string,suggestionId:string,ifMatch:string,key:string){return this.mutateTags(scope,contentAssetId,{suggestionId},ifMatch,key);}
+ async requestTagExtraction(scope:Scope,contentAssetId:string,key:string){return transaction(this.pool,async tx=>{
+  await assertScope(tx,scope);
+  return idempotent(tx,this.secret,scope.userId,'content-asset.tags.extract',key,{contentAssetId},async()=>{
+   const asset=await this.findContentAsset(tx,scope,contentAssetId,'FOR UPDATE OF asset');
    if(!asset||asset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
    if(this.config?.tagExtractorProvider==='disabled')throw new DomainError(503,'TAG_PROVIDER_UNAVAILABLE');
-   return {taskId:await this.task(tx,scope,wid,contentAssetId,asset.content_asset_revision_id)};
+   return {taskId:await this.task(tx,scope,contentAssetId,asset.content_asset_revision_id)};
   });
  });}
- async importContentAsset(scope:Scope,wid:string,input:{title:string;mimeType:string;content:string;folderId?:string|null;sourceUrl?:string;resourceRefs?:Array<{resourceId:string;usage:string}>},key:string){
+ async importContentAsset(scope:Scope,input:{title:string;mimeType:string;content:string;folderId?:string|null;sourceUrl?:string;resourceRefs?:Array<{resourceId:string;usage:string}>},key:string){
   if(!['text/plain','text/markdown'].includes(input.mimeType))throw new DomainError(400,'IMPORT_CONTENT_TYPE_UNSUPPORTED');
   if(typeof input.content!=='string'||!input.content.trim())throw new DomainError(400,'IMPORT_CONTENT_INVALID');
   checkContentAssetParts({raw:input.content},'input');
-  const contentAsset=await this.createContentAsset(scope,wid,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:'ready',parts:{raw:input.content,outline:'',germination:''}},key);
+  const contentAsset=await this.createContentAsset(scope,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:'ready',parts:{raw:input.content,outline:'',germination:''}},key);
   return {status:'ready' as const,contentAsset};
  }
- async createContentAsset(scope:Scope,wid:string,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
-  await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid,true);
+ async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
+  await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
-  await this.resourceClaims?.ensure(tx,scope,wid,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
-  const prepared=await normalizeOwnedImageParts(tx,scope,wid,input.parts,this.config,this.resourceClaims);
+  await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
+  const prepared=await normalizeOwnedImageParts(tx,scope,input.parts,this.config,this.resourceClaims);
   const normalized={...input,parts:prepared.parts,imageOrigins:prepared.imageOrigins};
-  return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.create',key,normalized,async()=>{
+  return idempotent(tx,this.secret,scope.userId,'content-asset.create',key,normalized,async()=>{
    const canonicalParts=restoreOwnedImageParts({},prepared);
    checkContentAssetParts(canonicalParts,'create');
-   await this.assertActiveFolder(tx, wid, input.folderId ?? null);
+   await this.assertActiveFolder(tx, scope.userId, input.folderId ?? null);
    const id=randomUUID(),rid=randomUUID();
    await tx.query(
     'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag) VALUES($1,$2,$3,$4,$5,$6,$7)',
     [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1)],
    );
-   await tx.query('INSERT INTO content_asset_workspaces(workspace_id,content_asset_id) VALUES($1,$2)', [wid,id]);
-   if (input.folderId) await this.setContentAssetFolder(tx, wid, id, input.folderId);
+   if (input.folderId) await this.setContentAssetFolder(tx, scope.userId, id, input.folderId);
    await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,input.processingStatus??(input.parts.raw?.trim()?'ready':'needs-processing')]);
-   await syncContentAssetRefs(tx,scope,wid,id,canonicalParts,input.resourceRefs);
+   await syncContentAssetRefs(tx,scope,id,canonicalParts,input.resourceRefs);
    for(const part of parts){
     const text=canonicalParts[part]??'',partRevisionId=randomUUID();
     await tx.query('INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,1,$4,$5)',[partRevisionId,id,part,text,sha(text)]);
    }
-   await this.cursor(tx,wid,'content_asset',id,'created',false,rid,1,null,null);
-   if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,wid,id,rid);
-   await this.indexContentAsset(tx,scope,wid,id);
-   return this.contentAssetDto(tx,scope,wid,id);
+   await this.cursor(tx,scope.userId,'content_asset',id,'created',false,rid,1,null,null);
+   if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
+   await this.indexContentAsset(tx,scope,id);
+   return this.contentAssetDto(tx,scope,id);
   });
  });}
- async updateContentAsset(scope:Scope,wid:string,id:string,input:{title?:string;folderId?:string|null;parts?:Record<string,string>;resourceRefs?:ContentAssetResourceRef[]},ifMatch:string,key:string){
+ async updateContentAsset(scope:Scope,id:string,input:{title?:string;folderId?:string|null;parts?:Record<string,string>;resourceRefs?:ContentAssetResourceRef[]},ifMatch:string,key:string){
   return transaction(this.pool,async tx=>{
-   await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid,true);
+   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
    checkContentAssetParts(input.parts??{},'input');
    // Existing image pins can survive a partial body edit. Serialize their writes
    // before the contentAsset row, just like new upload claims; title-only edits need neither.
    const updatesRefs=input.parts!==undefined||input.resourceRefs!==undefined;
    if (this.resourceClaims && updatesRefs && (await tx.query(
     `SELECT 1 FROM content_asset_resource_refs r JOIN content_assets asset ON asset.content_asset_id=r.content_asset_id
-     JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2
-     WHERE r.content_asset_id=$1 AND asset.user_id=$3 LIMIT 1`, [id,wid,scope.userId],
+     WHERE r.content_asset_id=$1 AND asset.user_id=$2 LIMIT 1`, [id,scope.userId],
    )).rowCount) await this.resourceClaims.lockAccount(tx,scope);
-   await this.resourceClaims?.ensure(tx,scope,wid,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
+   await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
    // Normalize before the idempotency digest and before comparing revisions.
-   const prepared=await normalizeOwnedImageParts(tx,scope,wid,input.parts??{},this.config,this.resourceClaims);
+   const prepared=await normalizeOwnedImageParts(tx,scope,input.parts??{},this.config,this.resourceClaims);
    const normalized={...input,...(input.parts?{parts:prepared.parts}:{}),imageOrigins:prepared.imageOrigins};
-   return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.update',key,{id,input:normalized,ifMatch},async()=>{
-    const asset=await this.findContentAsset(tx,scope,wid,id,'FOR UPDATE OF asset');
+   return idempotent(tx,this.secret,scope.userId,'content-asset.update',key,{id,input:normalized,ifMatch},async()=>{
+    const asset=await this.findContentAsset(tx,scope,id,'FOR UPDATE OF asset');
     if(!asset||asset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
     if(asset.etag!==ifMatch)throw new DomainError(412,'CONTENT_ASSET_REVISION_MISMATCH');
-    if (input.folderId !== undefined) await this.assertActiveFolder(tx, wid, input.folderId);
+    if (input.folderId !== undefined) await this.assertActiveFolder(tx, scope.userId, input.folderId);
     const previous=(await tx.query<{part:string;part_revision_id:string;revision:number;content_markdown:string}>('SELECT part,part_revision_id,revision,content_markdown FROM content_asset_parts WHERE content_asset_id=$1',[id])).rows;
     const complete=Object.fromEntries(previous.map(p=>[p.part,p.content_markdown]));
     const canonicalParts=restoreOwnedImageParts(complete,prepared);
     checkContentAssetParts(canonicalParts);
     const changed=Object.entries(canonicalParts).filter(([part,text])=>complete[part]!==text);
     Object.assign(complete,canonicalParts);
-    const refsChanged=updatesRefs?await syncContentAssetRefs(tx,scope,wid,id,complete,input.resourceRefs):false;
+    const refsChanged=updatesRefs?await syncContentAssetRefs(tx,scope,id,complete,input.resourceRefs):false;
     const title=input.title?.trim()??asset.title;
-    const placementChanged = input.folderId !== undefined && await this.setContentAssetFolder(tx, wid, id, input.folderId);
-    if(!changed.length&&!refsChanged&&title===asset.title&&!placementChanged)return this.contentAssetDto(tx,scope,wid,id);
+    const placementChanged = input.folderId !== undefined && await this.setContentAssetFolder(tx, scope.userId, id, input.folderId);
+    if(!changed.length&&!refsChanged&&title===asset.title&&!placementChanged)return this.contentAssetDto(tx,scope,id);
     const v=Number(asset.content_asset_revision)+1,rid=randomUUID();
     await tx.query('UPDATE content_assets SET title=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
      [id,title,v,rid,etag(id,v)]);
@@ -337,24 +333,24 @@ export class ContentAssetService {
      }
     const rawChanged=changed.some(([part])=>part==='raw');
     if(rawChanged)await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,complete.raw?.trim()?'ready':'needs-processing']);
-    await this.cursor(tx,wid,'content_asset',id,'updated',false,rid,v,asset.content_asset_revision_id,Number(asset.content_asset_revision));
-    if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,wid,id,rid);
-    if(rawChanged)await this.indexContentAsset(tx,scope,wid,id);
-    return this.contentAssetDto(tx,scope,wid,id);
+    await this.cursor(tx,scope.userId,'content_asset',id,'updated',false,rid,v,asset.content_asset_revision_id,Number(asset.content_asset_revision));
+    if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
+    if(rawChanged)await this.indexContentAsset(tx,scope,id);
+    return this.contentAssetDto(tx,scope,id);
    });
   });
  }
- async putContentAssetPart(scope:Scope,wid:string,id:string,part:string,markdown:string,ifMatch:string,key:string){checkPart(part);return this.updateContentAsset(scope,wid,id,{parts:{[part]:markdown}},ifMatch,key);}
- async moveContentAssets(scope: Scope, wid: string, folderId: string | null, contentAssets: Array<{contentAssetId:string;etag:string}>, key: string) {
+ async putContentAssetPart(scope:Scope,id:string,part:string,markdown:string,ifMatch:string,key:string){checkPart(part);return this.updateContentAsset(scope,id,{parts:{[part]:markdown}},ifMatch,key);}
+ async moveContentAssets(scope: Scope, folderId: string | null, contentAssets: Array<{contentAssetId:string;etag:string}>, key: string) {
   return transaction(this.pool, async tx => {
    await assertScope(tx,scope);
-   await this.workspace(tx,scope,wid);
-   await this.lockTree(tx,wid,true);
-   return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.batch-move',key,{folderId,contentAssets},async()=>{
-    await this.assertActiveFolder(tx,wid,folderId);
+
+   await this.lockTree(tx,scope.userId,true);
+   return idempotent(tx,this.secret,scope.userId,'content-asset.batch-move',key,{folderId,contentAssets},async()=>{
+    await this.assertActiveFolder(tx,scope.userId,folderId);
     const receipts = [];
     for(const item of contentAssets){
-     const contentAsset=await this.findContentAsset(tx,scope,wid,item.contentAssetId,'FOR UPDATE OF asset');
+     const contentAsset=await this.findContentAsset(tx,scope,item.contentAssetId,'FOR UPDATE OF asset');
      if(!contentAsset||contentAsset.state!=='active'){
       receipts.push({contentAssetId:item.contentAssetId,status:'not_found'});
       continue;
@@ -363,50 +359,50 @@ export class ContentAssetService {
       receipts.push({contentAssetId:item.contentAssetId,status:'conflict'});
       continue;
      }
-     await this.setContentAssetFolder(tx,wid,item.contentAssetId,folderId);
+     await this.setContentAssetFolder(tx,scope.userId,item.contentAssetId,folderId);
      const version=Number(contentAsset.content_asset_revision)+1,revisionId=randomUUID(),nextEtag=etag(item.contentAssetId,version);
      await tx.query('UPDATE content_assets SET content_asset_revision=$2,content_asset_revision_id=$3,etag=$4,updated_at=now() WHERE content_asset_id=$1',
       [item.contentAssetId,version,revisionId,nextEtag]);
-     await this.cursor(tx,wid,'content_asset',item.contentAssetId,'moved',false,revisionId,version,contentAsset.content_asset_revision_id,Number(contentAsset.content_asset_revision));
+     await this.cursor(tx,scope.userId,'content_asset',item.contentAssetId,'moved',false,revisionId,version,contentAsset.content_asset_revision_id,Number(contentAsset.content_asset_revision));
      receipts.push({contentAssetId:item.contentAssetId,status:'moved',etag:nextEtag});
     }
     return {contentAssets:receipts};
    });
   });
  }
- async contentAssetPart(scope:Scope,wid:string,id:string,part:string){checkPart(part);return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);
-  const contentAsset=await this.findContentAsset(tx,scope,wid,id,'FOR SHARE OF asset');
+ async contentAssetPart(scope:Scope,id:string,part:string){checkPart(part);return transaction(this.pool,async tx=>{await assertScope(tx,scope);
+  const contentAsset=await this.findContentAsset(tx,scope,id,'FOR SHARE OF asset');
   if(!contentAsset||contentAsset.state!=='active')throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
   const row=(await tx.query('SELECT * FROM content_asset_parts WHERE content_asset_id=$1 AND part=$2',[id,part])).rows[0];if(!row)throw new DomainError(404,'CONTENT_ASSET_PART_NOT_FOUND');
   return {contentAssetId:id,part,partRevisionId:row.part_revision_id,contentMarkdown:row.content_markdown,contentSha256:row.content_sha256,etag:contentAsset.etag};
  });}
- private async transitionContentAsset(tx:pg.PoolClient,scope:Scope,wid:string,asset:ContentAssetStateRow,restore:boolean){
+ private async transitionContentAsset(tx:pg.PoolClient,scope:Scope,asset:ContentAssetStateRow,restore:boolean){
   const id=asset.content_asset_id,version=Number(asset.content_asset_revision)+1,revisionId=randomUUID();
   await tx.query('UPDATE content_assets SET state=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
    [id,restore?'active':'deleted',version,revisionId,etag(id,version)]);
-  if(restore){await this.indexContentAsset(tx,scope,wid,id);}
+  if(restore){await this.indexContentAsset(tx,scope,id);}
   else if((await tx.query('SELECT 1 FROM kb_content_asset_hybrid_builds WHERE source_id=$1 LIMIT 1',[id])).rowCount){
    const taskId=randomUUID(),inputId=randomUUID();
-   await tx.query('INSERT INTO task_inputs(id,user_id,workspace_id,body) VALUES($1,$2,$3,$4)',[inputId,scope.userId,wid,JSON.stringify({contentAssetId:id})]);
-   await tx.query("INSERT INTO tasks(id,user_id,workspace_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,$3,'kb.content-asset-cleanup','content',$4,'queued',$5,$6)",[taskId,scope.userId,wid,inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
+   await tx.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',[inputId,scope.userId,JSON.stringify({contentAssetId:id})]);
+   await tx.query("INSERT INTO tasks(id,user_id,kind,queue,input_id,state,trace_id,max_attempts) VALUES($1,$2,'kb.content-asset-cleanup','content',$3,'queued',$4,$5)",[taskId,scope.userId,inputId,resolveTraceId(scope.traceId),newTaskMaxAttempts()]);
    await enqueueIntent(tx,taskId);await event(tx,taskId);
   }
-  return this.cursor(tx,wid,'content_asset',id,restore?'restored':'deleted',!restore,revisionId,version,asset.content_asset_revision_id,Number(asset.content_asset_revision));
+  return this.cursor(tx,scope.userId,'content_asset',id,restore?'restored':'deleted',!restore,revisionId,version,asset.content_asset_revision_id,Number(asset.content_asset_revision));
  }
- async deleteContentAsset(scope:Scope,wid:string,id:string,ifMatch:string,key:string,restore=false){
+ async deleteContentAsset(scope:Scope,id:string,ifMatch:string,key:string,restore=false){
   return transaction(this.pool,async tx=>{
-   await assertScope(tx,scope);await this.workspace(tx,scope,wid);await this.lockTree(tx,wid,true);
-   return idempotent(tx,this.secret,`${scope.userId}:${wid}`,restore?'content-asset.restore':'content-asset.delete',key,{id,ifMatch},async()=>{
-    const contentAsset=await this.findContentAsset(tx,scope,wid,id,'FOR UPDATE OF asset');
+   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
+   return idempotent(tx,this.secret,scope.userId,restore?'content-asset.restore':'content-asset.delete',key,{id,ifMatch},async()=>{
+    const contentAsset=await this.findContentAsset(tx,scope,id,'FOR UPDATE OF asset');
     if(!contentAsset)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
     if(contentAsset.etag!==ifMatch)throw new DomainError(412,'CONTENT_ASSET_REVISION_MISMATCH');
-    return this.transitionContentAsset(tx,scope,wid,contentAsset,restore);
+    return this.transitionContentAsset(tx,scope,contentAsset,restore);
    });
   });
  }
 
- async search(scope:Scope,wid:string,input:{query:string;mode?:string;ownerKinds?:string[];contentAssetParts?:string[];folderIds?:string[];tagIds?:string[];sourceKinds?:string[];contentAssetTypeIds?:string[];from?:string;to?:string;limit?:number}){
-  await transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);});
+ async search(scope:Scope,input:{query:string;mode?:string;ownerKinds?:string[];contentAssetParts?:string[];folderIds?:string[];tagIds?:string[];sourceKinds?:string[];contentAssetTypeIds?:string[];from?:string;to?:string;limit?:number}){
+  await transaction(this.pool,async tx=>{await assertScope(tx,scope);});
   if(input.mode&&!['keyword','hybrid'].includes(input.mode))throw new DomainError(400,'SEARCH_MODE_INVALID');
   if(input.contentAssetParts?.some(p=>!['raw','outline','germination'].includes(p)))throw new DomainError(400,'CONTENT_ASSET_PART_INVALID');
   if(input.contentAssetTypeIds?.length)throw new DomainError(400,'SEARCH_CONTENT_ASSET_TYPE_UNSUPPORTED');
@@ -415,17 +411,17 @@ export class ContentAssetService {
   const mode=input.mode==='hybrid'?'hybrid':'keyword';
   if(!input.query.trim())throw new DomainError(400,'SEARCH_QUERY_EMPTY');
   if(!this.ragQuery)throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE');
-  const result=(input.ownerKinds?.length&&!input.ownerKinds.includes('content_asset'))||(input.contentAssetParts?.length&&!input.contentAssetParts.includes('raw'))?{results:[]}:await this.ragQuery.query(scope,{query:input.query,mode,sourceType:'content_asset',workspaceId:wid,topK:Math.min(30,input.limit??20),filters:input});
+  const result=(input.ownerKinds?.length&&!input.ownerKinds.includes('content_asset'))||(input.contentAssetParts?.length&&!input.contentAssetParts.includes('raw'))?{results:[]}:await this.ragQuery.query(scope,{query:input.query,mode,sourceType:'content_asset',topK:Math.min(30,input.limit??20),filters:input});
   const ids=[...new Set(result.results.map(r=>String(r.documentKey)))];
-  const contentAssets=await transaction(this.pool,async tx=>{await assertScope(tx,scope);return (await tx.query("SELECT asset.content_asset_id,asset.title,asset.updated_at FROM content_assets asset JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2 WHERE asset.content_asset_id=ANY($1::uuid[]) AND asset.user_id=$3 AND asset.state='active'",[ids,wid,scope.userId])).rows;});
-  const results=contentAssets.flatMap(asset=>{const hit=result.results.find(r=>r.documentKey===asset.content_asset_id);return hit?[{ownerRef:{workspaceId:wid,kind:'content_asset',id:asset.content_asset_id},revisionId:hit.revisionId,part:'raw',path:`content-assets/${asset.content_asset_id}.md`,title:asset.title,updatedAt:asset.updated_at.toISOString(),matchMode:mode,score:Number(hit.rerankScore??(mode==='hybrid'?hit.rrfScore:hit.keywordScore)),staleSource:false}]:[];});
-  return {mode,queryFingerprint:sha(`${wid}:${normalize(input.query)}`),keywordReadiness:'current',vectorReadiness:mode==='hybrid'?'current':'unavailable',vectorStatus:mode==='hybrid'?'ready':'unavailable',contentCursor:String((await this.pool.query('SELECT next_cursor FROM workspace_content_state WHERE workspace_id=$1',[wid])).rows[0]?.next_cursor??0),results};
+  const contentAssets=await transaction(this.pool,async tx=>{await assertScope(tx,scope);return (await tx.query("SELECT asset.content_asset_id,asset.title,asset.updated_at FROM content_assets asset WHERE asset.content_asset_id=ANY($1::uuid[]) AND asset.user_id=$2 AND asset.state='active'",[ids,scope.userId])).rows;});
+  const results=contentAssets.flatMap(asset=>{const hit=result.results.find(r=>r.documentKey===asset.content_asset_id);return hit?[{ownerRef:{kind:'content_asset',id:asset.content_asset_id},revisionId:hit.revisionId,part:'raw',path:`content-assets/${asset.content_asset_id}.md`,title:asset.title,updatedAt:asset.updated_at.toISOString(),matchMode:mode,score:Number(hit.rerankScore??(mode==='hybrid'?hit.rrfScore:hit.keywordScore)),staleSource:false}]:[];});
+  return {mode,queryFingerprint:sha(`${scope.userId}:${normalize(input.query)}`),keywordReadiness:'current',vectorReadiness:mode==='hybrid'?'current':'unavailable',vectorStatus:mode==='hybrid'?'ready':'unavailable',contentCursor:String((await this.pool.query('SELECT next_cursor FROM account_content_state WHERE user_id=$1',[scope.userId])).rows[0]?.next_cursor??0),results};
  }
- async createContentAssetRelation(scope:Scope,wid:string,id:string,input:{targetContentAssetId:string;relationType:string;rationale:string},key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.relation.create',key,{id,...input},async()=>{if(!['references','supports','contradicts','related'].includes(input.relationType)||input.targetContentAssetId===id)throw new DomainError(400,'RELATION_INVALID');const ok=await tx.query("SELECT asset.content_asset_id FROM content_assets asset JOIN content_asset_workspaces m ON m.content_asset_id=asset.content_asset_id AND m.workspace_id=$2 WHERE asset.content_asset_id=ANY($1::uuid[]) AND asset.user_id=$3 AND asset.state='active'",[[id,input.targetContentAssetId],wid,scope.userId]);if(ok.rowCount!==2)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');const rid=randomUUID();await tx.query('INSERT INTO content_asset_relations(relation_id,workspace_id,source_content_asset_id,target_content_asset_id,relation_type,rationale,etag) VALUES($1,$2,$3,$4,$5,$6,$7)',[rid,wid,id,input.targetContentAssetId,input.relationType,input.rationale,`"relation-${rid}-1"`]);return {relationId:rid,relationType:input.relationType,origin:'explicit',source:{contentAssetId:id,part:'raw'},target:{contentAssetId:input.targetContentAssetId,part:'raw'},rationale:input.rationale,version:1,etag:`"relation-${rid}-1"`};});});}
- async deleteContentAssetRelation(scope:Scope,wid:string,rid:string,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);return idempotent(tx,this.secret,`${scope.userId}:${wid}`,'content-asset.relation.delete',key,{rid,ifMatch},async()=>{const r=await tx.query('DELETE FROM content_asset_relations WHERE relation_id=$1 AND workspace_id=$2 AND etag=$3 RETURNING relation_id,source_content_asset_id,target_content_asset_id',[rid,wid,ifMatch]);if(!r.rowCount)throw new DomainError(412,'RELATION_REVISION_MISMATCH');return {eventId:randomUUID(),workspaceId:wid,cursor:String((await tx.query('SELECT coalesce(next_cursor,0) c FROM workspace_content_state WHERE workspace_id=$1',[wid])).rows[0]?.c??0),operationId:randomUUID(),occurredAt:new Date().toISOString(),objectKind:'content_asset_relation',objectId:rid,changeType:'deleted',tombstone:true,resourcePinDelta:{added:[],released:[]}};});});}
- async navigation(scope:Scope,wid:string,map:string,input:GraphQuery={}){return transaction(this.pool,async tx=>{
-  await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await assertScope(tx,scope);await this.workspace(tx,scope,wid);
-  return tagGraph(tx,scope.userId,wid,map,input);
+ async createContentAssetRelation(scope:Scope,id:string,input:{targetContentAssetId:string;relationType:string;rationale:string},key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return idempotent(tx,this.secret,scope.userId,'content-asset.relation.create',key,{id,...input},async()=>{if(!['references','supports','contradicts','related'].includes(input.relationType)||input.targetContentAssetId===id)throw new DomainError(400,'RELATION_INVALID');const ok=await tx.query("SELECT asset.content_asset_id FROM content_assets asset WHERE asset.content_asset_id=ANY($1::uuid[]) AND asset.user_id=$2 AND asset.state='active'",[[id,input.targetContentAssetId],scope.userId]);if(ok.rowCount!==2)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');const rid=randomUUID();await tx.query('INSERT INTO content_asset_relations(relation_id,user_id,source_content_asset_id,target_content_asset_id,relation_type,rationale,etag) VALUES($1,$2,$3,$4,$5,$6,$7)',[rid,scope.userId,id,input.targetContentAssetId,input.relationType,input.rationale,`"relation-${rid}-1"`]);return {relationId:rid,relationType:input.relationType,origin:'explicit',source:{contentAssetId:id,part:'raw'},target:{contentAssetId:input.targetContentAssetId,part:'raw'},rationale:input.rationale,version:1,etag:`"relation-${rid}-1"`};});});}
+ async deleteContentAssetRelation(scope:Scope,rid:string,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return idempotent(tx,this.secret,scope.userId,'content-asset.relation.delete',key,{rid,ifMatch},async()=>{const r=await tx.query('DELETE FROM content_asset_relations WHERE relation_id=$1 AND user_id=$2 AND etag=$3 RETURNING relation_id,source_content_asset_id,target_content_asset_id',[rid,scope.userId,ifMatch]);if(!r.rowCount)throw new DomainError(412,'RELATION_REVISION_MISMATCH');return {eventId:randomUUID(),cursor:String((await tx.query('SELECT coalesce(next_cursor,0) c FROM account_content_state WHERE user_id=$1',[scope.userId])).rows[0]?.c??0),operationId:randomUUID(),occurredAt:new Date().toISOString(),objectKind:'content_asset_relation',objectId:rid,changeType:'deleted',tombstone:true,resourcePinDelta:{added:[],released:[]}};});});}
+ async navigation(scope:Scope,map:string,input:GraphQuery={}){return transaction(this.pool,async tx=>{
+  await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await assertScope(tx,scope);
+  return tagGraph(tx,scope.userId,map,input);
  });}
- async contentAssetRelations(scope:Scope,wid:string,id:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.workspace(tx,scope,wid);const r=await tx.query('SELECT * FROM content_asset_relations WHERE workspace_id=$1 AND (source_content_asset_id=$2 OR target_content_asset_id=$2) ORDER BY created_at',[wid,id]);return {items:r.rows.map(x=>({relationId:x.relation_id,relationType:x.relation_type,origin:x.origin,source:{contentAssetId:x.source_content_asset_id,part:'raw'},target:{contentAssetId:x.target_content_asset_id,part:'raw'},rationale:x.rationale,version:x.version,etag:x.etag}))};});}
+ async contentAssetRelations(scope:Scope,id:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const r=await tx.query('SELECT * FROM content_asset_relations WHERE user_id=$1 AND (source_content_asset_id=$2 OR target_content_asset_id=$2) ORDER BY created_at',[scope.userId,id]);return {items:r.rows.map(x=>({relationId:x.relation_id,relationType:x.relation_type,origin:x.origin,source:{contentAssetId:x.source_content_asset_id,part:'raw'},target:{contentAssetId:x.target_content_asset_id,part:'raw'},rationale:x.rationale,version:x.version,etag:x.etag}))};});}
 }

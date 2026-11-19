@@ -12,7 +12,7 @@ import type { AiTemplateAgentClient } from './agent-client.js';
 import { ItemKeySchema, RunRequestSchema, SceneKeySchema, type RunRequest, type SceneKey } from './model.js';
 import { runData, RunTimeoutMs, type AiTemplateRuns } from './runs.js';
 
-const runPath = '/api/v1/workspaces/:workspaceId/ai-template-runs';
+const runPath = '/api/v1/ai-template-runs';
 const errors = { 400: ErrorSchema, 401: ErrorSchema, 404: ErrorSchema, 409: ErrorSchema, 502: ErrorSchema, 503: ErrorSchema, 504: ErrorSchema };
 const revision = Type.Integer({ minimum: 1 });
 const runFields = { runId: Id, sceneKey: SceneKeySchema, itemKey: ItemKeySchema, templateVersion: revision };
@@ -104,25 +104,25 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
 
   app.get(`${runPath}/:runId`, {
     schema: {
-      params: Type.Object({ workspaceId: Id, runId: Id }, Strict),
+      params: Type.Object({ runId: Id }, Strict),
       response: { 200: RunResult, 202: Pending, ...errors },
     },
   }, async (req, reply) => {
-    const { workspaceId, runId } = req.params as { workspaceId: string; runId: string };
-    return readRun(reply, await runs.get(scoped(req), workspaceId, runId), req.id);
+    const { runId } = req.params as { runId: string };
+    return readRun(reply, await runs.get(scoped(req), runId), req.id);
   });
 
-  app.get('/api/v1/workspaces/:workspaceId/content-assets/:contentAssetId/ai-outline-results', {
+  app.get('/api/v1/content-assets/:contentAssetId/ai-outline-results', {
     schema: {
-      params: Type.Object({ workspaceId: Id, contentAssetId: Id }, Strict),
+      params: Type.Object({ contentAssetId: Id }, Strict),
       response: { 200: Envelope(Type.Object({
         contentAssetId: Id, sourceRevision: Id,
         items: Type.Array(Type.Object({ runId: Id, itemKey: ItemKeySchema, templateVersion: revision, generatedAt: Type.String() })),
       })), ...errors },
     },
   }, async req => {
-    const { workspaceId, contentAssetId } = req.params as { workspaceId: string; contentAssetId: string };
-    return success(await runs.outlineResults(scoped(req), workspaceId, contentAssetId), req.id);
+    const { contentAssetId } = req.params as { contentAssetId: string };
+    return success(await runs.outlineResults(scoped(req), contentAssetId), req.id);
   });
 
   app.post(runPath, {
@@ -131,7 +131,6 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
       summary: '使用 AI 模板生成文本',
       description: '默认一次性返回 JSON。发送 Accept: text/event-stream 选择 SSE。'
         + '流式成功以 result 事件结束，其数据与 JSON 的成功响应一致。进行中和开流前的错误使用 JSON。',
-      params: Type.Object({ workspaceId: Id }, Strict),
       body: RunRequestSchema,
       response: {
         200: { content: {
@@ -143,7 +142,6 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
     },
   }, async (req, reply) => {
     const scope = scoped(req);
-    const { workspaceId } = req.params as { workspaceId: string };
     const key = idempotencyKey(req, 'required')!;
     const method = req.headers['x-huahuo-auth-method'] === 'cookie' ? 'cookie' : 'bearer';
     const disconnect = new AbortController();
@@ -160,7 +158,7 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
     const signal = AbortSignal.any([disconnect.signal, AbortSignal.timeout(RunTimeoutMs)]);
     reply.header('Vary', 'Accept');
     const stream = acceptsStream(req.headers.accept);
-    const { run, input } = await runs.begin(scope, workspaceId, key, req.body as RunRequest, agent.available);
+    const { run, input } = await runs.begin(scope, key, req.body as RunRequest, agent.available);
     if (!input) {
       if (run.state !== 'succeeded' || !stream) return readRun(reply, run, req.id);
       const result = success(runData(run), req.id);
@@ -182,7 +180,7 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
           if (output.type === 'delta') {
             yield { type: 'delta' as const, data: { runId: run.id, text: output.text } };
           } else {
-            const complete = await runs.complete(scope, workspaceId, run, output.text, signal);
+            const complete = await runs.complete(scope, run, output.text, signal);
             activeRunId = undefined;
             yield { type: 'result' as const, data: success(runData(complete), req.id) };
             return;
