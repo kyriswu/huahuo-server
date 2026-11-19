@@ -10,7 +10,7 @@ const database = process.env.TEST_DATABASE_MIGRATION_URL;
 if (!database || !/^huahuo_test_[a-z0-9_]+$/u.test(new URL(database).pathname.slice(1))) throw new Error('ISOLATED_DATABASE_REQUIRED');
 const config = loadConfig('migrate', { DATABASE_URL: database });
 const pool = poolFor(config);
-const migration = loadMigrationFiles().find(file => file.version === 15)!;
+const migration = loadMigrationFiles().find(file => file.name.endsWith('_strict_runtime_configuration.sql'))!;
 afterAll(() => pool.end());
 async function fixture(stored: unknown, run: (tx: PoolClient, schema: string, sql: string) => Promise<void>) {
   const tx = await pool.connect(), schema = `strict_runtime_${randomUUID().replaceAll('-', '')}`;
