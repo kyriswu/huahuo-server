@@ -5,7 +5,23 @@
  * active-index, and ready-state filters before passing candidates here.
  */
 
+import { SearchIndexError,type RecallHit } from '../../lib/search-index/types.js';
 import { ServiceHttpClient, readJsonResponse } from '../../integrations/http-client.js';
+/** Inputs contain each branch's global best hits, never per-window RRF scores. */
+export function fuseRankedRecall(branches:readonly (readonly RecallHit[])[],limit:number,k:number):RecallHit[]{
+ const fused=new Map<string,RecallHit>();
+ for(const branch of branches){
+  const seen=new Set<string>();
+  for(const hit of [...branch].sort((a,b)=>b.score-a.score||a.chunkKey.localeCompare(b.chunkKey))){
+   if(seen.has(hit.chunkKey))continue;seen.add(hit.chunkKey);
+   const old=fused.get(hit.chunkKey);
+   if(old&&old.content!==hit.content)throw new SearchIndexError('SEARCH_INDEX_CONTENT_CONFLICT');
+   fused.set(hit.chunkKey,{...hit,score:(old?.score??0)+1/(k+seen.size)});
+  }
+ }
+ return [...fused.values()].sort((a,b)=>b.score-a.score||a.chunkKey.localeCompare(b.chunkKey)).slice(0,limit);
+}
+
 export interface RagSearchCandidate {
   chunkKey: string;
   documentKey: string;

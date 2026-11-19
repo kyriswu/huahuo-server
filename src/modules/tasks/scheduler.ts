@@ -63,7 +63,17 @@ export class TaskScheduler {
     (t.kind='processing.node-start' AND t.external_reference LIKE 'node-start:%'))))
    AND NOT EXISTS(SELECT 1 FROM task_outbox o WHERE o.task_id=t.id AND (o.status IN ('pending','delivering') OR o.sent_at>now()-$1*interval '1 millisecond'))
    ORDER BY t.created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,[this.redeliveryMs]);
-  for(const t of pending.rows)await enqueueIntent(tx,t.id);
+  for(const t of pending.rows){
+   // Repair the same delivery instead of adding another PG row and Redis job
+   // while its worker is unavailable. Explicit retries/continuations still
+   // create their own intents through enqueueIntent. The task lock above and
+   // the pending-delivery unique index serialize these two paths.
+   const repaired=await tx.query(`UPDATE task_outbox SET status='pending',available_at=now(),lease_owner=NULL,lease_until=NULL,last_error=NULL
+    WHERE id=(SELECT id FROM task_outbox WHERE task_id=$1 AND status='sent'
+     ORDER BY sent_at DESC NULLS LAST,created_at DESC,id DESC LIMIT 1 FOR UPDATE)
+    RETURNING id`,[t.id]);
+   if(!repaired.rowCount)await enqueueIntent(tx,t.id);
+  }
  });}
  async schedules(){return this.transaction(async tx=>{
   const r=await tx.query<{id:string;window:string}>(`SELECT id,floor(extract(epoch from now())/interval_seconds)::bigint::text AS window FROM task_schedules

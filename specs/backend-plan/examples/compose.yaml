@@ -120,10 +120,8 @@ services:
       WORKER_QUEUES: ${WORKER_QUEUES:-content,ai,commercial,maintenance}
       STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
       STORAGE_LOCAL_ROOT: /app/var/storage
-      WORKFLOW_PROVIDER: ${WORKFLOW_PROVIDER:-disabled}
       DIFY_BASE_URL: ${DIFY_BASE_URL:-}
       DIFY_API_KEY: ${DIFY_API_KEY:-}
-      ASR_PROVIDER: ${ASR_PROVIDER:-disabled}
       PAYMENT_ENABLED: ${PAYMENT_ENABLED:-false}
     volumes:
       - user_files:/app/var/storage

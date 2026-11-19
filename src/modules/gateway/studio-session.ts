@@ -18,20 +18,17 @@ function cookieValue(header: string | undefined, name: string): string | undefin
 
 export function studioCookies(config: StudioConfig, tokens?: TokenPair): string[] {
   const attributes = `; HttpOnly; SameSite=Lax${config.origin.startsWith('https:') ? '; Secure' : ''}`;
-  const expiredRoot = [studioAccessCookie, studioRefreshCookie].map(name => `${name}=; Path=/${attributes}; Max-Age=0`);
   const options = `; Path=${config.publicPath}${attributes}`;
   return [
-    ...expiredRoot,
     `${studioAccessCookie}=${encodeURIComponent(tokens?.accessToken ?? '')}${options}; Max-Age=${tokens ? Math.max(1, Math.floor((Date.parse(tokens.accessTokenExpiresAt) - Date.now()) / 1_000)) : 0}`,
     `${studioRefreshCookie}=${encodeURIComponent(tokens?.refreshToken ?? '')}${options}; Max-Age=${tokens ? 30 * 24 * 60 * 60 : 0}`,
   ];
 }
 
 /** Cookie attributes remain owned by Server. Ingress copies these opaque
- * values into four Set-Cookie headers, including on denied navigation. */
+ * values into two Set-Cookie headers, including on denied navigation. */
 export function studioAuthCookieHeaders(config: StudioConfig, tokens?: TokenPair): Record<string, string> {
-  const names = ['X-Huahuo-Clear-Access-Cookie', 'X-Huahuo-Clear-Refresh-Cookie',
-    'X-Huahuo-Studio-Access-Cookie', 'X-Huahuo-Studio-Refresh-Cookie'];
+  const names = ['X-Huahuo-Studio-Access-Cookie', 'X-Huahuo-Studio-Refresh-Cookie'];
   return Object.fromEntries(studioCookies(config, tokens).map((value, index) => [names[index]!, value]));
 }
 
@@ -59,7 +56,7 @@ export class GatewaySession {
 
   async authenticate(headers: IncomingHttpHeaders, traceId: string, originalPath?: string): Promise<{ scope: Scope; method: 'bearer' | 'cookie'; tokens?: TokenPair }> {
     if (headers.authorization !== undefined) {
-      return { scope: await this.identity.authenticate(headers.authorization, traceId), method: 'bearer' };
+      return { scope: await this.identity.authenticate(headers.authorization, traceId, true), method: 'bearer' };
     }
     const uri = originalPath ?? headers['x-forwarded-uri'];
     const method = headers['x-forwarded-method'];

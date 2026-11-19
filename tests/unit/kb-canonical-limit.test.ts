@@ -4,7 +4,7 @@ import type pg from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import { DOCUMENT_CANONICAL_MAX_BYTES } from '../../src/config/document-extraction.js';
 import { sourceContent } from '../../src/modules/kb/repository.js';
-import { digest } from '../../src/modules/kb/split.js';
+import { digest } from '../../src/lib/crypto.js';
 import type { KbBuild } from '../../src/modules/kb/types.js';
 import { storageFor } from '../../src/modules/storage/port.js';
 import { config } from '../helpers.js';

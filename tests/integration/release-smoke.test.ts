@@ -16,7 +16,7 @@ const config = loadConfig('api-server', {
   ...process.env, ...testJwtEnv, DATABASE_URL: process.env.TEST_DATABASE_API_URL,
   APP_ENV: 'test', LOG_LEVEL: 'silent', APP_TOKEN_SECRET: 'smoke-fixture-'.repeat(4),
   APP_PUBLIC_BASE_URL: 'http://localhost:3000', BILLING_MODE: 'disabled',
-  PROVIDER_MODE: 'disabled', RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled',
+  RAG_PROVIDER_MODE: 'disabled', RAG_RERANK_PROVIDER: 'disabled',
   ENABLE_DEMO_TASKS: 'false',
 });
 const root = poolFor(loadConfig('migrate', { DATABASE_URL: migrationUrl }));

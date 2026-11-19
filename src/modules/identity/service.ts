@@ -7,7 +7,8 @@ import { createSmsProvider, type SmsProvider } from '../../integrations/sms.js';
 import { SmsProviderError } from '../../integrations/aliyun-sms.js';
 import { constantEqual, mac, maskedPhone, normalizePhone, otpCode, token } from './crypto.js';
 import { loadEd25519Keys, publicJwks, signAccessToken, verifyAccessToken, type JwtSettings } from './jwt.js';
-import { DomainError, transaction, lock, audit, assertScope, type Scope, rateLimit } from './store.js';
+import { DomainError, transaction, lock, audit, assertScope, type Scope, rateLimit, afterCommit } from './store.js';
+import type { BearerCache } from './bearer-cache.js';
 export type ClientType='app'|'web';
 export interface LoginInput { phone:string; smsRequestId:string; smsCode:string; clientType:ClientType; clientId:string; agreementAccepted:boolean; agreementVersion:string; privacyVersion:string; clientVersion:string; timeZone?:string; }
 export interface TokenPair { tokenType:'Bearer'; accessToken:string; refreshToken:string; accessTokenExpiresAt:string; expiresIn:number; rotated:boolean; }
@@ -17,10 +18,10 @@ export class IdentityService {
   private readonly jwtSettings: JwtSettings;
   private readonly jwtKeys: ReturnType<typeof loadEd25519Keys>;
   readonly sms: SmsProvider;
-  constructor(readonly pool: pg.Pool, readonly config: AppConfig, options: IdentityOptions = {}) {
+  constructor(readonly pool: pg.Pool, readonly config: AppConfig, options: IdentityOptions = {}, private readonly bearerCache?: BearerCache) {
     if (!config.appTokenSecret) throw new Error('APP_TOKEN_SECRET_REQUIRED');
     this.secret=config.appTokenSecret;
-    this.jwtSettings={issuer:config.jwt.issuer,audience:config.jwt.audience,serverAudience:config.jwt.serverAudience,keyId:config.jwt.keyId,accessTtlSeconds:config.jwt.accessTtlSeconds,refreshTtlSeconds:config.jwt.refreshTtlSeconds,privateKeyPem:config.jwt.privateKeyPem,publicKeyPem:config.jwt.publicKeyPem,previousPublicKeyPem:config.jwt.previousPublicKeyPem,previousKeyId:config.jwt.previousKeyId};
+    this.jwtSettings={issuer:config.jwt.issuer,audience:config.jwt.audience,serverAudience:config.jwt.serverAudience,keyId:config.jwt.keyId,accessTtlSeconds:config.jwt.accessTtlSeconds,refreshTtlSeconds:config.jwt.refreshTtlSeconds,privateKeyPem:config.jwt.privateKeyPem,publicKeyPem:config.jwt.publicKeyPem};
     this.jwtKeys=loadEd25519Keys(this.jwtSettings);
     this.sms=options.sms ?? createSmsProvider(config);
   }
@@ -104,17 +105,23 @@ export class IdentityService {
       return result;
     });
   }
-  async authenticate(authorization: string | undefined, traceId:string):Promise<Scope> {
+  async authenticate(authorization: string | undefined, traceId:string, cacheBearer = false):Promise<Scope> {
     const access=authorization?.match(/^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/)?.[1];
     if(!access)throw new DomainError(401,'UNAUTHORIZED');
     let claims;
     try { claims=await verifyAccessToken(await this.jwtKeys,this.jwtSettings,access); }
     catch { throw new DomainError(401,'AUTH_TOKEN_INVALID'); }
-    // Admission is always a fresh read. Activity is approximate metadata: update
-    // at most once a minute, and never wait for a business transaction's row lock.
+    const hash = digest(access);
+    const cache = cacheBearer ? this.bearerCache : undefined;
+    const cached = await cache?.read(hash);
+    if (cached?.userId === claims.sub && claims.exp * 1000 > Date.now()) return Object.freeze({ ...cached, traceId });
+    const checkedAt = Date.now();
+    // Activity is approximate metadata: update at most once a minute and never
+    // wait for a business transaction's row lock.
     // A data-modifying CTE runs even when its RETURNING rows are not consumed.
-    const r=await this.pool.query<{id:string;user_id:string}>(`WITH admitted AS MATERIALIZED (
-      SELECT s.id,s.user_id FROM user_sessions s JOIN users u ON u.id=s.user_id
+    const r=await this.pool.query<{id:string;user_id:string;valid_until:Date}>(`WITH admitted AS MATERIALIZED (
+      SELECT s.id,s.user_id,least(s.access_expires_at,s.expires_at) AS valid_until
+      FROM user_sessions s JOIN users u ON u.id=s.user_id
       WHERE u.status='active' AND u.deleted_at IS NULL AND s.access_jti=$1 AND s.user_id=$2 AND s.access_hash=$3
         AND s.revoked_at IS NULL AND s.access_expires_at>statement_timestamp() AND s.expires_at>statement_timestamp()
     ), activity AS (
@@ -125,9 +132,22 @@ export class IdentityService {
         FOR NO KEY UPDATE OF candidate SKIP LOCKED
       )
       RETURNING s.id
-    ) SELECT id,user_id FROM admitted`,[claims.jti,claims.sub,digest(access)]);
-    if(!r.rows[0])throw new DomainError(401,'AUTH_SESSION_EXPIRED');
-    return Object.freeze({userId:r.rows[0].user_id,sessionId:r.rows[0].id,traceId});
+    ) SELECT id,user_id,valid_until FROM admitted`,[claims.jti,claims.sub,hash]);
+    const row = r.rows[0];
+    if(!row)throw new DomainError(401,'AUTH_SESSION_EXPIRED');
+    const admission = { userId: row.user_id, sessionId: row.id };
+    await cache?.remember(hash, admission, checkedAt, Math.min(row.valid_until.getTime(), claims.exp * 1000));
+    return Object.freeze({ ...admission, traceId });
+  }
+  async invalidateBearerEvent(payload: string): Promise<void> {
+    if (!this.bearerCache) return;
+    if (/^access:[0-9a-f]{64}$/.test(payload)) {
+      await this.bearerCache.invalidate([payload.slice(7)]);
+    } else if (/^user:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(payload)) {
+      const { rows } = await this.pool.query<{ access_hash: string }>(
+        'SELECT access_hash FROM user_sessions WHERE user_id=$1 AND revoked_at IS NULL AND access_expires_at>now()', [payload.slice(5)]);
+      await this.bearerCache.invalidate(rows.map(row => row.access_hash));
+    }
   }
   async jwks() { return publicJwks(await this.jwtKeys); }
   async refresh(refresh:string,traceId:string) {
@@ -135,19 +155,29 @@ export class IdentityService {
     return transaction(this.pool,async tx=>{
       const found=await tx.query<{session_id:string;consumed_at:Date|null;valid:boolean}>('SELECT session_id,consumed_at,expires_at>now() valid FROM refresh_tokens WHERE token_hash=$1 FOR UPDATE',[digest(refresh)]);
       if(!found.rows[0] || !found.rows[0].valid)throw new DomainError(401,'AUTH_SESSION_EXPIRED');
-      const r=await tx.query<{id:string;user_id:string;valid:boolean;revoked_at:Date|null;expires_at:Date}>("SELECT s.id,s.user_id,s.expires_at,s.expires_at>now() valid,s.revoked_at FROM user_sessions s JOIN users u ON u.id=s.user_id AND u.status='active' AND u.deleted_at IS NULL WHERE s.id=$1 FOR UPDATE OF s",[found.rows[0].session_id]);
+      const checkedAt = Date.now();
+      const r=await tx.query<{id:string;user_id:string;valid:boolean;revoked_at:Date|null;expires_at:Date;access_hash:string}>("SELECT s.id,s.user_id,s.expires_at,s.expires_at>now() valid,s.revoked_at,s.access_hash FROM user_sessions s JOIN users u ON u.id=s.user_id AND u.status='active' AND u.deleted_at IS NULL WHERE s.id=$1 FOR UPDATE OF s",[found.rows[0].session_id]);
       const s=r.rows[0];
       if(!s)throw new DomainError(401,'AUTH_SESSION_EXPIRED');
+      const cache = this.bearerCache;
       if(found.rows[0].consumed_at){
         await tx.query('UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE id=$1',[s.id]);
         await audit(tx,{userId:s.user_id,sessionId:s.id,traceId},'auth.refresh_reuse',s.id);
+        if (cache) afterCommit(tx, () => cache.invalidate([s.access_hash]));
         throw new DomainError(401,'AUTH_SESSION_EXPIRED',true);
       }
       if(s.revoked_at||!s.valid)throw new DomainError(401,'AUTH_SESSION_EXPIRED');
       const accessJti=randomUUID(), pair=await this.makePair(s.user_id,accessJti,true,s.expires_at);
       await tx.query('UPDATE refresh_tokens SET consumed_at=now(),last_used_at=now() WHERE token_hash=$1',[digest(refresh)]);
       await tx.query('INSERT INTO refresh_tokens(token_hash,session_id,expires_at,last_used_at) VALUES($1,$2,$3,now())',[digest(pair.refreshToken),s.id,s.expires_at]);
-      await tx.query('UPDATE user_sessions SET access_jti=$1,access_hash=$2,access_expires_at=$3,last_seen_at=now() WHERE id=$4',[accessJti,digest(pair.accessToken),pair.accessTokenExpiresAt,s.id]);
+      const accessHash = digest(pair.accessToken);
+      await tx.query('UPDATE user_sessions SET access_jti=$1,access_hash=$2,access_expires_at=$3,last_seen_at=now() WHERE id=$4',[accessJti,accessHash,pair.accessTokenExpiresAt,s.id]);
+      if (cache) afterCommit(tx, async () => {
+        await cache.invalidate([s.access_hash]);
+        const claims = await verifyAccessToken(await this.jwtKeys, this.jwtSettings, pair.accessToken);
+        await cache.remember(accessHash, { userId: s.user_id, sessionId: s.id },
+          checkedAt, Math.min(s.expires_at.getTime(), claims.exp * 1000));
+      });
       return pair;
     });
   }
@@ -157,7 +187,10 @@ export class IdentityService {
       // concurrent logout calls must not deadlock while upgrading those locks.
       await lock(tx,`auth.logout:${scope.userId}`);
       await assertScope(tx,scope);
-      await tx.query(`UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 ${all?'':'AND id=$2'}`,all?[scope.userId]:[scope.userId,scope.sessionId]);
+      const revoked = await tx.query<{ access_hash: string }>(`UPDATE user_sessions SET revoked_at=now()
+        WHERE user_id=$1 AND revoked_at IS NULL ${all?'':'AND id=$2'} RETURNING access_hash`,all?[scope.userId]:[scope.userId,scope.sessionId]);
+      const cache = this.bearerCache;
+      if (cache) afterCommit(tx, () => cache.invalidate(revoked.rows.map(row => row.access_hash)));
       await audit(tx,scope,all?'auth.logout_all':'auth.logout',scope.sessionId);
     });return {revoked:true,scope:all?'all':'current'};
   }
@@ -187,10 +220,8 @@ export async function status(tx:pg.PoolClient,scope:Scope) {
    coalesce((SELECT i.subject_masked FROM user_identities i WHERE i.user_id=u.id AND i.provider='phone' AND i.verified_at IS NOT NULL ORDER BY i.created_at,i.id LIMIT 1),'') AS "phoneMasked"
    FROM users u WHERE u.id=$1 AND u.status='active' AND u.deleted_at IS NULL`,[scope.userId]);
   const w=await tx.query<{id:string;updated_at:Date}>('SELECT id,updated_at FROM workspaces WHERE user_id=$1 AND is_default',[scope.userId]);
-  const p=await tx.query<{id:string;name:string}>('SELECT p.id,p.name FROM workspace_profiles p JOIN workspaces w ON w.id=p.workspace_id WHERE w.user_id=$1 AND w.is_default',[scope.userId]);
   if(!user.rows[0]||!w.rows[0])throw new DomainError(409,'WORKSPACE_NOT_READY');
   return {user:{userId:scope.userId,displayName:user.rows[0].display_name,phoneMasked:user.rows[0].phoneMasked},
-    workspace:{status:'ready',workspaceId:w.rows[0].id,defaultContentLineId:p.rows[0]?.id??null,lastSyncedAt:w.rows[0].updated_at.toISOString()},
-    defaultContentLine:p.rows[0]?{contentLineId:p.rows[0].id,name:p.rows[0].name,isPlaceholder:false}:null,
-    onboardingRequired:true,basicPositioningCompleted:false,positioningStatus:'not_started',runningTaskCount:0,timeZone:user.rows[0].time_zone};
+    workspace:{status:'ready',workspaceId:w.rows[0].id,lastSyncedAt:w.rows[0].updated_at.toISOString()},
+    timeZone:user.rows[0].time_zone};
 }

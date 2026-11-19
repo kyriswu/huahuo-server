@@ -33,13 +33,13 @@ function cli(variables: Record<string, string>) {
 }
 function normal(request: IncomingMessage, response: ServerResponse) {
   switch (request.url) {
-    case '/health/live': return success(response, { service: 'api-server', status: 'live', stage: 'P06', mode: 'asset-knowledge' });
-    case '/health/ready': return success(response, { service: 'api-server', status: 'ready', stage: 'P06', mode: 'asset-knowledge' });
+    case '/health/live': return success(response, { service: 'api-server', status: 'live', version: 'test-version' });
+    case '/health/ready': return success(response, { service: 'api-server', status: 'ready', version: 'test-version' });
     case '/api/v1/me/status':
       if (!request.headers.authorization) return json(response, { success: false, error: { code: 'UNAUTHORIZED', message: 'unauthorized', userMessageKey: 'api.error.UNAUTHORIZED', retryable: false }, traceId: 'smoke-fixture' }, 401);
       return success(response, { user: { userId, displayName: privateText, phoneMasked: '138****0000' },
-        workspace: { workspaceId, status: 'ready', defaultContentLineId: null, lastSyncedAt: '2026-11-15T00:00:00.000Z' }, defaultContentLine: null,
-        onboardingRequired: true, basicPositioningCompleted: false, positioningStatus: 'not_started', runningTaskCount: 0, timeZone: 'Asia/Shanghai' });
+        workspace: { workspaceId, status: 'ready', lastSyncedAt: '2026-11-15T00:00:00.000Z' },
+        timeZone: 'Asia/Shanghai' });
     case '/api/v1/workspaces': return success(response, { items: [{ workspaceId, displayName: privateText, state: 'ready', isDefault: true, etag: 'fixture-etag' }] });
     case '/api/v1/tasks/running': return success(response, { items: [] });
     default: return json(response, { error: 'unexpected route' }, 404);

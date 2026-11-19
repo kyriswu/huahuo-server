@@ -2,10 +2,11 @@ import { it,expect } from 'vitest';
 import { retryDelay,taskDto, type TaskRow } from '../../src/modules/tasks/model.js';
 import { loadConfig } from '../../src/config/config.js';
 import { config } from '../helpers.js';
-it('bounded jittered backoff and Work AI terminal mapping',()=>{
+it('bounded jittered backoff and canonical task states',()=>{
  expect(retryDelay(1,()=>0)).toBe(1500);expect(retryDelay(50,()=>1)).toBeLessThanOrEqual(75000);
  const t={id:'fixture',kind:'demo.digest',state:'cancelled',created_at:new Date(),updated_at:new Date(),error_code:null,retryable:false} as TaskRow;
- expect(taskDto(t)).toMatchObject({status:'failed',state:'cancelled',error:{code:'TASK_CANCELLED',retryable:false}});
+ expect(taskDto(t)).not.toHaveProperty('status');
+ expect(taskDto(t)).toMatchObject({state:'cancelled',error:{code:'TASK_CANCELLED',retryable:false}});
 });
 it('queue configuration rejects unsafe/test-only production settings',()=>{
  const c=config('worker');

@@ -312,7 +312,7 @@ describe('five-stage cumulative Cloud Assistant progress', () => {
     }
   });
 
-  it('keeps terminal-only legacy or idempotent success visible without inventing completed stages', async () => {
+  it('keeps terminal-only idempotent success visible without inventing completed stages', async () => {
     const s = setup(response([record({ Output: JSON.stringify(marker(), null, 2) })])), onProgress = vi.fn();
     const result = await runCloudRelease(s.config, { ...s, onProgress });
     expect(result).toMatchObject({ status: 'passed', progress: { visibility: 'terminal_only', completed: null } });

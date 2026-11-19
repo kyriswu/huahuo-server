@@ -6,7 +6,7 @@ import { NOTE_EMBEDDING_MODEL, NOTE_EMBEDDING_PROFILE, NOTE_EMBEDDING_MAX_INPUT_
 import { createMilvusKeywordIndex, createMilvusHybridIndex } from '../../integrations/search-index/milvus.js';
 import { createSearchIndex, type IndexFactories } from '../../lib/search-index/factory.js';
 import type { HybridIndex, KeywordIndex } from '../../lib/search-index/types.js';
-import { digest } from './split.js';
+import { digest } from '../../lib/crypto.js';
 import type { IndexMode, KbSnapshot } from './types.js';
 export const connectionId=(config:AppConfig)=>'milvus-'+digest(JSON.stringify([config.milvus.address??'mock',config.milvus.tls])).slice(0,20);
 export function kbSnapshot(config:AppConfig,mode:IndexMode,format:'text'|'markdown'):KbSnapshot {

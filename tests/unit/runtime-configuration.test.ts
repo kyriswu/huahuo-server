@@ -1,6 +1,6 @@
 import {describe,it,expect,vi} from 'vitest';
 import {config} from '../helpers.js';
-import {defaults,validateValues,validateStoredValues,applyValues,rejectSecrets,RUNTIME_CONFIGURATION_SCHEMA_KEY,RUNTIME_CONFIGURATION_SCHEMA_VERSION} from '../../src/modules/runtime-settings/registry.js';
+import {defaults,validateValues,applyValues,rejectSecrets} from '../../src/modules/runtime-settings/registry.js';
 import {extractionConfig} from '../support/extraction-config.js';
 import {nodeConfig,nodeDocumentConfig,nodeFromRow,type ProcessingNode} from '../../src/modules/processing-nodes/model.js';
 import {loadProcessingNodesConfig} from '../../src/config/processing-nodes.js';
@@ -8,9 +8,9 @@ import {kbSnapshot,kbEmbedding} from '../../src/modules/kb/profile.js';
 
 const node:ProcessingNode={id:'11111111-1111-4111-8111-111111111111',name:'GPU node',capabilities:['document'],resourceClass:'gpu',mode:'ecs',regionId:'cn-beijing',instanceId:'i-unit12345678',privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,revision:1};
 describe('typed runtime registry (no database/cloud)',()=>{
- it('omits the retired admission field from stored nodes without mutating the stored configuration',()=>{
-  const {id,revision,...config}=node;const stored={...config,enabled:false};
-  const result=nodeFromRow({id,revision,config:stored});expect(result).not.toHaveProperty('enabled');expect(result.id).toBe(id);expect(stored.enabled).toBe(false);
+ it('reads the canonical node configuration without mutating its fields',()=>{
+  const {id,revision,...config}=node;const before=structuredClone(config);
+  expect(nodeFromRow({id,revision,config})).toMatchObject(node);expect(config).toEqual(before);
  });
  it('uses service defaults for deployed ECS and keeps overrides local to each node',()=>{
   const cpu={...node,resourceClass:'cpu' as const},defaults=nodeDocumentConfig(cpu);
@@ -30,43 +30,15 @@ describe('typed runtime registry (no database/cloud)',()=>{
   expect(()=>validateValues({'storage.maxUploadBytes':2000},{...config(),uploadHardMaxBytes:1000})).toThrow('CONFIGURATION_INVALID');
  });
  it('creates independent default JSON snapshots',()=>{const a=defaults(),b=defaults();a['tasks.maxAttempts']=9;expect(b['tasks.maxAttempts']).toBe(3);});
- it('projects only supported stored fields within the same schema while keeping Admin input strict',()=>{
-  const base=config(),stored={[RUNTIME_CONFIGURATION_SCHEMA_KEY]:RUNTIME_CONFIGURATION_SCHEMA_VERSION,'tasks.maxAttempts':5,'tasks.futureOptional':{enabled:false,weights:[1,2]}};
-  const before=structuredClone(stored),values=validateStoredValues(stored,base);
+ it('uses one strict registry for stored values and Admin input',()=>{
+  const base=config(),stored={'tasks.maxAttempts':5};
+  const before=structuredClone(stored),values=validateValues(stored,base);
   expect(values['tasks.maxAttempts']).toBe(5);expect(values['tasks.retryBaseMs']).toBe(1000);
-  expect(Object.hasOwn(values,'tasks.futureOptional')).toBe(false);expect(values).not.toHaveProperty(RUNTIME_CONFIGURATION_SCHEMA_KEY);
   expect(applyValues(base,values,17).taskPolicy.maxAttempts).toBe(5);expect(stored).toEqual(before);
-  expect(()=>validateValues({'tasks.futureOptional':false},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
-  expect(()=>validateValues({[RUNTIME_CONFIGURATION_SCHEMA_KEY]:1},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
- });
- it('removes source downloading controls from runtime values and rejects new writes to retired keys',()=>{
-  const base=config(),stored={'tasks.downloadTimeoutMs':300000,'storage.maxSourceBytes':209715200,'rag.plainTextMaxChars':43210};
-  const values=validateStoredValues(stored,base),applied=applyValues(base,values,18);
-  for(const key of ['tasks.downloadTimeoutMs','storage.maxSourceBytes']){
-   expect(Object.hasOwn(defaults(),key)).toBe(false);expect(Object.hasOwn(values,key)).toBe(false);
-   expect(()=>validateValues({[key]:1000},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
+  for(const key of ['tasks.futureOptional','$schemaVersion','tasks.downloadTimeoutMs','storage.maxSourceBytes']){
+   expect(()=>validateValues({[key]:1},base)).toThrow('CONFIGURATION_KEY_UNKNOWN');
   }
-  expect(applied.rag.plainTextMaxChars).toBe(43210);
-  expect(base.rag).not.toHaveProperty('downloadTimeoutMs');expect(base.rag).not.toHaveProperty('maxSourceBytes');
-  expect(applied.rag).not.toHaveProperty('downloadTimeoutMs');expect(applied.rag).not.toHaveProperty('maxSourceBytes');
-  expect(stored).toEqual({'tasks.downloadTimeoutMs':300000,'storage.maxSourceBytes':209715200,'rag.plainTextMaxChars':43210});
- });
- it('treats absent schema metadata as v1 and refuses unsupported or malformed versions',()=>{
-  const base=config();expect(validateStoredValues({},base)).toEqual(defaults());
-  for(const version of [0,2,1.5,'1',null,true,undefined]){
-   expect(()=>validateStoredValues({[RUNTIME_CONFIGURATION_SCHEMA_KEY]:version},base)).toThrow('CONFIGURATION_VERSION_UNSUPPORTED');
-  }
- });
- it('keeps security and known-value validation on forward-compatible stored reads',()=>{
-  const base=config(),future={'tasks.futureOptional':{enabled:false}};
-  for(const invalid of [{'tasks.maxAttempts':99},{'tasks.maxAttempts':'3'},{'tasks.retryBaseMs':5000,'tasks.retryMaxMs':1000},{'storage.maxUploadBytes':2147483649}]){
-   expect(()=>validateStoredValues({...future,...invalid},base)).toThrow('CONFIGURATION_INVALID');
-  }
-  expect(()=>validateStoredValues({...future,'features.tagProvider':'deterministic'},{...base,appEnv:'production'})).toThrow('CONFIGURATION_TEST_PROVIDER_FORBIDDEN');
-  expect(()=>validateStoredValues({...future,'storage.maxUploadBytes':2000},{...base,uploadHardMaxBytes:1000})).toThrow('CONFIGURATION_INVALID');
-  for(const unknown of [{apiKey:'must-not-persist'},{nested:[{url:'https://example.test/file?Signature=must-not-persist'}]}]){
-   expect(()=>validateStoredValues({'tasks.futureOptional':unknown},base)).toThrow('CONFIGURATION_SECRET_FORBIDDEN');
-  }
+  expect(validateValues({},base)).toEqual(defaults());
  });
  it('keeps the embedding timeout bound to its build snapshot after a configuration change',async()=>{
   const base=config();Object.assign(base.rag,{providerMode:'live',embeddingBaseUrl:'https://embedding.test/v1',embeddingApiKey:'synthetic-fixture-key'});

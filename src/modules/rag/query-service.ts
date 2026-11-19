@@ -6,18 +6,20 @@ import {sourceContent} from '../kb/repository.js';
 import {tablesFor,type KbBuild,type KbSourceType,type KbSnapshot} from '../kb/types.js';
 import type {HybridIndex,KeywordIndex} from '../../lib/search-index/types.js';
 import {requireIndexKind} from '../../lib/search-index/factory.js';
-import {digest} from '../kb/split.js';
+import {digest} from '../../lib/crypto.js';
 import type {EmbeddingClient} from './adapters/embedding.js';
-import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,type RerankAdapter,type RagSearchCandidate} from './search.js';
+import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,fuseRankedRecall,type RerankAdapter,type RagSearchCandidate} from './search.js';
 import {NoteQueryTiming} from './query-timing.js';
 import { NOTE_EMBEDDING_MODEL, NOTE_EMBEDDING_PROFILE } from './model-profile.js';
 import {kbImages,renderKbImages,type KbImage} from '../../lib/kb-images.js';
 export type RagQueryMode='keyword'|'dense'|'hybrid';
-export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:KbSourceType;topK?:number;documentKey?:string;workspaceId?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
+export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:'note'|'file';topK?:number;documentKey?:string;workspaceId?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];from?:string;to?:string;};}
 export interface RagImageRequest{sourceType:KbSourceType;sourceId:string;workspaceId:string;sourceRevision:string;resourceId:string;}
 export interface RagImageLink{url:string;expiresAt:string;}
 export const ragImageKey=(image:RagImageRequest)=>JSON.stringify([image.sourceType,image.sourceId,image.workspaceId,image.sourceRevision,image.resourceId]);
 export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveImages?:(scope:Scope,images:RagImageRequest[])=>Promise<ReadonlyMap<string,RagImageLink>>;}
+interface EligibleBuild extends KbBuild {cursor_created_at:string;}
+const sourcePageSize=128;
 interface ChunkRow{build_id:string;point_id:string;ordinal:number;source_start:number;source_end:number;content_hash:string;chunk_count:number;}
 export class RagQueryService {
  private indexes=new Map<string,{target:string;index:HybridIndex|KeywordIndex;active:number;revision:number;retired:boolean}>();
@@ -43,46 +45,59 @@ export class RagQueryService {
   }};
  }
  async close(){await Promise.all([...this.indexes.values()].map(entry=>entry.index.close()));this.indexes.clear();}
- private async eligible(scope:Scope,input:RagQueryInput,type:KbSourceType){
+ private async eligible(scope:Scope,input:RagQueryInput,type:'note'|'file',cursor?:{createdAt:string;id:string},ids?:string[]){
   const {builds}=tablesFor(type==='note'?'note-hybrid':'document-keyword');
   return transaction(this.pool,async tx=>{await assertScope(tx,scope);
-   const values:unknown[]=[scope.userId,type,input.documentKey??null,input.workspaceId??null];
+   const values:unknown[]=[scope.userId,type==='note'?['note']:['file','text'],input.documentKey??null,input.workspaceId??null,cursor?.createdAt??null,cursor?.id??null,ids??null,ids?.length??sourcePageSize];
    let sourceJoin=type==='note'?`JOIN notes n ON n.note_id=b.source_id AND n.workspace_id=b.workspace_id AND n.state='active' AND n.processing_status='ready'
      JOIN note_parts p ON p.note_id=n.note_id AND p.part='raw' AND p.part_revision_id::text=b.source_revision`
-    :type==='file'?`JOIN rag_ingestion_versions v ON v.id=b.source_id AND v.user_id=b.user_id AND v.workspace_id=b.workspace_id AND v.content_hash=b.source_revision AND v.active AND v.deleted_at IS NULL AND v.status='SUCCEEDED'`
-    :`JOIN text_ingestion_jobs j ON j.id=b.source_id AND j.created_by=b.user_id AND j.workspace_id=b.workspace_id AND j.content_hash=b.source_revision AND j.ingest_status='success'`;
+    :`LEFT JOIN rag_ingestion_versions v ON b.source_type='file' AND v.id=b.source_id AND v.user_id=b.user_id AND v.workspace_id=b.workspace_id AND v.content_hash=b.source_revision AND v.active AND v.deleted_at IS NULL AND v.status='SUCCEEDED'
+      LEFT JOIN text_ingestion_jobs j ON b.source_type='text' AND j.id=b.source_id AND j.created_by=b.user_id AND j.workspace_id=b.workspace_id AND j.content_hash=b.source_revision AND j.ingest_status='success'`;
    if(type==='note'){
     for(const [ids,condition] of [[input.filters?.folderIds,'n.folder_id'],[input.filters?.sourceKinds,'n.source_kind']] as const)if(ids?.length)sourceJoin+=` AND ${condition}=ANY($${values.push(ids)}::${condition==='n.folder_id'?'uuid':'text'}[])`;
     if(input.filters?.tagIds?.length)sourceJoin+=` AND EXISTS(SELECT 1 FROM note_tags nt JOIN asset_tags at ON at.tag_id=nt.tag_id AND at.workspace_id=b.workspace_id WHERE nt.note_id=n.note_id AND nt.tag_id=ANY($${values.push(input.filters.tagIds)}::uuid[]))`;
     if(input.filters?.from)sourceJoin+=` AND n.updated_at >= $${values.push(input.filters.from)}::timestamptz`;
     if(input.filters?.to)sourceJoin+=` AND n.updated_at <= $${values.push(input.filters.to)}::timestamptz`;
    }
-   const result=await tx.query<KbBuild>(`SELECT b.*${type==='note'?',n.note_revision_id::text AS note_revision_id':''} FROM ${builds} b JOIN workspaces w ON w.id=b.workspace_id AND w.user_id=b.user_id AND w.state='ready'
-     ${sourceJoin} WHERE b.user_id=$1 AND b.source_type=$2 AND ($3::text IS NULL OR b.source_id::text=$3)
-     AND ($4::uuid IS NULL OR b.workspace_id=$4) AND b.published AND b.status='ready' ORDER BY b.created_at DESC LIMIT 200`,values);
-   return result.rows;
+   return (await tx.query<EligibleBuild>(`SELECT b.*,to_char(b.created_at,'YYYY-MM-DD HH24:MI:SS.USOF') AS cursor_created_at${type==='note'?',n.note_revision_id::text AS note_revision_id':''} FROM ${builds} b JOIN workspaces w ON w.id=b.workspace_id AND w.user_id=b.user_id AND w.state='ready'
+     ${sourceJoin} WHERE b.user_id=$1 AND b.source_type=ANY($2::text[]) AND ($3::text IS NULL OR b.source_id::text=$3)
+     AND ($4::uuid IS NULL OR b.workspace_id=$4) AND ($5::timestamptz IS NULL OR (b.created_at,b.id)<($5::timestamptz,$6::uuid))
+     AND ($7::uuid[] IS NULL OR b.id=ANY($7::uuid[])) ${type==='file'?'AND (v.id IS NOT NULL OR j.id IS NOT NULL)':''}
+     AND b.published AND b.status='ready' ORDER BY b.created_at DESC,b.id DESC LIMIT $8`,values)).rows;
+  });
+ }
+ private async chunkPage(scope:Scope,mode:'note-hybrid'|'document-keyword',builds:EligibleBuild[],size:number,cursor?:{buildId:string;ordinal:number}){
+  return transaction(this.pool,async tx=>{await assertScope(tx,scope);const tables=tablesFor(mode);
+   return (await tx.query<ChunkRow>(`SELECT c.*,b.chunk_count FROM ${tables.chunks} c JOIN ${tables.builds} b ON b.id=c.build_id
+    WHERE c.build_id=ANY($1::uuid[]) AND b.user_id=$2 AND b.published AND b.status='ready' AND c.index_status='ready'
+    AND ($3::uuid IS NULL OR (c.build_id,c.ordinal)>($3::uuid,$4::integer))
+    ORDER BY c.build_id,c.ordinal LIMIT $5`,[builds.map(b=>b.id),scope.userId,cursor?.buildId??null,cursor?.ordinal??null,size])).rows;
   });
  }
  async query(scope:Scope,input:RagQueryInput,timing=new NoteQueryTiming()):Promise<{mode:RagQueryMode;query:string;results:Array<Record<string,unknown>>}>{
   const query=input.query?.trim();if(!query||query.length>2000)throw new DomainError(400,'RAG_QUERY_INVALID');
   if(input.assetMode&&!['ids','links'].includes(input.assetMode))throw new DomainError(400,'RAG_ASSET_MODE_INVALID');
-  const sourceType=input.sourceType??'note';if(!['note','file','text'].includes(sourceType))throw new DomainError(400,'RAG_SOURCE_TYPE_INVALID');
+  const sourceType=input.sourceType??'note';if(!['note','file'].includes(sourceType))throw new DomainError(400,'RAG_SOURCE_TYPE_INVALID');
   const note=sourceType==='note';const mode=note?input.mode??'hybrid':'keyword';
   if(note&&!['dense','keyword','hybrid'].includes(mode))throw new DomainError(400,'RAG_QUERY_MODE_INVALID');
   const topK=Math.min(50,Math.max(1,input.topK??10));
-  const builds=await timing.measure('pg_scope',()=>this.eligible(scope,input,sourceType));
+  let builds=await timing.measure('pg_scope',()=>this.eligible(scope,input,sourceType));
   if(!builds.length)return {mode,query,results:[]};
   const selected=kbSnapshot(this.config,note?'note-hybrid':'document-keyword','markdown');
-  if(builds.some(b=>b.snapshot.target.connectionId!==selected.target.connectionId||b.snapshot.target.database!==selected.target.database||b.snapshot.target.collection!==selected.target.collection))throw new DomainError(503,'KB_TARGET_CHANGED');
-  if(note&&builds.some(b=>b.snapshot.embedding?.model!==NOTE_EMBEDDING_MODEL||b.snapshot.embedding.dimensions!==1024||b.snapshot.embedding.profile!==NOTE_EMBEDDING_PROFILE))throw new DomainError(503,'KB_PROFILE_CHANGED');
-  const rows=await transaction(this.pool,async tx=>{await assertScope(tx,scope);const {chunks}=tablesFor(selected.mode);return (await tx.query<ChunkRow>(`SELECT c.*,b.chunk_count FROM ${chunks} c JOIN ${tablesFor(selected.mode).builds} b ON b.id=c.build_id WHERE c.build_id=ANY($1::uuid[]) AND b.published AND b.status='ready' AND c.index_status='ready'`,[builds.map(b=>b.id)])).rows;});
-  if(!rows.length)return {mode,query,results:[]};
+  const validateBuilds=(page:EligibleBuild[])=>{
+   if(page.some(b=>b.snapshot.target.connectionId!==selected.target.connectionId||b.snapshot.target.database!==selected.target.database||b.snapshot.target.collection!==selected.target.collection))throw new DomainError(503,'KB_TARGET_CHANGED');
+    if(note&&page.some(b=>b.snapshot.embedding?.model!==NOTE_EMBEDDING_MODEL||b.snapshot.embedding.dimensions!==1024||b.snapshot.embedding.profile!==NOTE_EMBEDDING_PROFILE))throw new DomainError(503,'KB_PROFILE_CHANGED');
+  };
+  validateBuilds(builds);
   const lease=this.acquireIndex(selected),index=lease.index;
-  const limit=Math.max(topK,mode==='keyword'?this.config.milvus.bm25Candidates:this.config.milvus.hybridCandidates);
+  const limit=Math.max(topK,mode==='keyword'?this.config.milvus.bm25Candidates:mode==='dense'?this.config.milvus.denseCandidates:this.config.milvus.hybridCandidates);
+  const denseLimit=Math.max(topK,this.config.milvus.denseCandidates),keywordLimit=Math.max(topK,this.config.milvus.bm25Candidates);
+  const pointPageSize=Math.max(256,limit,denseLimit,keywordLimit);
+  type Hit=Awaited<ReturnType<KeywordIndex['searchKeyword']>>[number];
+  type Candidate={hit:Hit;row:ChunkRow;build:EligibleBuild};
+  const best=new Map<string,Candidate>(),denseBest=new Map<string,Candidate>(),keywordBest=new Map<string,Candidate>();
   try{
    await timing.measure('index_ready',()=>index.ensureReady());
-   const byWorkspace=new Map<string,ChunkRow[]>();const byBuild=new Map(builds.map(b=>[b.id,b]));
-   for(const row of rows){const b=byBuild.get(row.build_id)!;const group=byWorkspace.get(b.workspace_id)??[];group.push(row);byWorkspace.set(b.workspace_id,group);}
    let vector:number[]|undefined;
    if(mode!=='keyword'){
     const tokenizer=await kbTokenizer(selected);if(await tokenizer.count(query)>tokenizer.maxInputTokens)throw new DomainError(400,'RAG_QUERY_TOO_LONG');
@@ -90,17 +105,49 @@ export class RagQueryService {
     vector=(await timing.measure('embedding',()=>embedder.embed([query],{textType:'query',onAttempt:a=>timing.embeddingAttempts.push(a)})))[0];
     if(!vector||vector.length!==1024)throw new DomainError(503,'KB_EMBEDDING_DIMENSION');
    }
-   const hits=[];
-   for(const [workspaceId,group] of byWorkspace){const options={scope:{userId:scope.userId,workspaceId,pointIds:group.map(c=>c.point_id)},limit};
-    hits.push(...await timing.measure('index_search',()=>mode==='keyword'?index.searchKeyword(query,options):mode==='dense'?requireIndexKind(index,'hybrid').search(vector!,options):requireIndexKind(index,'hybrid').hybridSearch(vector!,query,options)));
+   // Every source and current published point is visited with bounded SQL/recall
+   // pages. Never search unversioned source IDs: stale/unpublished points can
+   // otherwise consume the candidate budget before the authoritative recheck.
+   while(builds.length){
+    validateBuilds(builds);
+    const byBuild=new Map(builds.map(b=>[b.id,b]));
+    let cursor:{buildId:string;ordinal:number}|undefined;
+    while(true){
+     const rows=await timing.measure('pg_scope',()=>this.chunkPage(scope,selected.mode,builds,pointPageSize,cursor));
+     if(!rows.length)break;
+     const byPoint=new Map(rows.map(row=>[row.point_id,row])),byWorkspace=new Map<string,ChunkRow[]>();
+     for(const row of rows){const workspaceId=byBuild.get(row.build_id)!.workspace_id;const group=byWorkspace.get(workspaceId)??[];group.push(row);byWorkspace.set(workspaceId,group);}
+     for(const [workspaceId,group]of byWorkspace){
+      const recallScope={userId:scope.userId,workspaceId,pointIds:group.map(row=>row.point_id)};
+      const allowed=new Set(recallScope.pointIds);
+      const collect=async(target:Map<string,Candidate>,budget:number,kind:'dense'|'keyword')=>{
+       const options={scope:recallScope,limit:budget};
+       const hits=await timing.measure('index_search',()=>kind==='keyword'?index.searchKeyword(query,options):requireIndexKind(index,'hybrid').search(vector!,options));
+       for(const hit of hits){const row=byPoint.get(hit.chunkKey);if(!row||!allowed.has(hit.chunkKey)||!Number.isFinite(hit.score)||digest(hit.content)!==row.content_hash)continue;
+        const previous=target.get(hit.chunkKey);if(!previous||previous.hit.score<hit.score)target.set(hit.chunkKey,{hit,row,build:byBuild.get(row.build_id)!});
+       }
+       const ranked=[...target.values()].sort((a,b)=>b.hit.score-a.hit.score||a.hit.chunkKey.localeCompare(b.hit.chunkKey));
+       for(const discarded of ranked.slice(budget))target.delete(discarded.hit.chunkKey);
+      };
+      if(mode==='hybrid'){
+       await collect(denseBest,denseLimit,'dense');await collect(keywordBest,keywordLimit,'keyword');
+      }else await collect(best,limit,mode==='dense'?'dense':'keyword');
+     }
+     if(rows.length<pointPageSize)break;
+     const last=rows.at(-1)!;cursor={buildId:last.build_id,ordinal:last.ordinal};
+    }
+    if(builds.length<sourcePageSize)break;
+    const last=builds.at(-1)!;builds=await timing.measure('pg_scope',()=>this.eligible(scope,input,sourceType,{createdAt:last.cursor_created_at,id:last.id}));
    }
-   const best=new Map<string,(typeof hits)[number]>();for(const h of hits)if(!best.has(h.chunkKey)||best.get(h.chunkKey)!.score<h.score)best.set(h.chunkKey,h);
+   if(mode==='hybrid'){
+    const fused=fuseRankedRecall([[...denseBest.values()].map(c=>c.hit),[...keywordBest.values()].map(c=>c.hit)],limit,this.config.milvus.rrfK);
+    for(const hit of fused){const candidate=denseBest.get(hit.chunkKey)??keywordBest.get(hit.chunkKey)!;best.set(hit.chunkKey,{...candidate,hit});}
+   }
    // Source lookup, not a duplicate chunk-text column, is the authority.
    const loaded=new Map<string,Awaited<ReturnType<typeof sourceContent>>>();
    const candidates:RagSearchCandidate[]=[];
    await timing.measure('pg_hydrate',async()=>{
-    for(const h of [...best.values()].sort((a,b)=>b.score-a.score).slice(0,limit)){
-     const row=rows.find(r=>r.point_id===h.chunkKey);if(!row)continue;const b=byBuild.get(row.build_id)!;
+    for(const {hit:h,row,build:b} of [...best.values()].sort((a,b)=>b.hit.score-a.hit.score||a.hit.chunkKey.localeCompare(b.hit.chunkKey))){
      try{let source=loaded.get(b.id);if(!source){source=await sourceContent(this.pool,this.config,b);loaded.set(b.id,source);}
       const content=source.content.slice(row.source_start,row.source_end);if(digest(content)!==row.content_hash||content!==h.content)continue;
       candidates.push({chunkKey:row.point_id,documentKey:b.source_id,parentId:b.source_id,content,chunkIndex:row.ordinal,chunkCount:b.chunk_count,denseScore:mode==='dense'?h.score:0,keywordScore:mode==='keyword'?h.score:0,rrfScore:mode==='hybrid'?h.score:0,metadata:{buildId:b.id,sourceRevision:b.source_revision,noteRevisionId:b.note_revision_id,sourceStart:row.source_start,sourceEnd:row.source_end,part:note?'raw':null}});
@@ -110,7 +157,8 @@ export class RagQueryService {
    let ranked=candidates;
    const rerank=note&&mode!=='keyword'?this.reranker():undefined;
    if(rerank&&candidates.length){const result=await timing.measure('rerank',()=>rerankWithinBudget(rerank,query,candidates,this.config.rag.noteRerankBudgetMs));ranked=result.candidates;if(result.fallback)timing.fallback=result.fallback;}
-   const current=new Map((await timing.measure('pg_recheck',()=>this.eligible(scope,input,sourceType))).map(b=>[b.id,b]));
+   const buildIds=[...new Set(candidates.map(c=>String(c.metadata!.buildId)))];
+   const current=new Map((buildIds.length?await timing.measure('pg_recheck',()=>this.eligible(scope,input,sourceType,undefined,buildIds)):[]).map(b=>[b.id,b]));
    // Only final, rechecked topK chunks can request images. UUIDs stay in the
    // evidence; expiring URLs are a separate view, never rerank input or offsets.
    const parsed=new Map<string,KbImage[]>(),requests=new Map<string,RagImageRequest>();
@@ -120,7 +168,7 @@ export class RagQueryService {
     if(!all){all=kbImages(loaded.get(build.id)!.content);parsed.set(build.id,all);}
     const start=Number(c.metadata!.sourceStart),end=Number(c.metadata!.sourceEnd);
     const images=all.filter(image=>image.nodeStart<end&&image.nodeEnd>start).map(image=>{
-     const request={sourceType,sourceId:build.source_id,workspaceId:build.workspace_id,sourceRevision:build.source_revision,resourceId:image.resourceId};
+     const request={sourceType:build.source_type,sourceId:build.source_id,workspaceId:build.workspace_id,sourceRevision:build.source_revision,resourceId:image.resourceId};
      requests.set(ragImageKey(request),request);return {image,request};
     });
     return {c,build,start,end,images};
@@ -129,7 +177,7 @@ export class RagQueryService {
    const results=selectedChunks.map(({c,build,start,end,images})=>{
     const replacements=new Map(images.flatMap(({image,request})=>{const link=links.get(ragImageKey(request));return link?[[image.resourceId,link.url] as const]:[];}));
     const localImages=images.map(({image})=>image).filter(image=>image.nodeStart>=start&&image.nodeEnd<=end).map(image=>({...image,nodeStart:image.nodeStart-start,nodeEnd:image.nodeEnd-start,contentStart:image.contentStart-start,contentEnd:image.contentEnd-start}));
-    return {...c,chunkId:c.chunkKey,sourceType,sourceRevision:c.metadata!.sourceRevision,sourceStart:start,sourceEnd:end,part:note?'raw':null,revisionId:note?build.note_revision_id:c.metadata!.sourceRevision,...(note?{partRevisionId:c.metadata!.sourceRevision}:{}),
+    return {...c,chunkId:c.chunkKey,sourceType:build.source_type,sourceRevision:c.metadata!.sourceRevision,sourceStart:start,sourceEnd:end,part:note?'raw':null,revisionId:note?build.note_revision_id:c.metadata!.sourceRevision,...(note?{partRevisionId:c.metadata!.sourceRevision}:{}),
      images:images.map(({image,request})=>({resourceId:request.resourceId,alt:image.alt,sourceStart:image.nodeStart,sourceEnd:image.nodeEnd,...links.get(ragImageKey(request))})),
      ...(input.assetMode==='links'?{displayMarkdown:renderKbImages(c.content,localImages,replacements)}:{}),evidence:{child:c.content},context:null};
    });

@@ -6,9 +6,8 @@ export const Text=(max=128)=>Type.String({minLength:1,maxLength:max,pattern:'\\S
 export const Nullable=(schema:TSchema)=>Type.Union([schema,Type.Null()]);
 export const Envelope=(data:TSchema)=>obj({success:Type.Literal(true),data,traceId:Type.String()});
 export const User=obj({userId:Id,displayName:Type.String(),phoneMasked:Type.String()});
-export const SessionWorkspace=obj({status:Type.Literal('ready'),workspaceId:Id,defaultContentLineId:Nullable(Id),lastSyncedAt:Type.String()});
-export const Line=obj({contentLineId:Id,name:Type.String(),isPlaceholder:Type.Boolean()});
-export const StatusFields={user:User,workspace:SessionWorkspace,defaultContentLine:Nullable(Line),onboardingRequired:Type.Boolean(),basicPositioningCompleted:Type.Boolean(),positioningStatus:Type.Literal('not_started'),runningTaskCount:Type.Integer(),timeZone:Type.String()};
+export const SessionWorkspace=obj({status:Type.Literal('ready'),workspaceId:Id,lastSyncedAt:Type.String()});
+export const StatusFields={user:User,workspace:SessionWorkspace,timeZone:Type.String()};
 export const TokenFields={tokenType:Type.Literal('Bearer'),accessToken:Type.String(),refreshToken:Type.String(),accessTokenExpiresAt:Type.String(),expiresIn:Type.Integer(),rotated:Type.Boolean()};
 export const LoginBody=obj({phone:Text(32),smsRequestId:Id,smsCode:Type.String({pattern:'^[0-9]{6}$'}),clientType:Type.Union([Type.Literal('app'),Type.Literal('web')]),clientId:Text(128),agreementAccepted:Type.Boolean(),agreementVersion:Text(64),privacyVersion:Text(64),clientVersion:Text(128),timeZone:Type.Optional(Text(64))},Strict);
 export const SmsBody=obj({phone:Text(32),purpose:Type.Literal('sign_in')},Strict);
@@ -19,7 +18,7 @@ export const SummaryFields={workspaceId:Id,displayName:Type.String(),state:Type.
 export const Summary=obj(SummaryFields);
 export const Detail=obj({...SummaryFields,bootstrapReceiptId:Id,bootstrapContentCursor:Type.String({pattern:'^[0-9]+$'}),contentCursor:Type.String({pattern:'^[0-9]+$'})});
 export const PositioningBody=obj({name:Text(240),industry:Text(240),accountGoal:Text(800),targetAudience:Type.Optional(Text(800)),commonExpressions:Type.Array(Text(240),{maxItems:8})},Strict);
-export const Positioning=obj({creativePositioningId:Id,contentLineId:Id,name:Type.String(),industry:Type.String(),accountGoal:Type.String(),targetAudience:Nullable(Type.String()),commonExpressions:Type.Array(Type.String()),status:Type.Literal('active'),version:Type.Integer(),isDefault:Type.Boolean(),isPlaceholder:Type.Boolean()});
+export const Positioning=obj({creativePositioningId:Id,name:Type.String(),industry:Type.String(),accountGoal:Type.String(),targetAudience:Nullable(Type.String()),commonExpressions:Type.Array(Type.String()),status:Type.Literal('active'),version:Type.Integer(),isDefault:Type.Boolean()});
 const answerText=Text(240), answerList=Type.Array(Text(60),{maxItems:8});
 export const Answers=obj({customerScope:Type.Optional(Text(60)),productDescription:Type.Optional(answerText),desiredCustomer:Type.Optional(answerText),customerTalkValue:Type.Optional(answerList),userProfile:Type.Optional(Text(120)),direction:Type.Optional(Text(120)),strengths:Type.Optional(Text(120)),dailyConcerns:Type.Optional(Text(120)),readingHabit:Type.Optional(Text(120)),workHistory:Type.Optional(Text(120)),schoolMajor:Type.Optional(Text(120))},Strict);
 export const DraftFields={mode:Type.Union([Type.Literal(''),Type.Literal('business'),Type.Literal('no_business')]),stepIndex:Type.Integer({minimum:0,maximum:6}),answers:Answers};

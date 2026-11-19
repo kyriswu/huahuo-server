@@ -50,15 +50,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   const runtimeSettings = deps.pool ? new RuntimeSettings(deps.pool, config) : undefined;
   app.decorate('drainTimeoutSnapshotMs', () => runtimeSettings?.drainTimeoutSnapshotMs() ?? DEFAULT_DRAIN_TIMEOUT_MS);
   app.decorate('readDrainTimeoutMs', async () => runtimeSettings ? runtimeSettings.readDrainTimeoutMs() : DEFAULT_DRAIN_TIMEOUT_MS);
-  // App buildCommonHeaders sends JSON Content-Type even for body-less POSTs.
-  // Route schemas still reject an absent body wherever fields are required.
-  const jsonParser = app.getDefaultJsonParser('error', 'error');
-  app.removeContentTypeParser('application/json');
-  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
-    if (body === '') done(null, undefined);
-    else jsonParser(req, typeof body === 'string' ? body : body.toString(), done);
-  });
-  await app.register(swagger, { openapi: { info: { title: `Huahuo ${config.role}`, version: '0.1.0' } } });
+  await app.register(swagger, { openapi: { info: { title: `Huahuo ${config.role}`, version: identity.version } } });
   app.addHook('onRequest', (req, reply, done) => {
     reply.header('X-Trace-Id', req.id).header('Cache-Control', 'no-store');
     withTelemetryRuntime(telemetry, () => withTraceContext(req.headers, () => {
@@ -107,7 +99,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
   const querystring = Type.Object({}, { additionalProperties: false });
   const response = { 200: HealthSchema, 400: ErrorSchema, 503: ErrorSchema };
   app.get('/health/live', { schema: { querystring, response } }, async req => {
-    return success({ service: config.role, status: 'live' as const, stage: 'P06' as const, mode: 'asset-knowledge' as const }, req.id);
+    return success({ service: config.role, status: 'live' as const, version: identity.version }, req.id);
   });
   app.get('/health/ready', { schema: { querystring, response } }, async (req, reply) => {
     let ready: boolean;
@@ -118,7 +110,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
       ready &&= lifecycle.phase === 'serving';
     } catch { ready = false; }
     if (!ready) return reply.code(503).send(failure('DEPENDENCY_NOT_READY', 'Service dependencies are not ready', req.id, true));
-    return success({ service: config.role, status: 'ready' as const, stage: 'P06' as const, mode: 'asset-knowledge' as const }, req.id);
+    return success({ service: config.role, status: 'ready' as const, version: identity.version }, req.id);
   });
   return app;
 }

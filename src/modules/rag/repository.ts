@@ -5,7 +5,7 @@ import { canonical } from '../../lib/crypto.js';
 import { assertScope, transaction, type Scope, DomainError } from '../identity/store.js';
 import { enqueueIntent, event, newTaskMaxAttempts } from '../tasks/model.js';
 import type { AppConfig } from '../../config/config.js';
-import { sha256 } from './chunkers.js';
+import { digest as sha256 } from '../../lib/crypto.js';
 import type { RagMode, RagStage } from './types.js';
 import { fileProcessingSnapshot, type FileProcessingSnapshot } from './processing-profile.js';
 import { requireTocSection, sectionResult } from '../ingestion/sections.js';

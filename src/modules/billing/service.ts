@@ -15,7 +15,6 @@ const nextMonth = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMon
 
 export interface GrantInput { userId: string; levelCode?: 'free'|'pilot_paid'|'pro'|'max'; status?: 'pending'|'active'|'grace_period'|'cancelled'|'expired'|'refunded'|'revoked'; source: string; grantKey: string; expiresAt?: Date | null; monthlyCredits?: bigint; }
 export interface ReserveInput { userId: string; reservationKey: string; requestedCredits: bigint; taskId?: string | null; runId?: string | null; ttlMs?: number; }
-export interface StorageReservationInput { userId: string; resourceKey: string; requestedBytes: bigint; ttlMs?: number; }
 
 export class BillingService {
  constructor(readonly pool: pg.Pool, readonly config: AppConfig) {}
@@ -139,56 +138,7 @@ export class BillingService {
   let released=0; for (const row of ids.rows) { try { const result=await this.releaseReservation(row.reservation_id); if(result.status==='released') released++; } catch (error) { if (!(error instanceof DomainError && error.code==='RESERVATION_NOT_ACTIVE')) throw error; } }
   return {released};
  }
- async reserveStorage(input: StorageReservationInput) { this.checkMode(); if(input.requestedBytes<=0n)throw new DomainError(400,'STORAGE_AMOUNT_INVALID'); return transaction(this.pool,async tx=>{
-  if(!(await tx.query("SELECT id FROM users WHERE id=$1 AND status='active' FOR UPDATE",[input.userId])).rowCount)throw new DomainError(404,'USER_NOT_FOUND');
-  await this.ensureAccountTx(tx,input.userId); const existing=await tx.query('SELECT * FROM storage_reservations WHERE user_id=$1 AND resource_key=$2 FOR UPDATE',[input.userId,input.resourceKey]);
-  if(existing.rows[0]){const x=existing.rows[0];if(asBig(x.requested_bytes)!==input.requestedBytes)throw new DomainError(409,'STORAGE_RESERVATION_CONFLICT');return {reservationId:x.reservation_id,status:x.status,requestedBytes:asJson(asBig(x.requested_bytes)),confirmedBytes:asJson(asBig(x.confirmed_bytes))};}
-  await tx.query('UPDATE users SET storage_reserved_bytes=storage_reserved_bytes+$2 WHERE id=$1',[input.userId,input.requestedBytes]);
-  const id=randomUUID();await tx.query("INSERT INTO storage_reservations(reservation_id,user_id,resource_key,requested_bytes,status,expires_at) VALUES($1,$2,$3,$4,'reserved',now()+$5*interval '1 millisecond')",[id,input.userId,input.resourceKey,input.requestedBytes,input.ttlMs??3600000]);return {reservationId:id,status:'reserved',requestedBytes:asJson(input.requestedBytes),confirmedBytes:0};
- }); }
- private async lockStorageReservation(tx:pg.PoolClient,id:string) {
-  // Discover without a row lock, then follow the same user -> reservation order
-  // as admission/claim. The second lookup validates the owner under both locks.
-  const owner=(await tx.query<{user_id:string}>('SELECT user_id FROM storage_reservations WHERE reservation_id=$1',[id])).rows[0];
-  if(!owner)throw new DomainError(404,'STORAGE_RESERVATION_NOT_FOUND');
-  if(!(await tx.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[owner.user_id])).rowCount)throw new DomainError(404,'USER_NOT_FOUND');
-  const row=(await tx.query('SELECT * FROM storage_reservations WHERE reservation_id=$1 AND user_id=$2 FOR UPDATE',[id,owner.user_id])).rows[0];
-  if(!row)throw new DomainError(404,'STORAGE_RESERVATION_NOT_FOUND');
-  return row;
- }
- async confirmStorage(id:string,bytes:bigint) {
-  if(bytes<0n)throw new DomainError(400,'STORAGE_AMOUNT_INVALID');
-  return transaction(this.pool,async tx=>{
-   const x=await this.lockStorageReservation(tx,id);
-   if(x.status==='confirmed')return {reservationId:id,status:x.status,confirmedBytes:asJson(asBig(x.confirmed_bytes))};
-   if(x.status!=='reserved')throw new DomainError(409,'STORAGE_RESERVATION_NOT_ACTIVE');
-   if(bytes>asBig(x.requested_bytes))throw new DomainError(409,'STORAGE_RESERVATION_EXCEEDED');
-   const changed=await tx.query('UPDATE users SET storage_reserved_bytes=storage_reserved_bytes-$2,storage_used_bytes=storage_used_bytes+$3 WHERE id=$1 AND storage_reserved_bytes>=$2',[x.user_id,x.requested_bytes,bytes]);
-   if(!changed.rowCount)throw new DomainError(409,'STORAGE_USAGE_INCONSISTENT');
-   await tx.query("UPDATE storage_reservations SET status='confirmed',confirmed_bytes=$2,updated_at=now() WHERE reservation_id=$1",[id,bytes]);
-   return {reservationId:id,status:'confirmed',confirmedBytes:asJson(bytes)};
-  });
- }
- async releaseStorage(id:string) {
-  return transaction(this.pool,async tx=>{
-   const x=await this.lockStorageReservation(tx,id);
-   if(x.status==='released')return {reservationId:id,status:'released'};
-   if(x.status!=='reserved')throw new DomainError(409,'STORAGE_RESERVATION_NOT_ACTIVE');
-   const changed=await tx.query('UPDATE users SET storage_reserved_bytes=storage_reserved_bytes-$2 WHERE id=$1 AND storage_reserved_bytes>=$2',[x.user_id,x.requested_bytes]);
-   if(!changed.rowCount)throw new DomainError(409,'STORAGE_USAGE_INCONSISTENT');
-   await tx.query("UPDATE storage_reservations SET status='released',updated_at=now() WHERE reservation_id=$1",[id]);
-   return {reservationId:id,status:'released'};
-  });
- }
  async releaseReservationTx(tx:pg.PoolClient,id:string) { return this.reservationDto(await releaseCreditReservationTx(tx,id)); }
  async assertCanRun(userId:string,credits:bigint){ if(this.config.billingMode==='disabled')throw new DomainError(503,'BILLING_NOT_CONFIGURED'); if(credits<=0n)throw new DomainError(400,'BILLING_AMOUNT_INVALID'); return transaction(this.pool,async tx=>{await this.ensureAccountTx(tx,userId);const u=await tx.query('SELECT coalesce(sum(uncovered_credits),0)::text n FROM usage_periods WHERE user_id=$1',[userId]);if(asBig(u.rows[0].n)>0n)throw new DomainError(409,'BILLING_UNCOVERED_CREDIT');return true;}); }
- async markMeasurementPending(userId:string,input:{runId?:string;reservationId?:string;usageKind:string;provider?:string}) {
-  this.checkMode();return transaction(this.pool,async tx=>{
-   await this.requireUser(tx,userId);await this.requireReferences(tx,userId,input);
-   const r=await tx.query(`INSERT INTO provider_usage_measurements(measurement_id,user_id,run_id,reservation_id,usage_kind,provider,measurement_status) VALUES($1,$2,$3,$4,$5,$6,'pending') RETURNING measurement_id`,[randomUUID(),userId,input.runId??null,input.reservationId??null,input.usageKind,input.provider??null]);
-   return {measurementId:r.rows[0].measurement_id,status:'pending'};
-  });
- }
- async recordRunUsage(input:{runId:string;userId:string;taskId?:string;reservationId?:string;rawInputTokens?:bigint;rawOutputTokens?:bigint;accountedCredits:bigint;unknown?:boolean;assistantResultPersisted:boolean}) { this.checkMode(); return transaction(this.pool,async tx=>{const p=await this.ensureAccountTx(tx,input.userId);await this.requireReferences(tx,input.userId,input);const status=input.unknown?'uncovered':'settled';const uncovered=input.unknown?input.accountedCredits:0n;const written=await tx.query(`INSERT INTO run_usage(run_id,user_id,task_id,reservation_id,policy_version,raw_input_tokens,raw_output_tokens,accounted_credits,uncovered_credits,settlement_status,assistant_result_persisted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(run_id) DO UPDATE SET settlement_status=EXCLUDED.settlement_status,accounted_credits=EXCLUDED.accounted_credits,uncovered_credits=EXCLUDED.uncovered_credits,assistant_result_persisted=EXCLUDED.assistant_result_persisted,updated_at=now() WHERE run_usage.user_id=EXCLUDED.user_id AND run_usage.task_id IS NOT DISTINCT FROM EXCLUDED.task_id AND run_usage.reservation_id IS NOT DISTINCT FROM EXCLUDED.reservation_id`,[input.runId,input.userId,input.taskId??null,input.reservationId??null,p.policy_version,input.rawInputTokens??0n,input.rawOutputTokens??0n,input.accountedCredits,uncovered,status,input.assistantResultPersisted]);if(!written.rowCount)throw new DomainError(409,'RUN_USAGE_CONFLICT');if(input.unknown)await tx.query("UPDATE usage_periods SET uncovered_credits=uncovered_credits+$1 WHERE user_id=$2 AND period_start=date_trunc('month',now())::date",[uncovered,input.userId]);return {runId:input.runId,policyVersion:p.policy_version,rawInputTokens:asJson(input.rawInputTokens??0n),rawOutputTokens:asJson(input.rawOutputTokens??0n),accountedCredits:asJson(input.accountedCredits),settlementStatus:status,assistantResultPersisted:input.assistantResultPersisted,measurements:[]};}); }
  async runUsage(scope:Scope,runId:string){this.checkMode();return transaction(this.pool,async tx=>{await assertScope(tx,scope);const r=await tx.query('SELECT * FROM run_usage WHERE run_id=$1 AND user_id=$2',[runId,scope.userId]);if(!r.rows[0])throw new DomainError(404,'RUN_USAGE_NOT_FOUND');const x=r.rows[0];const ms=await tx.query('SELECT * FROM provider_usage_measurements WHERE run_id=$1 AND user_id=$2 ORDER BY created_at',[runId,scope.userId]);return {runId:x.run_id,policyVersion:x.policy_version,rawInputTokens:asJson(asBig(x.raw_input_tokens)),rawOutputTokens:asJson(asBig(x.raw_output_tokens)),accountedCredits:asJson(asBig(x.accounted_credits)),settlementStatus:x.settlement_status,assistantResultPersisted:x.assistant_result_persisted,measurements:ms.rows.map(m=>({usageKind:m.usage_kind,measurementStatus:m.measurement_status,accountedCredits:asJson(asBig(m.accounted_credits)),rawInputTokens:asJson(asBig(m.raw_input_tokens)),rawOutputTokens:asJson(asBig(m.raw_output_tokens)),mediaQuantity:asJson(asBig(m.media_quantity)),successfulAnalyzedImageCount:0,mediaDurationSeconds:asJson(asBig(m.media_duration_seconds)),providerCost:{amount:((asBig(m.provider_cost_minor??0n))/100n).toString()+'.'+String(asBig(m.provider_cost_minor??0n)%100n).padStart(2,'0'),currency:m.provider_currency??'USD'}}))};}); }
 }

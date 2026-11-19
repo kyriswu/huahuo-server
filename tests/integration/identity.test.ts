@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { loadTestConfig as loadConfig } from '../sms-fixture.js';
 import { migrate } from '../../src/db/migrate.js';
-import { poolFor } from '../../src/plugins/dependencies.js';
+import { createDependencies, poolFor } from '../../src/plugins/dependencies.js';
+import { digest } from '../../src/lib/crypto.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
 import { buildAdminServer } from '../../src/apps/admin.js';
 import { AdminService } from '../../src/modules/admin/service.js';
@@ -23,6 +24,7 @@ const adminConfig=loadConfig('admin',{...common,DATABASE_URL:process.env.TEST_DA
 const root=poolFor(loadConfig('migrate',{DATABASE_URL:migrationUrl}));
 const adminPool=poolFor(adminConfig);
 let api:FastifyInstance,admin:FastifyInstance;
+let dependencies: ReturnType<typeof createDependencies>;
 const transport=recordingSms();
 let next=100;
 interface Session {accessToken:string;refreshToken:string;user:{userId:string};workspace:{workspaceId:string};}
@@ -39,13 +41,62 @@ const send=async(app:FastifyInstance,url:string,payload?:object,headers:Record<s
  }
  return app.inject({method:method as 'POST',url,payload,headers,remoteAddress:ip});
 };
-const auth=(s:Session)=>({authorization:'Bearer '+s.accessToken});
+const auth=(s:Pick<Session, 'accessToken'>)=>({authorization:'Bearer '+s.accessToken});
 async function ticket(){const phone='1380000'+String(next++).padStart(4,'0');const r=await send(api,'/api/v1/auth/sms-code',{phone,purpose:'sign_in'});expect(r.statusCode).toBe(200);const data=r.json().data;expect(data).toMatchObject({providerMode:'live'});expect(data).not.toHaveProperty('testCode');return {phone,...data,code:transport.codeFor(data.smsRequestId)};}
 function loginBody(t:{phone:string;smsRequestId:string;code:string},device='fixture-device') {return {phone:t.phone,smsRequestId:t.smsRequestId,smsCode:t.code,clientType:'app' as const,clientId:device,agreementAccepted:true,agreementVersion:'2026-08-20',privacyVersion:'2026-08-20',clientVersion:'p02-fixture',timeZone:'Asia/Shanghai'};}
 async function login():Promise<Session>{const t=await ticket(),r=await send(api,'/api/v1/auth/login',loginBody(t));expect(r.statusCode).toBe(200);return r.json().data;}
-beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));api=await buildApiServer({config:apiConfig,sms:transport.sms});admin=await buildAdminServer({config:adminConfig});},20000);
+beforeAll(async()=>{await migrate(loadConfig('migrate',{DATABASE_URL:migrationUrl}));dependencies=createDependencies(apiConfig);api=await buildApiServer({config:apiConfig,sms:transport.sms,dependencies});admin=await buildAdminServer({config:adminConfig});},20000);
 afterAll(async()=>{await api?.close();await admin?.close();await root.end();await adminPool.end();});
 describe('P02 real PG identity and scope',()=>{
+ const bearerKey = (access: string) => `${apiConfig.queuePrefix}:auth:bearer:v1:${apiConfig.jwt.keyId}:${digest(access)}`;
+ const admit = (session: Pick<Session, 'accessToken'>) => send(api, '/internal/v1/gateway/auth', undefined, auth(session), 'GET');
+ it('caches a verified Bearer session in Redis and skips PostgreSQL on the next admission', async () => {
+  const session = await login(), redis = dependencies.bearerCache!;
+  const key = bearerKey(session.accessToken);
+  expect(await redis.get(key)).toBeNull();
+  const query = vi.spyOn(dependencies.pool!, 'query');
+  try {
+   const first = await admit(session), repeated = await admit(session);
+   expect([first.statusCode, repeated.statusCode]).toEqual([204, 204]);
+   expect(first.headers['x-trace-id']).not.toEqual(repeated.headers['x-trace-id']);
+   expect(JSON.parse((await redis.get(key))!)).toEqual({
+    userId: session.user.userId, sessionId: first.headers['x-huahuo-session-id'], expiresAt: expect.any(Number),
+   });
+   expect(await redis.pttl(key)).toBeGreaterThan(0);
+   expect(await redis.pttl(key)).toBeLessThanOrEqual(15_000);
+   expect(query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('WITH admitted AS'))).toHaveLength(1);
+   await redis.del(key);
+   expect((await admit(session)).statusCode).toBe(204);
+   expect(query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('WITH admitted AS'))).toHaveLength(2);
+  } finally { query.mockRestore(); }
+ });
+ it('replaces the cache on refresh and invalidates it before logout completes', async () => {
+  const session = await login(), redis = dependencies.bearerCache!;
+  expect((await admit(session)).statusCode).toBe(204);
+  const response = await send(api, '/api/v1/auth/refresh', { refreshToken: session.refreshToken });
+  expect(response.statusCode).toBe(200);
+  const pair = response.json().data;
+  expect(await redis.get(bearerKey(session.accessToken))).toBe('!');
+  expect(JSON.parse((await redis.get(bearerKey(pair.accessToken)))!).userId).toBe(session.user.userId);
+  expect((await admit(session)).statusCode).toBe(401);
+  expect((await send(api, '/api/v1/auth/logout', undefined, auth(pair))).statusCode).toBe(200);
+  expect(await redis.get(bearerKey(pair.accessToken))).toBe('!');
+  expect((await admit(pair)).statusCode).toBe(401);
+ });
+ it('invalidates a populated cache when PostgreSQL commits an account suspension', async () => {
+  const session = await login(), redis = dependencies.bearerCache!;
+  expect((await admit(session)).statusCode).toBe(204);
+  const key = bearerKey(session.accessToken);
+  const client = await root.connect();
+  try {
+   await client.query('BEGIN');
+   await client.query("UPDATE users SET status='suspended' WHERE id=$1", [session.user.userId]);
+   expect(JSON.parse((await redis.get(key))!).userId).toBe(session.user.userId);
+   await client.query('COMMIT');
+  } finally { await client.query('ROLLBACK'); client.release(); }
+  await vi.waitFor(async () => expect(await redis.get(key)).toBe('!'));
+  expect((await admit(session)).statusCode).toBe(401);
+ });
  it.each(['access-expired','session-expired','revoked','missing','wrong-user','suspended'] as const)('rejects direct logout with a %s session without revoking other sessions',async state=>{
   const userId=await insertFixtureUser(root),sessionId=randomUUID(),otherSessionId=randomUUID();
   await insertFixtureSession(root,userId,otherSessionId,'other-active-client');
@@ -89,7 +140,7 @@ describe('P02 real PG identity and scope',()=>{
   expect((await send(api,'/internal/v1/gateway/logout',undefined,{origin:apiConfig.gatewayStudio.origin,cookie:refreshed})).statusCode).toBe(200);
   const repeatedLogout=await send(api,'/internal/v1/gateway/logout',undefined,{origin:apiConfig.gatewayStudio.origin,cookie:refreshed});
   expect(repeatedLogout.statusCode).toBe(200);
-  expect(repeatedLogout.headers['set-cookie']).toHaveLength(4);
+  expect(repeatedLogout.headers['set-cookie']).toHaveLength(2);
   expect((repeatedLogout.headers['set-cookie'] as string[]).every(cookie=>cookie.includes('Max-Age=0'))).toBe(true);
   expect((await send(api,'/internal/v1/gateway/auth',undefined,headers,'GET')).statusCode).toBe(401);
   expect((await api.inject({url:'/api/v1/me/status',headers:businessHeaders})).statusCode).toBe(401);
@@ -123,7 +174,7 @@ describe('P02 real PG identity and scope',()=>{
   const s=await login();expect(s.workspace.workspaceId).toMatch(/^[a-f0-9-]{36}$/);
   const r=await send(api,'/api/v1/me/status',undefined,auth(s),'GET');expect(r.statusCode).toBe(200);
   expect(r.json().data.user.phoneMasked).toMatch(/^\d{3}\*{4}\d{4}$/);expect(r.json().data.workspace.status).toBe('ready');
-  expect(r.json().data.basicPositioningCompleted).toBe(false);
+  expect(r.json().data).not.toHaveProperty('basicPositioningCompleted');
   const p=await send(api,'/api/v1/me/profile',undefined,auth(s),'GET');expect(p.json().data.profile.displayName).toBe('花火用户');
   const tokens=await root.query('SELECT access_hash FROM user_sessions WHERE user_id=$1',[s.user.userId]);expect(tokens.rows[0].access_hash===s.accessToken).toBe(false);
   expect((await root.query('SELECT count(*)::int n FROM user_agreement_acceptances WHERE user_id=$1',[s.user.userId])).rows[0].n).toBe(1);
@@ -238,7 +289,10 @@ describe('P02 real PG identity and scope',()=>{
   expect((await send(api,path,undefined,auth(s),'GET')).json().data.answers.productDescription).toBe('产品');
   const p=await send(api,'/api/v1/onboarding/creative-positioning',{name:'科技写作',industry:'科技',accountGoal:'知识分享',commonExpressions:[]},h());expect(p.statusCode).toBe(200);expect(p.json().data.onboardingCompleted).toBe(false);
   expect((await send(api,'/api/v1/creative-positionings',undefined,auth(s),'GET')).json().data.items[0].creativePositioningId).toBe(p.json().data.creativePositioning.creativePositioningId);
-  expect((await send(api,'/api/v1/workspaces/current/profile',undefined,auth(s),'GET')).json().data.conclusions).toEqual([]);
+  const profile=(await send(api,'/api/v1/workspaces/current/profile',undefined,auth(s),'GET')).json().data;
+  expect(profile.creativePositioning.creativePositioningId).toBe(p.json().data.creativePositioning.creativePositioningId);
+  expect(Object.keys(profile).sort()).toEqual(['creativePositioning','workspaceId']);
+  expect(profile.creativePositioning).not.toHaveProperty('contentLineId');
  });
  it('SMS sending is rate limited atomically and same-key retries reuse a receipt',async()=>{
   const phone='1390000'+String(next++).padStart(4,'0'),key=randomUUID(),h={'x-idempotency-key':key};

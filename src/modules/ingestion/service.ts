@@ -5,7 +5,7 @@ import {transaction,assertScope,DomainError,type Scope} from '../identity/store.
 import {enqueueIntent,event,newTaskMaxAttempts} from '../tasks/model.js';
 import {kbSnapshot} from '../kb/profile.js';
 import {createBuild,sourceState} from '../kb/repository.js';
-import {digest} from '../kb/split.js';
+import {digest} from '../../lib/crypto.js';
 import type {KbBuild} from '../kb/types.js';
 import {requireTocSection,sectionResult} from './sections.js';
 import {resolveTraceId} from '../../lib/trace.js';

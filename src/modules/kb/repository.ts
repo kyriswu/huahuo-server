@@ -3,7 +3,7 @@ import type { AppConfig } from '../../config/config.js';
 import { DOCUMENT_CANONICAL_MAX_BYTES } from '../../config/document-extraction.js';
 import { transaction, DomainError } from '../identity/store.js';
 import { tablesFor, type KbBuild, type KbSnapshot, type KbSource, type KbSourceType } from './types.js';
-import { digest } from './split.js';
+import { digest } from '../../lib/crypto.js';
 import { storageFor } from '../storage/port.js';
 export const uuidFor=(value:string)=>{const h=digest(value);return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-a${h.slice(17,20)}-${h.slice(20,32)}`;};
 export async function createBuild(tx:pg.PoolClient,source:KbSource,taskId:string,snapshot:KbSnapshot):Promise<KbBuild>{

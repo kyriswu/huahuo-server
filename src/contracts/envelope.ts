@@ -19,5 +19,5 @@ export const ErrorSchema = Type.Object({ success: Type.Literal(false), error: Ty
 }), traceId: Type.String() });
 export const HealthSchema = Type.Object({ success: Type.Literal(true), data: Type.Object({
   service: Type.String(), status: Type.Union([Type.Literal('live'), Type.Literal('ready')]),
-  stage: Type.Literal('P06'), mode: Type.Literal('asset-knowledge'),
+  version: Type.String({ minLength: 1 }),
 }), traceId: Type.String() });

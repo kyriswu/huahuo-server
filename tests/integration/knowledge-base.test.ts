@@ -218,6 +218,35 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   const a=await engine.claim(task.id,randomUUID());await jobs.executeCleanup(a!);
   expect((await root.query('SELECT count(*)::int n FROM kb_note_hybrid_builds WHERE source_id=$1 AND published',[f.note.noteId])).rows[0].n).toBe(0);
  });
+ it('searches every published source and bounded point page beyond the former 200-source cutoff',async()=>{
+  const f=await fixture(),snapshot=kbSnapshot(config,'document-keyword','markdown'),index=mockKnowledgeIndex().keyword;
+  const entries=Array.from({length:205},(_,n)=>({id:randomUUID(),build:randomUUID(),task:randomUUID(),content:n===0?'oldestneedle':'filler '+n,point:randomUUID(),ordinal:n}));
+  const body=JSON.stringify(entries);
+  // Seed canonical published sources in isolated PG; recall remains an explicit
+  // in-memory double so no model or shared vector service is called.
+  await root.query(`INSERT INTO text_ingestion_jobs(id,source_type,raw_content,ingest_status,created_by,workspace_id,current_task_id,content_hash)
+   SELECT id,'MANUAL_INPUT',content,'success',$1,$2,task,encode(sha256(convert_to(content,'UTF8')),'hex')
+   FROM jsonb_to_recordset($3::jsonb) AS r(id uuid,task uuid,content text)`,[f.scope.userId,f.workspaceId,body]);
+  await root.query(`INSERT INTO kb_document_keyword_builds(id,source_type,source_id,source_revision,user_id,workspace_id,task_id,content_hash,config_hash,snapshot,status,published,planned,chunk_count,created_at)
+   SELECT build,'text',id,encode(sha256(convert_to(content,'UTF8')),'hex'),$1,$2,task,encode(sha256(convert_to(content,'UTF8')),'hex'),$4,$5::jsonb,'ready',true,true,3,
+    '2026-01-01 00:00:00+00'::timestamptz+ordinal*interval '1 microsecond'
+   FROM jsonb_to_recordset($3::jsonb) AS r(id uuid,build uuid,task uuid,content text,ordinal integer)`,[f.scope.userId,f.workspaceId,body,snapshot.configHash,JSON.stringify(snapshot)]);
+  await root.query(`INSERT INTO kb_document_keyword_chunks(build_id,ordinal,point_id,source_start,source_end,content_hash,char_count,index_status)
+   SELECT build,n,point||'-'||n,0,length(content),encode(sha256(convert_to(content,'UTF8')),'hex'),length(content),'ready'
+   FROM jsonb_to_recordset($1::jsonb) AS r(build uuid,point text,content text) CROSS JOIN generate_series(0,2) n`,[body]);
+  await index.upsert(entries.flatMap(e=>Array.from({length:3},(_,n)=>({id:e.point+'-'+n,sourceId:e.id,sourceType:'text',userId:f.scope.userId,workspaceId:f.workspaceId,content:e.content}))));
+  const recall=vi.spyOn(index,'searchKeyword'),q=new RagQueryService(pool,config,{index:()=>index});
+  try{
+   const result=await q.query(f.scope,{query:'oldestneedle',sourceType:'file',topK:3});
+   expect(result.results).toHaveLength(3);expect(result.results.every(r=>r.documentKey===entries[0]!.id&&r.sourceType==='text')).toBe(true);
+   const scopes=recall.mock.calls.map(call=>call[1].scope.pointIds);
+   expect(scopes.length).toBeGreaterThan(2);expect(scopes.every(ids=>ids.length<=256)).toBe(true);
+   expect(new Set(scopes.flat()).size).toBe(615);
+   const other=await fixture();expect((await q.query(other.scope,{query:'oldestneedle',sourceType:'file'})).results).toEqual([]);
+   await root.query("UPDATE kb_document_keyword_builds SET published=false,status='superseded' WHERE id=$1",[entries[0]!.build]);
+   expect((await q.query(f.scope,{query:'oldestneedle',sourceType:'file'})).results).toEqual([]);
+  }finally{await q.close();}
+ });
  it('routes independent imported text to document keyword tables and remains usable with no embedding configuration',async()=>{
   const f=await fixture();const settings={...config,rag:{...config.rag,embeddingBaseUrl:undefined,embeddingApiKey:undefined}};
   const service=new TextIngestionService(pool,settings);const input=await service.create(f.scope,{source_type:'MANUAL_INPUT',raw_content:'  文档 keyword PostgreSQL MVCC 😀\n'},randomUUID());
@@ -226,7 +255,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   await new TextIngestionJobs(wp,settings,{index:factory,embedding:forbidden,tokenizer:forbidden}).execute(a!);
   expect((await root.query('SELECT raw_content FROM text_ingestion_jobs WHERE id=$1',[input.id])).rows[0].raw_content).toBe('  文档 keyword PostgreSQL MVCC 😀\n');
   const q=new RagQueryService(pool,settings,{index:factory,embedding:{model:'qwen3.7-text-embedding-flash',dimensions:1024,embed:forbidden},rerank:{rerank:forbidden}});
-  try{const before=targets.length;const r=await q.query(f.scope,{query:'MVCC',sourceType:'text',mode:'hybrid',documentKey:input.id});expect(r.mode).toBe('keyword');expect(r.results.length).toBeGreaterThan(0);expect(new Set(targets.slice(before))).toEqual(new Set([config.kb.documentCollection]));}finally{await q.close();}
+  try{const before=targets.length;const r=await q.query(f.scope,{query:'MVCC',sourceType:'file',mode:'hybrid',documentKey:input.id});expect(r.mode).toBe('keyword');expect(r.results.length).toBeGreaterThan(0);expect(new Set(targets.slice(before))).toEqual(new Set([config.kb.documentCollection]));}finally{await q.close();}
  });
  it('plugs a keyword-only class backend into durable jobs and queries without Milvus or model methods',async()=>{
   class AlternateKeywordBackend implements KeywordIndex {
@@ -248,7 +277,7 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   expect(await engine.finish(a!,result.digest,result.bytes)).toBe(true);
   const q=new RagQueryService(pool,settings,{index:alternative,embedding:{model:'unused',dimensions:1024,embed:forbidden}});
   try{
-   const response=await q.query(f.scope,{query:'needle',sourceType:'text',documentKey:input.id});
+   const response=await q.query(f.scope,{query:'needle',sourceType:'file',documentKey:input.id});
    expect(response.results).toHaveLength(1);expect(response.results[0]!.content).toBe('portable keyword needle');
    expect(select).toHaveBeenCalled();expect(backend).not.toHaveProperty('hybridSearch');
   }finally{await q.close();}

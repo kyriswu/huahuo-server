@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, it, expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../src/config/config.js';
 import { createMilvusClient, createMilvusKeywordIndex, createMilvusVectorIndex, createMilvusHybridIndex } from '../../src/integrations/search-index/milvus.js';
-import { createCompositeHybridIndex } from '../../src/lib/search-index/composite.js';
 import type { KeywordIndex, VectorIndex, HybridIndex, VectorPoint, SearchOptions } from '../../src/lib/search-index/types.js';
 import { configureTestMilvus } from '../support/milvus.js';
 
@@ -61,17 +60,11 @@ describe.skipIf(!enabled)('portable search adapters on real ephemeral Milvus', (
     expect(await keyword.searchKeyword('spectroscope', options)).toEqual([]);
   });
 
-  it('supports native hybrid and application-composed hybrid over two separate collections', async () => {
+  it('supports native hybrid with tenant isolation', async () => {
     const points = [point('hybrid-a'), { ...point('hybrid-b'), userId: 'other-user' }];
     await native.upsert(points);
     const options = scopeFor(points.map(p => p.id));
     expect((await native.hybridSearch([1, 0, 0, 0], 'spectroscope', options)).map(h => h.chunkKey)).toEqual(['hybrid-a']);
-    const composed = createCompositeHybridIndex(keyword, vector, { keywordCandidates: 20, vectorCandidates: 20, rrfK: 60 });
-    await composed.ensureReady(); await composed.upsert(points); await composed.upsert(points);
-    const result = await composed.hybridSearch([1, 0, 0, 0], 'spectroscope', options);
-    expect(result.map(h => h.chunkKey)).toEqual(['hybrid-a']);
-    expect(result[0]!.score).toBeCloseTo(2 / 61);
-    await composed.deletePoints(points.map(p => p.id));
-    expect(await composed.hybridSearch([1, 0, 0, 0], 'spectroscope', options)).toEqual([]);
+
   });
 });

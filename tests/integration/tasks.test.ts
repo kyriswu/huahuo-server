@@ -11,7 +11,7 @@ import { TaskService } from '../../src/modules/tasks/service.js';
 import { TaskEngine } from '../../src/modules/tasks/engine.js';
 import { TaskScheduler } from '../../src/modules/tasks/scheduler.js';
 import { QueuePublisher } from '../../src/modules/tasks/publisher.js';
-import { TaskWorkers } from '../../src/modules/tasks/queue.js';
+import { createTaskWorkers } from '../../src/apps/worker.js';
 import { hash } from '../../src/modules/tasks/model.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
 import { buildAdminServer } from '../../src/apps/admin.js';
@@ -103,9 +103,15 @@ it('cancellation fences an active attempt and ends locally after lease; queued c
  const queued=await create();await service.mutate(a,queued,'cancel',randomUUID(),{});expect(await engine.claim(queued,randomUUID())).toBeNull();
 });
 it('bounded automatic retries, permanent failures and authorized manual dead-letter retry',async()=>{
- const id=await create();await root.query('UPDATE tasks SET max_attempts=1 WHERE id=$1',[id]);const attempt=(await engine.claim(id,randomUUID()))!;
+ const id=await create();
+ const delivery=(await root.query('SELECT o.id,o.task_id,o.attempts,t.queue FROM task_outbox o JOIN tasks t ON t.id=o.task_id WHERE task_id=$1',[id])).rows[0];
+ await publisher.publish(delivery);await root.query("UPDATE task_outbox SET status='sent',sent_at=now() WHERE id=$1",[delivery.id]);
+ await root.query('UPDATE tasks SET max_attempts=1 WHERE id=$1',[id]);const attempt=(await engine.claim(id,randomUUID()))!;
  await engine.fail(attempt,'TEMPORARY_FAILURE',true);expect((await service.detail(a,id)).task.state).toBe('failed');
  await service.mutate(a,id,'retry',randomUUID(),{stage:'runtime'});expect((await service.detail(a,id)).task.state).toBe('queued');
+ const intents=(await root.query('SELECT id,status FROM task_outbox WHERE task_id=$1',[id])).rows;
+ expect(intents).toHaveLength(2);expect(intents).toContainEqual({id:delivery.id,status:'sent'});
+ expect(intents.find(row=>row.status==='pending')?.id).not.toBe(delivery.id);
  const permanent=await create();await engine.fail((await engine.claim(permanent,randomUUID()))!,'INPUT_UNAVAILABLE',false);
  await expect(service.mutate(a,permanent,'retry',randomUUID(),{})).rejects.toMatchObject({code:'TASK_RETRY_NOT_ALLOWED'});
  const retry=await create();await engine.fail((await engine.claim(retry,randomUUID()))!,'TEMPORARY_FAILURE',true);expect((await service.detail(a,retry)).task.state).toBe('retry_scheduled');expect(await engine.claim(retry,randomUUID())).toBeNull();
@@ -118,8 +124,12 @@ it('external unknown/submitted tasks reconcile without resubmission; cancel cann
  expect((await service.detail(a,waiting)).task.state).toBe('waiting_external');await service.mutate(a,waiting,'cancel',randomUUID(),{});await scheduler.recover();expect((await service.detail(a,waiting)).task.state).toBe('reconciling');
 });
 it('two scheduler instances create one persistent window; delivery outage retains intent',async()=>{
- const s2=new TaskScheduler(schedulerPool,publisher);await Promise.all([scheduler.schedules(),s2.schedules()]);
- expect((await root.query('SELECT count(*)::int n FROM task_schedule_windows')).rows[0].n).toBe(1);
+ const scheduleId='task-concurrency-'+randomUUID();
+ await root.query('INSERT INTO task_schedules(id,interval_seconds) VALUES($1,3600)',[scheduleId]);
+ try{
+  const s2=new TaskScheduler(schedulerPool,publisher);await Promise.all([scheduler.schedules(),s2.schedules()]);
+  expect((await root.query('SELECT count(*)::int n FROM task_schedule_windows WHERE schedule_id=$1',[scheduleId])).rows[0].n).toBe(1);
+ }finally{await root.query('UPDATE task_schedules SET enabled=false WHERE id=$1',[scheduleId]);}
  const failed=new TaskScheduler(schedulerPool,{publish:async()=>{throw new Error('queue offline');}});await failed.dispatch();
  expect((await root.query("SELECT count(*)::int n FROM task_outbox WHERE last_error='QUEUE_UNAVAILABLE' AND status='pending'")).rows[0].n).toBeGreaterThan(0);
 });
@@ -134,9 +144,11 @@ it('enqueue before ack crash and lost Redis job recover from PG; only ID enters 
  await root.query("UPDATE task_outbox SET lease_until=now()-interval '1 second' WHERE id=$1",[d.id]);
  const again=(await scheduler.claim())!;expect(again.id).toBe(d.id);await publisher.publish(again);await scheduler.acknowledge(again);
  await job!.remove();await root.query("UPDATE task_outbox SET sent_at=now()-interval '1 minute' WHERE id=$1",[d.id]);await scheduler.recover();await scheduler.dispatch();
+ expect((await root.query('SELECT id,status FROM task_outbox WHERE task_id=$1',[id])).rows).toEqual([{id:d.id,status:'sent'}]);
+ expect((await queue.getJob(d.id))?.data).toEqual({taskId:id});
  const logs:Array<{fields:Record<string,unknown>;message:string}>=[],original=TaskEngine.prototype.execute;
  const logger={info:(fields:Record<string,unknown>,message:string)=>logs.push({fields,message}),error:()=>undefined} as unknown as FastifyBaseLogger;
- const workers=new TaskWorkers(workerPool,cfg('worker'),undefined,logger);
+ const workers=createTaskWorkers(workerPool,cfg('worker'),undefined,logger);
  const execute=vi.spyOn(TaskEngine.prototype,'execute').mockImplementation(function(this:TaskEngine,attempt){if(attempt.task.id===id)expect(currentTraceId()).toBe(traceId);return original.call(this,attempt);});
  try{
   await until(async()=>(await service.detail(a,id)).task.state==='succeeded');
@@ -157,7 +169,7 @@ it('real API contract: task wrapper, auth, schema, result readiness and Admin CS
  try{
   const createResponse=await api.inject({method:'POST',url:'/api/v1/tasks/demo',headers,payload:{workspaceId:wa,text:'contract'}});expect(createResponse.statusCode).toBe(200);const id=createResponse.json().data.task.taskId;
   expect(createResponse.headers['x-trace-id']).toBe('task-http-original');expect((await root.query('SELECT trace_id FROM tasks WHERE id=$1',[id])).rows[0].trace_id).toBe('task-http-original');
-  const read=await api.inject({url:`/api/v1/tasks/${id}`,headers:fixtureScopeHeaders(token)});expect(read.json().data).toMatchObject({task:{taskType:'demo.digest',status:'queued'},retryActions:[{action:'runtime',allowed:false}]});
+  const read=await api.inject({url:`/api/v1/tasks/${id}`,headers:fixtureScopeHeaders(token)});expect(read.json().data).toMatchObject({task:{taskType:'demo.digest',state:'queued'},retryActions:[{action:'runtime',allowed:false}]});
   expect((await api.inject(`/api/v1/tasks/${id}`)).statusCode).toBe(401);
   expect((await api.inject({url:`/api/v1/tasks/${id}/result`,headers:fixtureScopeHeaders(token)})).statusCode).toBe(409);
   expect((await api.inject({url:`/admin/api/v1/tasks/${id}`,headers})).statusCode).toBe(404);

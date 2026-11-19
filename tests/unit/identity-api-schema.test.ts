@@ -7,7 +7,7 @@ import type { WorkspaceService } from '../../src/modules/workspaces/service.js';
 
 const uuid='11111111-1111-4111-8111-111111111111';
 const body={phone:'13800000001',smsRequestId:uuid,smsCode:'123456',clientType:'app',clientId:'unit-client',agreementAccepted:true,agreementVersion:'test',privacyVersion:'test',clientVersion:'test'};
-const response={tokenType:'Bearer',accessToken:'unit-token',refreshToken:'unit-refresh',accessTokenExpiresAt:new Date().toISOString(),expiresIn:900,rotated:false,firstLogin:false,user:{userId:uuid,displayName:'test',phoneMasked:'138****0001'},workspace:{status:'ready',workspaceId:uuid,defaultContentLineId:null,lastSyncedAt:new Date().toISOString()},defaultContentLine:null,onboardingRequired:true,basicPositioningCompleted:false,positioningStatus:'not_started',runningTaskCount:0,timeZone:'UTC'};
+const response={tokenType:'Bearer',accessToken:'unit-token',refreshToken:'unit-refresh',accessTokenExpiresAt:new Date().toISOString(),expiresIn:900,rotated:false,firstLogin:false,user:{userId:uuid,displayName:'test',phoneMasked:'138****0001'},workspace:{status:'ready',workspaceId:uuid,lastSyncedAt:new Date().toISOString()},timeZone:'UTC'};
 function fixture(){
  const app=Fastify({ajv:{customOptions:{removeAdditional:false}}});
  app.setErrorHandler<FastifyError>((error,req,reply)=>reply.code(error.validation?400:500).send(failure(error.validation?'VALIDATION_ERROR':'INTERNAL_ERROR','Request failed',req.id)));

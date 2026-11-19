@@ -67,10 +67,11 @@ describe('lightweight deployment order and reuse, real isolated Git and no cloud
   it.each([[], ['admin', 'admin'], ['redis'], ['foreign-service']].map(services => ({ services })))('refuses invalid role selections ($services)', ({ services }) => {
     expect(check('selected_roles', services, roles)).toMatchObject({ ok: false, code: 'RELEASE_SERVICES_INVALID' });
   });
-  it('retains per-role successful images for a partial deployment and reads the existing full-role record', () => {
+  it('requires explicit per-role successful images for full and partial deployments', () => {
     const old = { image: 'huahuo-server:' + 'a'.repeat(40), imageId: image };
     const baseline = Object.fromEntries(roles.map(role => [role, { ...old }]));
-    expect(check('successful_images', old, roles)).toEqual({ ok: true, result: baseline });
+    expect(check('successful_images', old, roles)).toMatchObject({ ok: false, code: 'RELEASE_IMAGE_RECORD_INVALID' });
+    expect(check('successful_images', { roleImages: baseline }, roles)).toEqual({ ok: true, result: baseline });
     const partial = { ...baseline, admin: { image: 'huahuo-server:' + 'b'.repeat(40), imageId: 'sha256:' + '2'.repeat(64) } };
     expect(check('successful_images', { roleImages: partial }, roles)).toEqual({ ok: true, result: partial });
     expect(check('successful_images', { roleImages: { admin: partial.admin } }, roles)).toMatchObject({ ok: false, code: 'RELEASE_IMAGE_RECORD_INVALID' });

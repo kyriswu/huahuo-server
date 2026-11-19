@@ -9,7 +9,7 @@ import { StorageJobs } from '../storage/jobs.js';
 import { storageFor } from '../storage/port.js';
 import { BillingService } from '../billing/service.js';
 import { tagExtractorFor } from '../assets/tag-extractor.js';
-import { RagIngestionJobs, type RagJobError } from '../rag/jobs.js';
+import type { TaskExecutor } from './execution.js';
 import { NoteIndexJobs } from '../ingestion/jobs.js';
 import {RuntimeSettings} from '../runtime-settings/service.js';
 import {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
@@ -25,11 +25,17 @@ export class TaskWorkers {
  private readonly uploads?:RedisTemporaryUploads;private readonly uploadCleaner?:TemporaryUploadCleaner;
  private draining?:Promise<void>;private closing?:Promise<void>;private active=0;
  private readonly nodeJobs:ProcessingNodeJobs;
- readonly connection:Redis;readonly workers:Worker[];private stopping=false;private readonly rag: RagIngestionJobs;private readonly noteIndex:NoteIndexJobs;private readonly textIngestion:TextIngestionJobs;
- constructor(pool:pg.Pool,config:AppConfig,metrics?:TaskMetrics,private readonly logger?:FastifyBaseLogger){
+ readonly connection:Redis;readonly workers:Worker[];private stopping=false;private readonly noteIndex:NoteIndexJobs;private readonly textIngestion:TextIngestionJobs;
+ constructor(
+  pool: pg.Pool,
+  config: AppConfig,
+  private readonly rag: TaskExecutor & { close(): Promise<void> },
+  metrics?: TaskMetrics,
+  private readonly logger?: FastifyBaseLogger,
+ ){
   this.nodeJobs=new ProcessingNodeJobs(pool,config);
   this.connection=new Redis(config.redisQueueUrl,{maxRetriesPerRequest:null,connectTimeout:1500,retryStrategy:n=>Math.min(n*200,2000)});
-  this.connection.on('error',()=>undefined);this.rag=new RagIngestionJobs(pool,config,storageFor(config));this.noteIndex=new NoteIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const settings=new RuntimeSettings(pool,config);
+  this.connection.on('error',()=>undefined);this.noteIndex=new NoteIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const settings=new RuntimeSettings(pool,config);
   this.workers=config.workerQueues.map(name=>{
    const w=new Worker(name,async job=>{
     // A delivery already fetched during pause remains recoverable from the PG outbox.
@@ -49,9 +55,12 @@ export class TaskWorkers {
      if(config.testTaskDelayMs&&a.task.kind==='demo.digest')await new Promise(r=>setTimeout(r,config.testTaskDelayMs));
      if(!lost){await engine.execute(a);log?.info({event:'task.step.finished',...taskLogFields(a),'step.outcome':a.stepOutcome??'stale'},'Task step returned');}
      else log?.info({event:'task.step.finished',...taskLogFields(a),'step.outcome':'stale'},'Task step lease lost');
-    }catch(error){const ragError=error as Partial<RagJobError>;let outcome='unrecorded';
-     try{await engine.fail(a,typeof ragError.code==='string'?ragError.code:'TASK_EXECUTION_FAILED',ragError.retryable!==false);outcome=a.stepOutcome??'stale';}
-     finally{log?.error({event:'task.step.error',...taskLogFields(a),err:error,errorCode:typeof ragError.code==='string'?ragError.code:'TASK_EXECUTION_FAILED','step.outcome':outcome},'Task step error');}
+    }catch(error){
+     const failure=error as {code?:unknown;retryable?:boolean}|null|undefined;
+     const errorCode=typeof failure?.code==='string'?failure.code:'TASK_EXECUTION_FAILED';
+     let outcome='unrecorded';
+     try{await engine.fail(a,errorCode,failure?.retryable!==false);outcome=a.stepOutcome??'stale';}
+     finally{log?.error({event:'task.step.error',...taskLogFields(a),err:error,errorCode,'step.outcome':outcome},'Task step error');}
     }
     finally{clearInterval(timer);}
     });

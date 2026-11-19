@@ -23,6 +23,32 @@ async function fixture(){
 async function makeNote(u:Awaited<ReturnType<typeof fixture>>){return assets.createNote(u.scope,u.workspaceId,{title:'素材',parts:{raw:'正文 alpha'}},randomUUID());}
 async function jobFor(noteId:string){return String((await root.query('SELECT task_id FROM content_jobs WHERE note_id=$1',[noteId])).rows[0].task_id);}
 describe('P06 personal assets, revisions and search',()=>{beforeAll(()=>migrate(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl})));afterAll(async()=>{await Promise.all([pool.end(),root.end(),worker.end()]);});
+it('skips disabled automatic tags while preserving Note saves, content events, indexing and explicit request outcomes',async()=>{
+ const u=await fixture(),settings:typeof cfg={...cfg,tagExtractorProvider:'disabled',kb:{...cfg.kb,noteEnabled:true},rag:{...cfg.rag,providerMode:'mock'}};
+ const service=new AssetService(pool,cfg.appTokenSecret!,settings);
+ const created=await service.createNote(u.scope,u.workspaceId,{title:'original',parts:{raw:'first body'}},randomUUID());
+ const edited=await service.updateNote(u.scope,u.workspaceId,created.noteId,{parts:{raw:'second body'}},created.etag,randomUUID());
+ let current=await service.updateNote(u.scope,u.workspaceId,created.noteId,{title:'renamed'},edited.etag,randomUUID());
+ expect(current).toMatchObject({title:'renamed',parts:{raw:{contentMarkdown:'second body'}}});
+ expect((await root.query('SELECT count(*)::int n FROM content_jobs WHERE note_id=$1',[created.noteId])).rows[0].n).toBe(0);
+ expect((await root.query('SELECT count(*)::int n FROM kb_note_hybrid_builds WHERE source_id=$1',[created.noteId])).rows[0].n).toBe(2);
+ expect((await root.query('SELECT kind FROM tasks WHERE user_id=$1 ORDER BY created_at',[u.userId])).rows.map(t=>t.kind)).toEqual(['kb.note-index','kb.note-index']);
+ const key=randomUUID();
+ await expect(service.requestTagExtraction(u.scope,u.workspaceId,created.noteId,key)).rejects.toMatchObject({statusCode:503,code:'TAG_PROVIDER_UNAVAILABLE'});
+ expect((await root.query('SELECT count(*)::int n FROM api_idempotency WHERE key=$1',[key])).rows[0].n).toBe(0);
+ settings.tagExtractorProvider='deterministic';
+ const explicit=await service.requestTagExtraction(u.scope,u.workspaceId,created.noteId,key);
+ current=await service.updateNote(u.scope,u.workspaceId,created.noteId,{title:'enabled rename'},current.etag,randomUUID());
+ expect((await root.query('SELECT count(*)::int n FROM content_jobs WHERE note_id=$1',[created.noteId])).rows[0].n).toBe(2);
+ settings.tagExtractorProvider='disabled';
+ expect(await service.requestTagExtraction(u.scope,u.workspaceId,created.noteId,key)).toEqual(explicit);
+ await expect(service.requestTagExtraction(u.scope,u.workspaceId,created.noteId,randomUUID())).rejects.toMatchObject({code:'TAG_PROVIDER_UNAVAILABLE'});
+ current=await service.updateNote(u.scope,u.workspaceId,created.noteId,{parts:{raw:'third body'}},current.etag,randomUUID());
+ expect(current.parts.raw!.contentMarkdown).toBe('third body');
+ expect((await root.query('SELECT count(*)::int n FROM content_jobs WHERE note_id=$1',[created.noteId])).rows[0].n).toBe(2);
+ expect((await root.query('SELECT count(*)::int n FROM kb_note_hybrid_builds WHERE source_id=$1',[created.noteId])).rows[0].n).toBe(3);
+ expect((await root.query('SELECT change_type FROM content_events WHERE workspace_id=$1 AND object_id=$2 ORDER BY cursor',[u.workspaceId,created.noteId])).rows.map(e=>e.change_type)).toEqual(['created','updated','updated','updated','updated']);
+});
 it('creates Note tag jobs alongside plain-text task inputs under hash-join query plans',async()=>{
  const f=await fixture(),isolated=poolFor({...cfg,poolMax:1});
  try{
@@ -62,6 +88,52 @@ it('soft deletion preserves revisions, labels and explicit relationships for res
  expect((await assets.noteTags(u.scope,u.workspaceId,source.noteId)).tags).toHaveLength(1);
 });
 it('folders enforce scope, duplicate names, cycles and ETags',async()=>{const u=await fixture();const f=await assets.createFolder(u.scope,u.workspaceId,{displayName:'资料'},randomUUID());await expect(assets.createFolder(u.scope,u.workspaceId,{displayName:'资料'},randomUUID())).rejects.toMatchObject({code:'FOLDER_NAME_CONFLICT'});const child=await assets.createFolder(u.scope,u.workspaceId,{displayName:'子',parentFolderId:f.folderId},randomUUID());await expect(assets.moveFolder(u.scope,u.workspaceId,f.folderId,child.folderId,f.etag,randomUUID())).rejects.toMatchObject({code:'FOLDER_CYCLE'});await expect(assets.updateFolder(u.scope,u.workspaceId,f.folderId,'x','bad-etag',randomUUID())).rejects.toMatchObject({statusCode:412});});
+it('folder restoration restores only its cascade and advances each Note revision and event',async()=>{
+ const u=await fixture(),folder=await assets.createFolder(u.scope,u.workspaceId,{displayName:'restore root'},randomUUID());
+ const child=await assets.createFolder(u.scope,u.workspaceId,{displayName:'independent child',parentFolderId:folder.folderId},randomUUID());
+ const create=(title:string,folderId=folder.folderId)=>assets.createNote(u.scope,u.workspaceId,{title,folderId,parts:{raw:'retained content'}},randomUUID());
+ const active=await create('active'),removed=await create('independent note'),childNote=await create('child note',child.folderId);
+ await assets.deleteNote(u.scope,u.workspaceId,removed.noteId,removed.etag,randomUUID());
+ await assets.deleteFolder(u.scope,u.workspaceId,child.folderId,child.etag,randomUUID());
+ const removedBefore=await assets.getNote(u.scope,u.workspaceId,removed.noteId),childBefore=await assets.getNote(u.scope,u.workspaceId,childNote.noteId);
+ const deleted=await assets.deleteFolder(u.scope,u.workspaceId,folder.folderId,folder.etag,randomUUID());
+ expect(deleted.affectedObjectCount).toBe(2);
+ const activeDeleted=await assets.getNote(u.scope,u.workspaceId,active.noteId);
+ expect(activeDeleted).toMatchObject({state:'deleted'});expect(activeDeleted.etag).not.toBe(active.etag);
+ const rootDeleted=await assets.getFolder(u.scope,u.workspaceId,folder.folderId);
+ const key=randomUUID(),restored=await assets.deleteFolder(u.scope,u.workspaceId,folder.folderId,rootDeleted.etag,key,true);
+ expect(await assets.deleteFolder(u.scope,u.workspaceId,folder.folderId,rootDeleted.etag,key,true)).toEqual(restored);
+ expect(restored.affectedObjectCount).toBe(2);
+ expect(await assets.getNote(u.scope,u.workspaceId,active.noteId)).toMatchObject({state:'active'});
+ expect((await assets.getNote(u.scope,u.workspaceId,active.noteId)).etag).not.toBe(activeDeleted.etag);
+ expect(await assets.getNote(u.scope,u.workspaceId,removed.noteId)).toMatchObject({state:'deleted',etag:removedBefore.etag});
+ expect(await assets.getNote(u.scope,u.workspaceId,childNote.noteId)).toMatchObject({state:'deleted',etag:childBefore.etag});
+ expect((await assets.getFolder(u.scope,u.workspaceId,child.folderId)).state).toBe('deleted');
+ const events=(await root.query("SELECT change_type FROM content_events WHERE workspace_id=$1 AND object_id=$2 ORDER BY cursor",[u.workspaceId,active.noteId])).rows;
+ expect(events.map(e=>e.change_type)).toEqual(['created','deleted','restored']);
+});
+it('serializes opposing folder moves so they cannot introduce a cycle',async()=>{
+ const u=await fixture(),a=await assets.createFolder(u.scope,u.workspaceId,{displayName:'A'},randomUUID()),b=await assets.createFolder(u.scope,u.workspaceId,{displayName:'B'},randomUUID());
+ const results=await Promise.allSettled([assets.moveFolder(u.scope,u.workspaceId,a.folderId,b.folderId,a.etag,randomUUID()),assets.moveFolder(u.scope,u.workspaceId,b.folderId,a.folderId,b.etag,randomUUID())]);
+ expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+ expect(results.find(r=>r.status==='rejected')).toMatchObject({reason:{code:'FOLDER_CYCLE'}});
+});
+it('keeps folder and relation idempotency bound to the complete resource scope',async()=>{
+ const u=await fixture(),otherWorkspace=randomUUID();
+ await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'second',false,$3)",[otherWorkspace,u.userId,randomUUID()]);
+ const key=randomUUID(),a=await assets.createFolder(u.scope,u.workspaceId,{displayName:'same'},key),b=await assets.createFolder(u.scope,otherWorkspace,{displayName:'same'},key);
+ expect(a.workspaceId).toBe(u.workspaceId);expect(b.workspaceId).toBe(otherWorkspace);expect(a.folderId).not.toBe(b.folderId);
+ const source=await makeNote(u),differentSource=await makeNote(u),target=await makeNote(u),relationKey=randomUUID(),body={targetNoteId:target.noteId,relationType:'references',rationale:'same'};
+ await assets.createRelation(u.scope,u.workspaceId,source.noteId,body,relationKey);
+ await expect(assets.createRelation(u.scope,u.workspaceId,differentSource.noteId,body,relationKey)).rejects.toMatchObject({code:'IDEMPOTENCY_CONFLICT'});
+});
+it('restoring a child under a deleted parent is rejected without changing the child',async()=>{
+ const u=await fixture(),folder=await assets.createFolder(u.scope,u.workspaceId,{displayName:'parent'},randomUUID()),note=await assets.createNote(u.scope,u.workspaceId,{title:'child',folderId:folder.folderId,parts:{raw:'body'}},randomUUID());
+ await assets.deleteFolder(u.scope,u.workspaceId,folder.folderId,folder.etag,randomUUID());
+ const deleted=await assets.getNote(u.scope,u.workspaceId,note.noteId);
+ await expect(assets.deleteNote(u.scope,u.workspaceId,note.noteId,deleted.etag,randomUUID(),true)).rejects.toMatchObject({code:'PARENT_FOLDER_DELETED'});
+ expect((await assets.getNote(u.scope,u.workspaceId,note.noteId)).state).toBe('deleted');
+});
 it('overwrites the current part with ETag protection without storing previous bodies',async()=>{
  const u=await fixture(),note=await makeNote(u),key=randomUUID();
  const updated=await assets.putNotePart(u.scope,u.workspaceId,note.noteId,'raw','next',note.etag,key);
@@ -166,6 +238,13 @@ it.each(['manual','revision','delete','folder'] as const)('rejects %s changes ma
  const e=new TaskEngine(worker,15000,undefined,undefined,provider),job=await jobFor(n.noteId);const a=await e.claim(job,randomUUID());await e.execute(a!);
  expect((await assets.noteTags(u.scope,u.workspaceId,n.noteId)).tags).toHaveLength(0);expect((await root.query('SELECT outcome FROM content_jobs WHERE task_id=$1',[job])).rows[0].outcome).toBe('stale');
  expect((await root.query('SELECT count(*)::int n FROM note_parts WHERE note_id=$1',[n.noteId])).rows[0].n).toBeGreaterThanOrEqual(3);
+});
+it('rejects tag task inputs without the current captured version',async()=>{
+ const u=await fixture(),n=await makeNote(u),id=await jobFor(n.noteId);
+ await root.query("UPDATE task_inputs SET body=(body::jsonb-'tagSetVersion')::text WHERE id=(SELECT input_id FROM tasks WHERE id=$1)",[id]);
+ const attempt=await engine.claim(id,randomUUID());await engine.execute(attempt!);
+ expect((await root.query('SELECT state,error_code,retryable FROM tasks WHERE id=$1',[id])).rows[0]).toMatchObject({state:'failed',error_code:'TAG_INPUT_INVALID',retryable:false});
+ expect((await assets.noteTags(u.scope,u.workspaceId,n.noteId)).tags).toEqual([]);
 });
 it('expired attempt cannot write tags/results; disabled, malformed and failed providers preserve original text',async()=>{
  const u=await fixture();

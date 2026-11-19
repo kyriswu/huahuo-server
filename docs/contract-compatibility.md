@@ -1,3 +1,15 @@
+## 禁用标签服务时的请求结果（2026-11-18，本地候选）
+
+`features.tagProvider=disabled` 时保存/编辑 Note 不再创建必败的自动标签任务，显式 tag-extractions 返回已声明的 `503 TAG_PROVIDER_UNAVAILABLE`；权限/归属校验仍先执行，成功 key 仍可重放，内容、手动标签、事件与索引照常。没有新增请求/响应字段、产品接口或 App 接线。队列与 chunk 写入仅优化底层交接与批量操作，搜索产品细节仍待定。见[验收](acceptance/pg-row-growth-optimization-20261118.md)，未部署。
+
+## 搜索实现的需求边界（2026-11-17，本地候选）
+
+用户明确搜索功能确定需要，现有实现保留；业务范围、交互、接口及具体策略尚未定。查询Service/入口、技术配置、指标及测试保持现有实现；不把当前实现当成既定产品需求，不继续扩展功能或接线App/Agent。此前历史债务清理和正确性修复保留。见[需求边界](runbooks/search-status.md)及[本期验收](acceptance/debt-cleanup-20261117.md)。未修改共享库或部署。
+
+## 当前契约收敛（2026-11-17，本地候选，未发布）
+
+用户授权直接断开旧客户端与混合版本兼容。任务仅 state；删除 regenerate、keywordAttemptId、无效 restore 参数、contentLineId/defaultContentLine 别名和固定空字段；认证状态只给真实用户/工作区/时区。查询输入仅 note/file，File统一查询 file/text 真实来源；空正文不得声明 JSON；JWT仅当前 kid；运行配置未知字段严格拒绝。以下旧阶段表格只作历史证据，不能当作候选仍保留的接口。完整断开清单、App只读依据、SQL及验证见[本期验收](acceptance/debt-cleanup-20261117.md)。此候选兼容项 false，未部署，App也未修改。
+
 ## 用户资源、文件复用与当前笔记（2026-11-17，本地候选）
 
 资源只按用户归属；`resources` 移除工作区、重复上传 ID、解析处理状态及软删除时间，新增 `reference_count`。文件不可覆盖、无业务版本；按用户最终决定不做内容去重，App 不计算 MD5/SHA，也无 content_md5 字段/索引。每次新上传分配新 UUID；业务直接引用同一 resourceId 时可跨自己的工作区，空间按 ID 只计一次，跨用户禁止。引用次数随实际业务关系同事务增减；最后一个引用解除时同事务提交现有删除任务，Worker 删除 OSS 后硬删资源行并释放空间，不留零引用保留期。原任务完成回执保障重试不重复扣减。
@@ -22,7 +34,7 @@ Server内部接口统一由src/http/internal-routes.ts注册到/internal/v1，RA
 
 只有后续业务 API 调用 `ResourceClaims`，才按既有正式额度规则在同一个业务事务里建立 `resources`、confirmed 占用和业务关系，提交后立即尽力移除 Redis 回执；该移除失败只留下临时回执，不重复计算用量，也不影响正式空间判定。临时认领有效期从首次申请起最多 24 小时，重试、续签和上传完成不延长，到期后不能再认领。它不是 Redis 自动 TTL 或精确物理删除时限，清理完成前保留必要元信息。Worker maintenance 约每 60 秒扫描最多 10 条，持同资源锁查统一 `resources`：已认领只清 Redis，未认领才取消／核对／删除 OSS 并清理回执。不新增临时清理 PG 任务、不复制对象、不引入 OSS 回调或新的计费模型。
 
-业务真正使用文件时，正式额度判断使用 `users.storage_used_bytes + storage_reserved_bytes + 本次新认领大小`，不计任何 Redis 临时记录，也不逐次 SUM 明细。业务认领条件递增 used，正式删除确认同事务递减 used；已有 storage reserve／confirm／release 同步维护 reserved／used，重复提交与重试不重复增减。已有 PG reserved 基础逻辑与临时上传无关，本次不扩展其业务规则。明细及普通索引继续用于细分统计与对账，不新增统计表、后台对账任务或 credits／扣费功能。`0008` 迁移新增两个汇总字段并以现有明细初始化；此调整不改变上传 HTTP DTO。
+业务真正使用文件时，正式额度判断使用 `users.storage_used_bytes + storage_reserved_bytes + 本次新认领大小`，不计任何 Redis 临时记录，也不逐次 SUM 明细。业务认领条件递增 used，正式删除确认同事务递减 used；旧独立 storage reserve／confirm／release 方法已在历史债务清理中删除；正式用量仅由资源认领与删除任务维护，重复提交与重试不重复增减。已有 PG reserved 事实仍参与容量保护，与 Redis 临时上传无关。明细及普通索引继续用于细分统计与对账，不新增统计表、后台对账任务或 credits／扣费功能。`0008` 迁移新增两个汇总字段并以现有明细初始化；此调整不改变上传 HTTP DTO。
 
 playback 仍返回 15 分钟 OSS GET 签名；extraction/assets 保持含 `url/expiresAt/mimeType` 的 JSON，gzip 产物另含 `contentEncoding:gzip`。签名与 UUID 识别继续分离，KBIMAGE、解析产物和模型契约保持各自既有边界。临时完成但尚未认领的自有文件可在有效期内取得播放链接；正式资源已删除时不能通过旧临时回执恢复读取。
 

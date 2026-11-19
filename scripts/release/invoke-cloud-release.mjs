@@ -120,9 +120,10 @@ function createProgress(config, onProgress) {
     if (item.Dropped !== 0) fail('TEST_RELEASE_OUTPUT_TRUNCATED');
     if (typeof item.Output !== 'string' || Buffer.byteLength(item.Output) > 4096) fail('TEST_RELEASE_OUTPUT_INVALID');
     let lines = item.Output.split('\n').filter(line => line.trim());
+    // An idempotent same-SHA check returns one terminal JSON record without phases.
     try {
-      const legacy = JSON.parse(item.Output);
-      if (object(legacy) && !Object.hasOwn(legacy, 'event')) lines = [JSON.stringify(legacy)];
+      const terminalRecord = JSON.parse(item.Output);
+      if (object(terminalRecord) && !Object.hasOwn(terminalRecord, 'event')) lines = [JSON.stringify(terminalRecord)];
     } catch { /* Multiple JSONL records or a running partial record. */ }
     if (lines.length > 11) fail('TEST_RELEASE_PROGRESS_INVALID');
     const events = [];
@@ -244,7 +245,7 @@ export function renderCloudReleaseSummary(result) {
   const labels = { pending: '待执行', running: '执行中', passed: '已完成', failed: '失败', not_run: '未执行', unobserved: '不可见' };
   const lines = ['## 测试服务器发布：' + status, ''];
   if (progress.visibility === 'reported') lines.push('已完成 ' + progress.completed + ' / 5 项。', '');
-  else lines.push('阶段完成项数不可见；仅有终态或尚未收到进度。旧版协议或同 SHA 幂等返回需要复核宿主发布记录。', '');
+  else lines.push('阶段完成项数不可见；仅有终态或尚未收到进度。同 SHA 幂等返回需要复核宿主发布记录。', '');
   for (const phase of progress.phases) lines.push('- [' + (phase.status === 'passed' ? 'x' : ' ') + '] ' + phase.phase + '. ' + phase.name + '：' + labels[phase.status]);
   if (progress.failedPhase) lines.push('', '失败位置：第 ' + progress.failedPhase + ' 阶段。');
   if (result.stage) lines.push('', '调用器阶段：' + result.stage + '；结果码：' + result.code + '。');
@@ -272,7 +273,7 @@ async function main() {
   catch (error) { result = { status: 'failed', stage: 'configuration', code: error instanceof CloudReleaseError ? error.code : 'TEST_RELEASE_FAILED', requestCount: 0, durationMs: 0 }; }
   let exitCode = result.status === 'passed' ? 0 : 1;
   if (result.code === 'TEST_RELEASE_OK_WITH_FORCED_DRAIN') console.warn('::warning::Deployment completed after the configured drain deadline forced old services to stop.');
-  if (result.progress?.visibility === 'terminal_only') console.warn('::notice::Only a terminal result was reported. Stage execution is not visible; review the host record for a legacy or same-SHA idempotent result.');
+  if (result.progress?.visibility === 'terminal_only') console.warn('::notice::Only a terminal result was reported. Stage execution is not visible; review the host record for a same-SHA idempotent result.');
   try {
     reporter.finish(result);
   } catch {

@@ -27,7 +27,7 @@ export interface AppConfig {
   schemaMinVersion: number; instanceId: string; logLevel: string;
   connectDeadlineMs: number; migrationLockTimeoutMs: number;
   appTokenSecret?: string; adminSessionSecret?: string;
-  jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string; previousPublicKeyPem?:string; previousKeyId?:string };
+  jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string };
   gatewayStudio: { enabled: boolean; origin: string; publicPath: string };
   smsAliyun?: AliyunOtpConfig;
   appEnv: string; agreementVersion: string; privacyVersion: string; adminOrigin: string;
@@ -94,13 +94,6 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (env.SERVICE_ROLE && env.SERVICE_ROLE !== role) fail('SERVICE_ROLE');
   const appEnv = env.APP_ENV ?? 'development';
   if (!['development', 'test', 'production'].includes(appEnv)) fail('APP_ENV');
-  const mode = env.PROVIDER_MODE ?? 'disabled';
-  if (!['disabled', 'mock', 'live'].includes(mode)) fail('PROVIDER_MODE');
-  if (mode === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('PROVIDER_MODE');
-  if (env.DEV_AUTH_BYPASS === 'true' && (appEnv !== 'development' || env.ALLOW_DEV_AUTH !== 'true')) fail('DEV_AUTH_BYPASS');
-  for (const key of ['PAYMENT_PROVIDER','ASR_PROVIDER','WORKFLOW_PROVIDER','PUSH_PROVIDER']) {
-    if (appEnv === 'production' && env[key] === 'mock') fail(key);
-  }
   const databaseUrl = url('DATABASE_URL', ['postgres:', 'postgresql:']);
   const parsed = new URL(databaseUrl);
   if ([...parsed.searchParams.keys()].some(key => key.toLowerCase().startsWith('ssl'))) fail('DATABASE_URL_SSL_CONFLICT');
@@ -119,16 +112,12 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   }
   const jwtPrivateKey = env.APP_JWT_PRIVATE_KEY?.trim() ? Buffer.from(env.APP_JWT_PRIVATE_KEY.trim(), 'base64').toString('utf8') : undefined;
   const jwtPublicKey = env.APP_JWT_PUBLIC_KEY?.trim() ? Buffer.from(env.APP_JWT_PUBLIC_KEY.trim(), 'base64').toString('utf8') : undefined;
-  const jwtPreviousPublicKey = env.APP_JWT_PREVIOUS_PUBLIC_KEY?.trim() ? Buffer.from(env.APP_JWT_PREVIOUS_PUBLIC_KEY.trim(), 'base64').toString('utf8') : undefined;
   const jwtAudience = (env.APP_JWT_AUDIENCE?.trim() || 'huahuo-server,huahuo-agent').split(',').map(value => value.trim()).filter(Boolean);
   const jwtServerAudience = env.APP_JWT_SERVER_AUDIENCE?.trim() || 'huahuo-server';
   const jwtKeyId = env.APP_JWT_KEY_ID?.trim() || 'server-current';
-  const jwtPreviousKeyId = env.APP_JWT_PREVIOUS_KEY_ID?.trim() || undefined;
   if (!jwtAudience.length || new Set(jwtAudience).size !== jwtAudience.length || jwtAudience.some(value => !/^[A-Za-z0-9._:-]{1,128}$/.test(value)) || !jwtAudience.includes(jwtServerAudience)) fail('APP_JWT_AUDIENCE');
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(jwtServerAudience)) fail('APP_JWT_SERVER_AUDIENCE');
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(jwtKeyId)) fail('APP_JWT_KEY_ID');
-  if ((jwtPreviousPublicKey && !jwtPreviousKeyId) || (!jwtPreviousPublicKey && jwtPreviousKeyId)) fail('APP_JWT_PREVIOUS_KEY');
-  if (jwtPreviousKeyId && (!/^[A-Za-z0-9._:-]{1,128}$/.test(jwtPreviousKeyId) || jwtPreviousKeyId === jwtKeyId)) fail('APP_JWT_PREVIOUS_KEY_ID');
   if (role === 'api-server' && appEnv === 'production' && (!jwtPrivateKey || !jwtPublicKey)) fail('APP_JWT_KEYS');
   if ((jwtPrivateKey && !jwtPublicKey) || (!jwtPrivateKey && jwtPublicKey)) fail('APP_JWT_KEYS');
   const studioEnabled = env.HUAHUO_STUDIO_AUTH_ENABLED ?? 'false';
@@ -247,8 +236,6 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
       refreshTtlSeconds: integer('REFRESH_TOKEN_TTL_SECONDS', 30 * 86_400, 3600, 365 * 86_400),
       ...(jwtPrivateKey ? { privateKeyPem: jwtPrivateKey } : {}),
       ...(jwtPublicKey ? { publicKeyPem: jwtPublicKey } : {}),
-      ...(jwtPreviousPublicKey ? { previousPublicKeyPem: jwtPreviousPublicKey } : {}),
-      ...(jwtPreviousKeyId ? { previousKeyId: jwtPreviousKeyId } : {}),
     },
     gatewayStudio,
     smsAliyun, appEnv,

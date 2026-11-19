@@ -11,8 +11,8 @@ const key='p03-demo-key';const create=await request('/api/v1/tasks/demo',{method
 if(create.status!==200)throw new Error(`CREATE:${create.status}`);const task=create.body.data.task;
 const replay=await request('/api/v1/tasks/demo',{method:'POST',headers:{...auth,'x-idempotency-key':key},body:JSON.stringify({workspaceId,text:'durable task input'})});
 if(replay.status!==200||replay.body.data.task.taskId!==task.taskId)throw new Error('IDEMPOTENCY_REPLAY');
-let done;for(let i=0;i<100;i++){const read=await request(`/api/v1/tasks/${task.taskId}`,{headers:auth});if(read.status!==200)throw new Error(`READ:${read.status}`);if(['succeeded','failed'].includes(read.body.data.task.status)){done=read.body.data.task;break;}await new Promise(r=>setTimeout(r,100));}
-if(!done||done.status!=='succeeded')throw new Error(`TASK_NOT_SUCCEEDED:${JSON.stringify(done)}`);
+let done;for(let i=0;i<100;i++){const read=await request(`/api/v1/tasks/${task.taskId}`,{headers:auth});if(read.status!==200)throw new Error(`READ:${read.status}`);if(['succeeded','failed'].includes(read.body.data.task.state)){done=read.body.data.task;break;}await new Promise(r=>setTimeout(r,100));}
+if(!done||done.state!=='succeeded')throw new Error(`TASK_NOT_SUCCEEDED:${JSON.stringify(done)}`);
 const result=await request(`/api/v1/tasks/${task.taskId}/result`,{headers:auth});if(result.status!==200||result.body.data.byteCount!==18)throw new Error('RESULT');
 const events=await request(`/api/v1/tasks/${task.taskId}/events?afterSequence=0`,{headers:auth});if(events.status!==200||events.body.data.items.length<3)throw new Error('EVENT_REPLAY');
 const second=await request('/api/v1/tasks/demo',{method:'POST',headers:{...auth,'x-idempotency-key':'p03-cancel'},body:JSON.stringify({workspaceId,text:'cancel me'})});if(second.status!==200)throw new Error('CREATE_CANCEL');
