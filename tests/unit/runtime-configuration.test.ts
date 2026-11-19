@@ -42,7 +42,7 @@ describe('typed runtime registry (no database/cloud)',()=>{
  });
  it('keeps the embedding timeout bound to its build snapshot after a configuration change',async()=>{
   const base=config();Object.assign(base.rag,{providerMode:'live',embeddingBaseUrl:'https://embedding.test/v1',embeddingApiKey:'synthetic-fixture-key'});
-  const snapshot=kbSnapshot(applyValues(base,{'rag.embeddingTimeoutMs':2000},1),'note-hybrid','markdown');
+  const snapshot=kbSnapshot(applyValues(base,{'rag.embeddingTimeoutMs':2000},1),'content-asset-hybrid','markdown');
   const later=applyValues(base,{'rag.embeddingTimeoutMs':9000},2);let signal:AbortSignal|undefined;
   vi.useFakeTimers();const fetchDouble=vi.spyOn(globalThis,'fetch').mockImplementation(async(_url,options)=>new Promise((_resolve,reject)=>{signal=options!.signal as AbortSignal;signal.addEventListener('abort',()=>reject(new DOMException('Fixture timeout','AbortError')),{once:true});}));
   try{

@@ -36,7 +36,7 @@ export class KnowledgeIndexJobs {
    return createBuild(tx,source,attempt.task.id,snapshot);});
   return this.executeBuild(build.id,attempt,snapshot.mode);
  }
- async executeBuild(id:string,attempt:Attempt,mode:'note-hybrid'|'document-keyword'){
+ async executeBuild(id:string,attempt:Attempt,mode:'content-asset-hybrid'|'document-keyword'){
   const {builds,chunks}=tablesFor(mode);
   const build=(await this.pool.query<KbBuild>(`SELECT * FROM ${builds} WHERE id=$1 AND user_id=$2 AND workspace_id=$3 AND task_id=$4`,[id,attempt.task.user_id,attempt.task.workspace_id,attempt.task.id])).rows[0];
   if(!build)throw new KbJobError('KB_BUILD_NOT_FOUND',false);
@@ -47,7 +47,7 @@ export class KnowledgeIndexJobs {
    const check=async(tx:pg.PoolClient)=>{const state=await sourceState(tx,build,true);await this.lease(tx,attempt);const owner=(await tx.query(`SELECT task_id FROM ${builds} WHERE id=$1 FOR UPDATE`,[id])).rows[0];if(owner?.task_id!==attempt.task.id)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);const newer=await tx.query(`SELECT 1 FROM ${builds} WHERE source_type=$1 AND source_id=$2 AND source_revision=$4 AND (created_at,id)>(SELECT created_at,id FROM ${builds} WHERE id=$3) LIMIT 1`,[build.source_type,build.source_id,id,build.source_revision]);if(state.deleted||state.revision!==build.source_revision||newer.rowCount)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);};
    try{
     if(!build.published){
-     const tokenizer=mode==='note-hybrid'?await(this.dependencies.tokenizer?.(build.snapshot)??kbTokenizer(build.snapshot)):undefined;
+     const tokenizer=mode==='content-asset-hybrid'?await(this.dependencies.tokenizer?.(build.snapshot)??kbTokenizer(build.snapshot)):undefined;
      let drafts:KbDraft[]|undefined;
      if(!build.planned){
       const plan=await splitKnowledgeContent(source.content,mode,{format:source.format,...(tokenizer?{tokenizer}:{})});
@@ -61,29 +61,29 @@ export class KnowledgeIndexJobs {
         });
         // EXISTS keeps both the lookup input and result bounded even when many
         // historical builds reference the same reusable point.
-        const reusable=new Set(mode==='note-hybrid'?(await tx.query<{point_id:string}>(`SELECT requested.point_id FROM unnest($1::text[]) AS requested(point_id)
+        const reusable=new Set(mode==='content-asset-hybrid'?(await tx.query<{point_id:string}>(`SELECT requested.point_id FROM unnest($1::text[]) AS requested(point_id)
          WHERE EXISTS(SELECT 1 FROM ${chunks} c JOIN ${builds} b ON b.id=c.build_id
           WHERE c.point_id=requested.point_id AND c.index_status='ready' AND b.source_id=$2 AND b.user_id=$3 AND b.config_hash=$4 AND b.cleanup_status<>'ready')`,
          [batch.map(row=>row.pointId),source.id,source.userId,build.config_hash])).rows.map(row=>row.point_id):[]);
         const values:unknown[]=[];
         const records=batch.map(({draft,pointId})=>{
-         const fields=[id,draft.ordinal,pointId,draft.start,draft.end,draft.contentHash,draft.charCount,reusable.has(pointId)?'ready':'pending',...(mode==='note-hybrid'?[draft.coreStart,draft.coreEnd,draft.sectionId,draft.inputHash,draft.tokenCount]:[])];
+         const fields=[id,draft.ordinal,pointId,draft.start,draft.end,draft.contentHash,draft.charCount,reusable.has(pointId)?'ready':'pending',...(mode==='content-asset-hybrid'?[draft.coreStart,draft.coreEnd,draft.sectionId,draft.inputHash,draft.tokenCount]:[])];
          const start=values.length;values.push(...fields);return '('+fields.map((_,i)=>'$'+(start+i+1)).join(',')+')';
         });
-        await tx.query(`INSERT INTO ${chunks}(build_id,ordinal,point_id,source_start,source_end,content_hash,char_count,index_status${mode==='note-hybrid'?',core_start,core_end,section_id,input_hash,token_count':''}) VALUES ${records.join(',')} ON CONFLICT(build_id,ordinal) DO NOTHING`,values);
+        await tx.query(`INSERT INTO ${chunks}(build_id,ordinal,point_id,source_start,source_end,content_hash,char_count,index_status${mode==='content-asset-hybrid'?',core_start,core_end,section_id,input_hash,token_count':''}) VALUES ${records.join(',')} ON CONFLICT(build_id,ordinal) DO NOTHING`,values);
        }
        await tx.query(`UPDATE ${builds} SET planned=true,chunk_count=$2,status='indexing',toc=$3::jsonb,toc_status='ready',updated_at=now() WHERE id=$1`,[id,plan.chunks.length,JSON.stringify(plan.structure?.toc??[])]);
       });
      }
      const rows=(await this.pool.query<StoredChunk>(`SELECT * FROM ${chunks} WHERE build_id=$1 AND index_status<>'ready' ORDER BY ordinal`,[id])).rows;
-     const embedder=mode==='note-hybrid'?(this.dependencies.embedding?.(build.snapshot)??kbEmbedding(this.config,build.snapshot)):undefined;
-     if(mode==='note-hybrid'&&rows.length&&!drafts)drafts=(await splitKnowledgeContent(source.content,mode,{format:source.format,tokenizer:tokenizer!})).chunks;
+     const embedder=mode==='content-asset-hybrid'?(this.dependencies.embedding?.(build.snapshot)??kbEmbedding(this.config,build.snapshot)):undefined;
+     if(mode==='content-asset-hybrid'&&rows.length&&!drafts)drafts=(await splitKnowledgeContent(source.content,mode,{format:source.format,tokenizer:tokenizer!})).chunks;
      await transaction(this.pool,check);
      const writes=new Set<Promise<void>>();
      const write=(p:Promise<void>)=>{writes.add(p);void p.finally(()=>writes.delete(p)).catch(()=>{});return p;};
      let items:import('../../lib/rag-indexing/index.js').IndexItemResult[];
      try{
-      if(mode==='note-hybrid'){
+      if(mode==='content-asset-hybrid'){
        const hybrid=requireIndexKind(index,'hybrid');
        const draftsByOrdinal=new Map(drafts?.map(draft=>[draft.ordinal,draft]));
        const records=rows.map(row=>{const draft=draftsByOrdinal.get(row.ordinal)!;if(draft.contentHash!==row.content_hash)throw new KbJobError('KB_PLAN_CHANGED',false);return {id:row.point_id,embeddingText:draft.embeddingText,metadata:{content:draft.content}};});

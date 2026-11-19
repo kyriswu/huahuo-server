@@ -15,15 +15,15 @@ it('fuses global branch ranks across point windows and retains each branch candi
  settings.rag.rerankProvider='disabled';
  const scope={userId:randomUUID(),sessionId:randomUUID(),traceId:randomUUID()},workspaceId=randomUUID();
  const buildId=randomUUID(),sourceId=randomUUID(),revision=randomUUID();
- const snapshot=kbSnapshot(settings,'note-hybrid','markdown');
+ const snapshot=kbSnapshot(settings,'content-asset-hybrid','markdown');
  let content='';
  const rows=Array.from({length:300},(_,ordinal)=>{
   const point=ordinal===0?'A':ordinal===1?'B':ordinal===256?'C':`filler-${ordinal}`;
   const body=`chunk ${point}\n`,start=content.length;content+=body;
   return {build_id:buildId,point_id:point,ordinal,source_start:start,source_end:content.length,content_hash:digest(body),chunk_count:300};
  });
- const build={id:buildId,source_type:'note',source_id:sourceId,source_revision:revision,user_id:scope.userId,workspace_id:workspaceId,
-  content_hash:digest(content),snapshot,published:true,status:'ready',chunk_count:300,note_revision_id:randomUUID(),cursor_created_at:'2026-01-01 00:00:00.000000+00'};
+ const build={id:buildId,source_type:'content_asset',source_id:sourceId,source_revision:revision,user_id:scope.userId,workspace_id:workspaceId,
+  content_hash:digest(content),snapshot,published:true,status:'ready',chunk_count:300,content_asset_revision_id:randomUUID(),cursor_created_at:'2026-01-01 00:00:00.000000+00'};
  const sql=vi.fn(async(query:string,values:unknown[]=[])=>{
   if(query.includes('FROM user_sessions'))return {rows:[{id:scope.sessionId}],rowCount:1};
   if(query.includes('SELECT b.*'))return {rows:[build],rowCount:1};
@@ -31,7 +31,7 @@ it('fuses global branch ranks across point windows and retains each branch candi
    const start=values[3]===null?0:Number(values[3])+1;
    return {rows:rows.slice(start,start+Number(values[4])),rowCount:Math.min(Number(values[4]),rows.length-start)};
   }
-  if(query.includes('FROM notes n'))return {rows:[{revision,content,state:'active',processing_status:'ready'}],rowCount:1};
+  if(query.includes('FROM content_assets n'))return {rows:[{revision,content,state:'active',processing_status:'ready'}],rowCount:1};
   if(['BEGIN','COMMIT','ROLLBACK'].includes(query))return {rows:[],rowCount:0};
   throw new Error(`UNEXPECTED_SQL: ${query}`);
  });

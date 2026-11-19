@@ -13,13 +13,13 @@ const rememberDrainSnapshot=(base:AppConfig,values:Values,revision:number)=>{
 };
 export const currentRuntimeConfig=()=>context.getStore();
 const dynamicKeys=new Set<PropertyKey>(['runtimeRevision','maxUploadBytes','storageQuotaBytes','billingPolicyVersion','tagExtractorProvider','taskPolicy']);
-const ragKeys=['enabled','plainTextMaxChars','embeddingBatchSize','indexingConcurrency','embeddingTimeoutMs','embeddingMaxRetries','rerankTimeoutMs','noteRerankBudgetMs'] as const;
+const ragKeys=['enabled','plainTextMaxChars','embeddingBatchSize','indexingConcurrency','embeddingTimeoutMs','embeddingMaxRetries','rerankTimeoutMs','contentAssetRerankBudgetMs'] as const;
 const milvusKeys=['searchConcurrency','denseCandidates','bm25Candidates','hybridCandidates','rrfK'] as const;
 export const scopedConfig=(base:AppConfig):AppConfig=>{const proxy=new Proxy(base,{get(target,key){
  const active=context.getStore();
  if(active&&key==='rag')return {...target.rag,...Object.fromEntries(ragKeys.map(k=>[k,active.rag[k]]))};
  if(active&&key==='milvus')return {...target.milvus,...Object.fromEntries(milvusKeys.map(k=>[k,active.milvus[k]]))};
- if(active&&key==='kb')return {...target.kb,noteEnabled:active.kb.noteEnabled};
+ if(active&&key==='kb')return {...target.kb,contentAssetEnabled:active.kb.contentAssetEnabled};
  return Reflect.get(active&&dynamicKeys.has(key)?active:target,key);
 }});bases.set(proxy,base);return proxy;};
 export class RuntimeSettings {
@@ -45,7 +45,7 @@ export class RuntimeSettings {
  async enter(done:(error?:Error)=>void){try{const loaded=await this.load();context.run(applyValues(this.base,loaded.values,loaded.revision),()=>done());}catch(error){done(error as Error);}}
  async view(){const state=await this.load();return {...state,definitions:settings,bootstrap:{cloudControlEnabled:this.base.processingNodes.cloudControlEnabled,
   billingMode:this.base.billingMode,uploadHardMaxBytes:this.base.uploadHardMaxBytes,environmentKeys:['DATABASE_URL','REDIS_QUEUE_URL','REDIS_CACHE_URL','ALIYUN_RAM_ACCESS_KEY_ID','ALIYUN_RAM_ACCESS_KEY_SECRET','PROCESSING_NODES_CLOUD_CONTROL_ENABLED','HTTP_UPLOAD_HARD_MAX_BYTES','BILLING_MODE','HOST','PORT','LOG_LEVEL',
-   'MILVUS_ADDRESS','MILVUS_USERNAME','MILVUS_PASSWORD','MILVUS_DATABASE','MILVUS_TLS','MILVUS_CREATE_IF_MISSING','KB_NOTE_HYBRID_COLLECTION','KB_DOCUMENT_KEYWORD_COLLECTION',
+   'MILVUS_ADDRESS','MILVUS_USERNAME','MILVUS_PASSWORD','MILVUS_DATABASE','MILVUS_TLS','MILVUS_CREATE_IF_MISSING','KB_CONTENT_ASSET_HYBRID_COLLECTION','KB_DOCUMENT_KEYWORD_COLLECTION',
    'RAG_PROVIDER_MODE','RAG_SOURCE_ALLOWED_HOSTS','RAG_EMBEDDING_BASE_URL','RAG_EMBEDDING_API_KEY','RAG_EMBEDDING_MODEL','RAG_EMBEDDING_DIMENSIONS','RAG_EMBEDDING_PROFILE',
    'RAG_RERANK_PROVIDER','RAG_RERANK_BASE_URL','RAG_RERANK_API_KEY','RAG_RERANK_MODEL']},
   billingPolicies:(await this.pool.query('SELECT policy_version,mode,monthly_credit_limit::text,currency FROM billing_policies ORDER BY policy_version')).rows};}

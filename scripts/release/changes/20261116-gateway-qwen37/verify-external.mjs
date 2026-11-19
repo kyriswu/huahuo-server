@@ -11,11 +11,11 @@ const checked = response => {
 };
 try {
   await client.connectPromise;
-  const note = checked(await client.describeCollection({ collection_name: config.kb.noteCollection }));
-  const dense = note.schema.fields.find(field => field.name === 'dense_vector');
+  const contentAsset = checked(await client.describeCollection({ collection_name: config.kb.contentAssetCollection }));
+  const dense = contentAsset.schema.fields.find(field => field.name === 'dense_vector');
   if (!dense || !['Float16Vector', DataType.Float16Vector].includes(dense.data_type)
     || Number(dense.type_params.find(parameter => parameter.key === 'dim')?.value) !== 1024) throw new Error('QWEN_MILVUS_SCHEMA_REQUIRED');
-  const indexes = checked(await client.describeIndex({ collection_name: config.kb.noteCollection })).index_descriptions;
+  const indexes = checked(await client.describeIndex({ collection_name: config.kb.contentAssetCollection })).index_descriptions;
   if (!indexes.some(index => index.field_name === 'dense_vector' && index.index_name === 'huahuo_dense_hnsw' && index.state === 'Finished')
     || !indexes.some(index => index.field_name === 'sparse_vector' && index.index_name === 'huahuo_sparse_bm25' && index.state === 'Finished')) throw new Error('QWEN_MILVUS_INDEX_REQUIRED');
   const document = checked(await client.describeCollection({ collection_name: config.kb.documentCollection }));

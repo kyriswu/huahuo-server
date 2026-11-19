@@ -28,7 +28,7 @@ describe('two mode Milvus collections',()=>{
  it('hybrid schema stores native Qwen dimensions as IEEE FP16',()=>expect(buildMilvusSchema('hybrid').find(f=>f.name==='dense_vector')).toMatchObject({dim:1024,data_type:DataType.Float16Vector}));
  it('packs writes and both dense query paths into 2048 bytes per 1024-dimensional vector',async()=>{
   const {repository,client}=setup();const values=vector();values[1]=0.123456;
-  await repository.upsert([{id:'a',sourceId:'s',sourceType:'note',userId:'u',workspaceId:'w',content:'数据库',embedding:values}]);
+  await repository.upsert([{id:'a',sourceId:'s',sourceType:'content_asset',userId:'u',workspaceId:'w',content:'数据库',embedding:values}]);
   const data=client.upsert.mock.calls[0]![0].data[0] as {dense_vector:Uint8Array};
   expect(data.dense_vector).toBeInstanceOf(Uint8Array);expect(data.dense_vector.byteLength).toBe(2048);
   expect(f16BytesToF32Array(data.dense_vector)[1]).toBeCloseTo(values[1]!,3);

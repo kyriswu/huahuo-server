@@ -31,7 +31,7 @@ export class IsolatedCloudMilvus {
   constructor(config, runId, clientFactory = options => new MilvusClient(options)) {
     if (!/^[a-f0-9]{32}$/u.test(runId)) throw new TestMilvusError('TEST_CLOUD_MILVUS_RUN_ID_INVALID');
     this.database = `huahuo_test_${runId}`;
-    this.collections = Object.freeze({ note: `huahuo_test_note_${runId}`, document: `huahuo_test_document_${runId}` });
+    this.collections = Object.freeze({ contentAsset: `huahuo_test_content_asset_${runId}`, document: `huahuo_test_document_${runId}` });
     this.config = config;
     this.clientFactory = clientFactory;
     this.clients = [];
@@ -70,7 +70,7 @@ export class IsolatedCloudMilvus {
       TEST_MILVUS_MODE: 'cloud', TEST_MILVUS_ADDRESS: this.config.address,
       TEST_MILVUS_USERNAME: this.config.username, TEST_MILVUS_PASSWORD: this.config.password,
       TEST_MILVUS_TLS: String(this.config.ssl), TEST_MILVUS_DATABASE: this.database,
-      TEST_MILVUS_NOTE_COLLECTION: this.collections.note, TEST_MILVUS_DOCUMENT_COLLECTION: this.collections.document,
+      TEST_MILVUS_CONTENT_ASSET_COLLECTION: this.collections.contentAsset, TEST_MILVUS_DOCUMENT_COLLECTION: this.collections.document,
       ...(this.config.proxy ? { grpc_proxy: this.config.proxy } : {}),
     };
   }

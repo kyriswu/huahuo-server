@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { NOTE_EMBEDDING_MAX_BATCH_SIZE, NOTE_EMBEDDING_MAX_INPUT_TOKENS } from '../model-profile.js';
+import { CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_EMBEDDING_MAX_INPUT_TOKENS } from '../model-profile.js';
 import { ServiceHttpClient, readJsonResponse } from '../../../integrations/http-client.js';
 export class EmbeddingError extends Error {
   constructor(readonly code:string, message:string, readonly retryable=true, options?:{cause?:unknown}) { super(message,options); this.name='EmbeddingError'; }
@@ -25,10 +25,10 @@ export class BailianEmbeddingClient implements EmbeddingClient {
   async embed(texts:string[], requestOptions?:EmbeddingRequestOptions):Promise<number[][]>{
     if(!texts.length)return [];
     if(texts.some(t=>!t.trim()))throw new EmbeddingError('EMBEDDING_INPUT_INVALID','Embedding input contains empty text',false);
-    if(texts.some(t=>Buffer.byteLength(t,'utf8')+16>NOTE_EMBEDDING_MAX_INPUT_TOKENS))throw new EmbeddingError('EMBEDDING_INPUT_INVALID','Embedding input exceeds conservative model input budget',false);
+    if(texts.some(t=>Buffer.byteLength(t,'utf8')+16>CONTENT_ASSET_EMBEDDING_MAX_INPUT_TOKENS))throw new EmbeddingError('EMBEDDING_INPUT_INVALID','Embedding input exceeds conservative model input budget',false);
     const result:number[][]=[];
-    for(let offset=0;offset<texts.length;offset+=NOTE_EMBEDDING_MAX_BATCH_SIZE){
-      result.push(...await this.embedBatch(texts.slice(offset,offset+NOTE_EMBEDDING_MAX_BATCH_SIZE),requestOptions));
+    for(let offset=0;offset<texts.length;offset+=CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE){
+      result.push(...await this.embedBatch(texts.slice(offset,offset+CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE),requestOptions));
     }
     return result;
   }

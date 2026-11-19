@@ -86,14 +86,14 @@ export function restoreOwnedImageParts(currentParts: Record<string, string>, pre
     const images = kbImages(source), edits: Edit[] = [];
     for (const origin of prepared.imageOrigins.filter(origin => origin.part === part)) {
       const image = images[origin.ordinal];
-      if (!image || image.resourceId !== origin.resourceId) throw new Error('NOTE_IMAGE_ORIGIN_RANGE_INVALID');
+      if (!image || image.resourceId !== origin.resourceId) throw new Error('IMAGE_ORIGIN_RANGE_INVALID');
       const candidates = byResource.get(origin.resourceId) ?? [];
       let original: StoredImage | undefined;
       if (origin.hash) {
         original = candidates.find(candidate => candidate.hash === origin.hash);
-        if (!original) throw new DomainError(409, 'NOTE_IMAGE_ORIGIN_NOT_FOUND');
+        if (!original) throw new DomainError(409, 'IMAGE_ORIGIN_NOT_FOUND');
       } else {
-        if (new Set(candidates.map(candidate => candidate.metadata)).size > 1) throw new DomainError(409, 'NOTE_IMAGE_ORIGIN_AMBIGUOUS');
+        if (new Set(candidates.map(candidate => candidate.metadata)).size > 1) throw new DomainError(409, 'IMAGE_ORIGIN_AMBIGUOUS');
         original = candidates[0];
       }
       if (original) edits.push({ start: image.nodeStart, end: image.nodeEnd, text: withPresentation(original, kbImageAttributes(source, image), origin.format) });

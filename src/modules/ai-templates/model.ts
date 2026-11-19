@@ -5,7 +5,7 @@ import { DomainError } from '../identity/store.js';
 export const MaxSourceChars = 50_000;
 export const MaxOutputChars = 10_000;
 export const MaxPromptChars = 10_000;
-export const SceneKeySchema = Type.Union([Type.Literal('note_outline'), Type.Literal('editor_polish')]);
+export const SceneKeySchema = Type.Union([Type.Literal('content_asset_outline'), Type.Literal('editor_polish')]);
 export type SceneKey = Static<typeof SceneKeySchema>;
 export const ItemKeySchema = Type.String({ pattern: '^[a-z][a-z0-9_]{0,63}$' });
 const DisplayLimit = Type.Integer({ minimum: 1, maximum: 50 });
@@ -37,8 +37,8 @@ export type Template = Static<typeof TemplateSchema>;
 
 export const RunRequestSchema = Type.Union([
   Type.Object({
-    sceneKey: Type.Literal('note_outline'), itemKey: ItemKeySchema,
-    input: Type.Object({ noteId: Id, sourceRevision: Id }, Strict),
+    sceneKey: Type.Literal('content_asset_outline'), itemKey: ItemKeySchema,
+    input: Type.Object({ contentAssetId: Id, sourceRevision: Id }, Strict),
   }, Strict),
   Type.Object({
     sceneKey: Type.Literal('editor_polish'), itemKey: ItemKeySchema,
@@ -70,7 +70,7 @@ export function validateCatalog(scene: SceneKey, catalog: Catalog, publishing: b
       throw new DomainError(400, 'AI_TEMPLATE_PROMPT_REQUIRED');
     }
     for (const [, name] of item.prompt.matchAll(/\{\{\s*([^{}]*?)\s*\}\}/gu)) {
-      if (name !== 'templateTitle' && (name !== 'sourceTitle' || scene !== 'note_outline')) {
+      if (name !== 'templateTitle' && (name !== 'sourceTitle' || scene !== 'content_asset_outline')) {
         throw new DomainError(400, 'AI_TEMPLATE_VARIABLE_INVALID');
       }
     }

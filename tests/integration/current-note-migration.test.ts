@@ -99,4 +99,78 @@ describe('current-only note content and retired settings migrations',()=>{
   await tx.query('ROLLBACK TO SAVEPOINT migration_start');
   expect((await tx.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='resources' AND column_name='workspace_id'",[schema])).rows).toHaveLength(1);
  }));
+ it('moves note grouping into relationships while preserving owners, identity, bodies and attachments',async()=>fixture(async(tx,schema)=>{
+  await tx.query(`CREATE TABLE ${schema}.workspaces(id uuid PRIMARY KEY,user_id uuid NOT NULL);
+   CREATE TABLE ${schema}.asset_folders(folder_id uuid PRIMARY KEY,workspace_id uuid NOT NULL);
+   CREATE TABLE ${schema}.notes(note_id uuid PRIMARY KEY,workspace_id uuid NOT NULL,folder_id uuid,
+    deleted_by_folder_id uuid,title text NOT NULL,state text NOT NULL DEFAULT 'active',
+    note_revision_id uuid NOT NULL,updated_at timestamptz NOT NULL DEFAULT now());
+   CREATE INDEX notes_scope ON ${schema}.notes(workspace_id,state,updated_at,note_id);
+   CREATE INDEX notes_graph_page ON ${schema}.notes(workspace_id,note_id) WHERE state='active';
+   CREATE TABLE ${schema}.note_parts(note_id uuid PRIMARY KEY,content_markdown text NOT NULL);
+   CREATE TABLE ${schema}.note_resource_refs(note_id uuid NOT NULL,resource_id uuid NOT NULL);`);
+  const workspace=randomUUID(),owner=randomUUID(),folder=randomUUID(),note=randomUUID(),
+   rootNote=randomUUID(),revision=randomUUID(),attachment=randomUUID();
+  await tx.query(`INSERT INTO ${schema}.workspaces VALUES($1,$2)`,[workspace,owner]);
+  await tx.query(`INSERT INTO ${schema}.asset_folders VALUES($1,$2)`,[folder,workspace]);
+  await tx.query(`INSERT INTO ${schema}.notes(note_id,workspace_id,folder_id,deleted_by_folder_id,title,state,note_revision_id)
+    VALUES($1,$3,$4,$4,'old folder note','deleted',$5),($2,$3,NULL,NULL,'old root note','active',$5)`,
+   [note,rootNote,workspace,folder,revision]);
+  await tx.query(`INSERT INTO ${schema}.note_parts VALUES($1,'retained Markdown')`,[note]);
+  await tx.query(`INSERT INTO ${schema}.note_resource_refs VALUES($1,$2)`,[note,attachment]);
+
+  await tx.query('SAVEPOINT before_bad_link');
+  await tx.query(`UPDATE ${schema}.asset_folders SET workspace_id=$1`,[randomUUID()]);
+  await expect(tx.query(sql(19,schema))).rejects.toThrow('NOTE_FOLDER_SCOPE_MISMATCH');
+  await tx.query('ROLLBACK TO SAVEPOINT before_bad_link');
+  await tx.query(sql(19,schema));
+
+  expect((await tx.query(`SELECT note_id,user_id,note_revision_id,state FROM ${schema}.notes ORDER BY title`)).rows).toEqual([
+   {note_id:note,user_id:owner,note_revision_id:revision,state:'deleted'},
+   {note_id:rootNote,user_id:owner,note_revision_id:revision,state:'active'},
+  ]);
+  expect((await tx.query(`SELECT * FROM ${schema}.note_workspaces`)).rows).toEqual(expect.arrayContaining([
+   {workspace_id:workspace,note_id:note},{workspace_id:workspace,note_id:rootNote},
+  ]));
+  expect((await tx.query(`SELECT * FROM ${schema}.note_folders`)).rows)
+   .toEqual([{folder_id:folder,note_id:note,deleted_by_folder_id:folder}]);
+  expect((await tx.query(`SELECT * FROM ${schema}.note_parts`)).rows).toEqual([{note_id:note,content_markdown:'retained Markdown'}]);
+  expect((await tx.query(`SELECT * FROM ${schema}.note_resource_refs`)).rows).toEqual([{note_id:note,resource_id:attachment}]);
+  expect((await tx.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='notes' AND column_name IN ('workspace_id','folder_id','deleted_by_folder_id')",[schema])).rows).toEqual([]);
+  await tx.query(`INSERT INTO ${schema}.notes(note_id,user_id,title,note_revision_id) VALUES($1,$2,'unplaced content',$3)`,[randomUUID(),owner,randomUUID()]);
+  expect((await tx.query(`SELECT count(*)::int AS n FROM ${schema}.note_workspaces`)).rows[0].n).toBe(2);
+ }));
+ it('renames the version 19 model and allows assets to be read and updated with their original links',async()=>fixture(async(tx,schema)=>{
+  await tx.query(`SET LOCAL search_path TO ${schema}, pg_catalog`);
+  await tx.query('CREATE TABLE schema_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())');
+  for(const migration of migrations.filter(file=>file.version<=19)){
+   await tx.query(migration.sql.replace(/\bpublic\b/g,schema));
+  }
+  const userId=randomUUID(),workspaceId=randomUUID(),folderId=randomUUID(),assetId=randomUUID(),revisionId=randomUUID();
+  await tx.query("INSERT INTO workspaces(id,user_id,display_name,bootstrap_receipt_id) VALUES($1,$2,'seeded workspace',gen_random_uuid())",
+   [workspaceId,userId]);
+  await tx.query("INSERT INTO asset_folders(folder_id,workspace_id,display_name,normalized_name,current_revision_id) VALUES($1,$2,'seeded folder','seeded folder',gen_random_uuid())",
+   [folderId,workspaceId]);
+  await tx.query("INSERT INTO notes(note_id,user_id,title,note_revision_id,etag) VALUES($1,$2,'fixture asset',$3,'fixture-etag')",
+   [assetId,userId,revisionId]);
+  await tx.query('INSERT INTO note_workspaces(workspace_id,note_id) VALUES($1,$2)',[workspaceId,assetId]);
+  await tx.query('INSERT INTO note_folders(folder_id,note_id) VALUES($1,$2)',[folderId,assetId]);
+  await tx.query("INSERT INTO note_parts(part_revision_id,note_id,part,revision,content_markdown,content_sha256) VALUES(gen_random_uuid(),$1,'raw',1,'seeded Markdown',repeat('0',64))",
+   [assetId]);
+
+  await tx.query(sql(20,schema));
+
+  expect((await tx.query("SELECT to_regclass('notes') AS old_table")).rows[0].old_table).toBeNull();
+  expect((await tx.query(
+   `SELECT a.content_asset_id, a.user_id, a.content_asset_revision_id, f.folder_id, w.workspace_id, p.content_markdown
+     FROM content_assets a JOIN content_asset_parts p USING(content_asset_id)
+     JOIN content_asset_workspaces w USING(content_asset_id)
+     JOIN content_asset_folders f USING(content_asset_id) WHERE a.content_asset_id=$1`,[assetId],
+  )).rows).toEqual([{
+   content_asset_id:assetId,user_id:userId,content_asset_revision_id:revisionId,
+   folder_id:folderId,workspace_id:workspaceId,content_markdown:'seeded Markdown',
+  }]);
+  expect((await tx.query("UPDATE content_assets SET title='updated' WHERE content_asset_id=$1 RETURNING title",[assetId])).rows).toEqual([{title:'updated'}]);
+  expect((await tx.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='content_asset_folders' AND column_name='deleted_by_folder_id'",[schema])).rows).toEqual([]);
+ }));
 });

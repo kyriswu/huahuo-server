@@ -11,7 +11,7 @@ const MAX_REFS = 1000;
 const imageUuid = (value: string) => /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/iu.test(value);
 function parseInputImages(content: string) {
   try { return inputImages(content); }
-  catch { throw new DomainError(400, 'NOTE_IMAGE_MARKDOWN_INVALID'); }
+  catch { throw new DomainError(400, 'IMAGE_MARKDOWN_INVALID'); }
 }
 
 /** URL signatures are never an identity or authorization source. Only known
@@ -23,28 +23,28 @@ function imageTarget(value: string, config?: AppConfig): { id?: string; key?: st
   const candidate=identity.startsWith('asset://')?identity.slice(8):identity;
   const id=imageUuid(candidate)?candidate.toLowerCase():undefined;
   if (id) return { id };
-  if (value.startsWith('asset://')) throw new DomainError(400, 'NOTE_IMAGE_RESOURCE_INVALID');
+  if (value.startsWith('asset://')) throw new DomainError(400, 'IMAGE_RESOURCE_INVALID');
   let url: URL;
-  try { url = new URL(value); } catch { throw new DomainError(400, 'NOTE_IMAGE_UPLOAD_REQUIRED'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new DomainError(400, 'NOTE_IMAGE_UPLOAD_REQUIRED');
+  try { url = new URL(value); } catch { throw new DomainError(400, 'IMAGE_UPLOAD_REQUIRED'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new DomainError(400, 'IMAGE_UPLOAD_REQUIRED');
   if (!config) return undefined;
   try {
     const key = ownedObjectKey(value, config);
     return key === undefined ? undefined : { key };
-  } catch { throw new DomainError(400, 'NOTE_IMAGE_URL_INVALID'); }
+  } catch { throw new DomainError(400, 'IMAGE_URL_INVALID'); }
 }
 
 export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, workspaceId: string, parts: Record<string, string>, config?: AppConfig, claims?: ResourceClaims): Promise<NormalizedImageParts> {
   const parsed = Object.entries(parts).map(([part, text]) => ({ part, text, images: parseInputImages(text) }));
   const imageCount = parsed.reduce((total, part) => total + part.images.length, 0);
-  if (imageCount > MAX_REFS) throw new DomainError(400, 'NOTE_IMAGE_LIMIT_EXCEEDED');
+  if (imageCount > MAX_REFS) throw new DomainError(400, 'IMAGE_LIMIT_EXCEEDED');
   if (!imageCount) return { parts: { ...parts }, imageOrigins: [] };
   const oss = config?.storageAliyunOss;
   if (config?.storageDriver !== 'aliyun-oss' || !oss) throw new DomainError(503, 'DIRECT_READ_NOT_CONFIGURED');
   const targets = new Map<string, { id?: string; key?: string }>();
   for (const part of parsed) for (const image of part.images) {
     const target = imageTarget(image.url, config);
-    if (!target) throw new DomainError(400, 'NOTE_IMAGE_UPLOAD_REQUIRED');
+    if (!target) throw new DomainError(400, 'IMAGE_UPLOAD_REQUIRED');
     targets.set(image.url, target);
   }
   const ids = [...new Set([...targets.values()].flatMap(target => target.id ? [target.id] : []))];
@@ -63,7 +63,7 @@ export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, 
   for (const [url, target] of targets) {
     const row = target.id ? byId.get(target.id) : byKey.get(target.key!);
     if (!row) throw new DomainError(404, 'RESOURCE_NOT_FOUND');
-    if (!row.mime_type.startsWith('image/')) throw new DomainError(409, 'NOTE_RESOURCE_NOT_IMAGE');
+    if (!row.mime_type.startsWith('image/')) throw new DomainError(409, 'IMAGE_RESOURCE_NOT_IMAGE');
     replacements.set(url, row.resource_id);
   }
   return {

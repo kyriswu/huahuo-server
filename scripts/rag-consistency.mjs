@@ -6,8 +6,8 @@ import {createMilvusClient} from '../dist/integrations/search-index/milvus.js';
 const c=loadConfig('api-server'),pool=poolFor(c),client=createMilvusClient(c.milvus);
 try{
  await client.connectPromise;
- for(const mode of ['note-hybrid','document-keyword']){
-  const {builds,chunks}=tablesFor(mode),collection=mode==='note-hybrid'?c.kb.noteCollection:c.kb.documentCollection;
+ for(const mode of ['content-asset-hybrid','document-keyword']){
+  const {builds,chunks}=tablesFor(mode),collection=mode==='content-asset-hybrid'?c.kb.contentAssetCollection:c.kb.documentCollection;
   const versions=(await pool.query(`SELECT * FROM ${builds} WHERE published AND status='ready'`)).rows;const ids=[];
   for(const build of versions){const state=await sourceState(pool,build);if(state.deleted||state.revision!==build.source_revision)continue;ids.push(...(await pool.query(`SELECT point_id FROM ${chunks} WHERE build_id=$1 AND index_status='ready'`,[build.id])).rows.map(r=>r.point_id));}
   const pg=new Set(ids),found=new Set();

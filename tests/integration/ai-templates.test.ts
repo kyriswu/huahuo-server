@@ -7,7 +7,7 @@ import { buildAdminServer } from '../../src/apps/admin.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
 import { migrate } from '../../src/db/migrate.js';
 import type { AiTemplateCatalog } from '../../src/modules/ai-templates/catalog.js';
-import { AssetService } from '../../src/modules/assets/service.js';
+import { ContentAssetService } from '../../src/modules/content-assets/service.js';
 import { hashPassword } from '../../src/modules/identity/crypto.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { loadTestConfig } from '../sms-fixture.js';
@@ -51,9 +51,10 @@ const upstream = createServer(async (request, reply) => {
 });
 
 const adminOrigin = 'http://admin.test';
+const fixtureAdminId = randomUUID();
 let admin: Awaited<ReturnType<typeof buildAdminServer>>;
 let api: Awaited<ReturnType<typeof buildApiServer>>;
-let assets: AssetService;
+let contentAssets: ContentAssetService;
 let auth: Record<string, string>;
 let fixture: Awaited<ReturnType<typeof workspace>>;
 
@@ -86,21 +87,27 @@ beforeAll(async () => {
   admin = await buildAdminServer({ config: adminConfig });
   const assetPool = poolFor(apiConfig);
   api.addHook('onClose', () => assetPool.end());
-  assets = new AssetService(assetPool, apiConfig.appTokenSecret!);
+  contentAssets = new ContentAssetService(assetPool, apiConfig.appTokenSecret!);
   fixture = await workspace();
 
   const username = 'ai-template-' + randomUUID().slice(0, 8);
   const password = 'fixture-editor-password';
   await root.query("INSERT INTO admin_users(id,username,password_hash,role) VALUES($1,$2,$3,'operator')",
-    [randomUUID(), username, await hashPassword(password)]);
+    [fixtureAdminId, username, await hashPassword(password)]);
   const login = await admin.inject({ method: 'POST', url: '/admin/api/v1/login', headers: { origin: adminOrigin }, payload: { username, password } });
   expect(login.statusCode).toBe(200);
   auth = { origin: adminOrigin, cookie: String(login.headers['set-cookie']).split(';')[0]!, 'x-csrf-token': login.json().data.csrfToken };
 }, 20_000);
 
 afterAll(async () => {
-  await Promise.all([admin?.close(), api?.close(), root.end()]);
-  await new Promise<void>(resolve => upstream.close(() => resolve()));
+  try {
+    await Promise.all([admin?.close(), api?.close()]);
+    await root.query('DELETE FROM admin_sessions WHERE admin_id=$1', [fixtureAdminId]);
+    await root.query('DELETE FROM admin_audit_events WHERE admin_id=$1', [fixtureAdminId]);
+    await root.query('DELETE FROM admin_users WHERE id=$1', [fixtureAdminId]);
+  } finally {
+    await Promise.all([root.end(), new Promise<void>(resolve => upstream.close(() => resolve()))]);
+  }
 });
 
 const editor = '/api/v1/ai-template-scenes/editor_polish/items';
@@ -205,17 +212,19 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     expect(restored.statusCode).toBe(200);
     expect(restored.json().data.history[0]).toMatchObject({ restoredFrom: view.publishedRevision });
     expect((await groupList()).json().data.items[0].title).toBe('平等交流');
-    const audit = await root.query("SELECT action FROM admin_audit_events WHERE target_id='editor_polish' ORDER BY created_at");
+    const audit = await root.query(
+      "SELECT action FROM admin_audit_events WHERE target_id='editor_polish' ORDER BY (reason::jsonb->>'draftRevision')::int",
+    );
     expect(audit.rows.map(row => row.action)).toEqual(['ai_template.save', 'ai_template.publish', 'ai_template.restore']);
   });
 
   it('deduplicates generation, scopes results and invalidates outline status when raw content changes', async () => {
-    const note = await assets.createNote(fixture.scope, fixture.workspaceId, {
+    const contentAsset = await contentAssets.createContentAsset(fixture.scope, fixture.workspaceId, {
       title: '会议笔记', parts: { raw: '会议需要确认三项决定。' },
     }, randomUUID());
-    const input = { noteId: note.noteId, sourceRevision: note.parts.raw!.partRevisionId };
-    const payload = { sceneKey: 'note_outline', itemKey: 'work_meeting', input };
-    const statePath = `/api/v1/workspaces/${fixture.workspaceId}/notes/${note.noteId}/ai-outline-results`;
+    const input = { contentAssetId: contentAsset.contentAssetId, sourceRevision: contentAsset.parts.raw!.partRevisionId };
+    const payload = { sceneKey: 'content_asset_outline', itemKey: 'work_meeting', input };
+    const statePath = `/api/v1/workspaces/${fixture.workspaceId}/content-assets/${contentAsset.contentAssetId}/ai-outline-results`;
     const idempotency = randomUUID();
     const before = fakeCalls.length;
     const started = new Promise<void>(resolve => { arrived = resolve; });
@@ -248,13 +257,13 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     expect((await api.inject({ url: detailPath, headers: fixture.headers })).json().data).toEqual(success);
     const applied = await api.inject({
       method: 'PUT',
-      url: `/api/v1/workspaces/${fixture.workspaceId}/notes/${note.noteId}/parts/outline`,
-      headers: { ...fixture.headers, 'if-match': note.etag, 'x-idempotency-key': randomUUID() },
+      url: `/api/v1/workspaces/${fixture.workspaceId}/content-assets/${contentAsset.contentAssetId}/parts/outline`,
+      headers: { ...fixture.headers, 'if-match': contentAsset.etag, 'x-idempotency-key': randomUUID() },
       payload: { contentMarkdown: success.result.outlineMarkdown },
     });
     expect(applied.statusCode).toBe(200);
 
-    await assets.updateNote(fixture.scope, fixture.workspaceId, note.noteId, { parts: { raw: '原文更新' } }, applied.json().data.etag, randomUUID());
+    await contentAssets.updateContentAsset(fixture.scope, fixture.workspaceId, contentAsset.contentAssetId, { parts: { raw: '原文更新' } }, applied.json().data.etag, randomUUID());
     expect((await api.inject({ url: statePath, headers: fixture.headers })).json().data.items).toEqual([]);
     const stale = await generate(payload);
     expect(stale.statusCode).toBe(409);

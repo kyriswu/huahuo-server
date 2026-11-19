@@ -20,7 +20,7 @@ const RunResult = Envelope(Type.Object({
   ...runFields,
   state: Type.Literal('succeeded'),
   result: Type.Union([
-    Type.Object({ noteId: Id, sourceRevision: Id, outlineMarkdown: Type.String() }, Strict),
+    Type.Object({ contentAssetId: Id, sourceRevision: Id, outlineMarkdown: Type.String() }, Strict),
     Type.Object({ text: Type.String() }, Strict),
   ]),
 }));
@@ -112,17 +112,17 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
     return readRun(reply, await runs.get(scoped(req), workspaceId, runId), req.id);
   });
 
-  app.get('/api/v1/workspaces/:workspaceId/notes/:noteId/ai-outline-results', {
+  app.get('/api/v1/workspaces/:workspaceId/content-assets/:contentAssetId/ai-outline-results', {
     schema: {
-      params: Type.Object({ workspaceId: Id, noteId: Id }, Strict),
+      params: Type.Object({ workspaceId: Id, contentAssetId: Id }, Strict),
       response: { 200: Envelope(Type.Object({
-        noteId: Id, sourceRevision: Id,
+        contentAssetId: Id, sourceRevision: Id,
         items: Type.Array(Type.Object({ runId: Id, itemKey: ItemKeySchema, templateVersion: revision, generatedAt: Type.String() })),
       })), ...errors },
     },
   }, async req => {
-    const { workspaceId, noteId } = req.params as { workspaceId: string; noteId: string };
-    return success(await runs.outlineResults(scoped(req), workspaceId, noteId), req.id);
+    const { workspaceId, contentAssetId } = req.params as { workspaceId: string; contentAssetId: string };
+    return success(await runs.outlineResults(scoped(req), workspaceId, contentAssetId), req.id);
   });
 
   app.post(runPath, {

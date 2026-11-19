@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { extractBoundedTags, validateTagLabels, tagExtractorFor, type TagExtractor } from '../../src/modules/assets/tag-extractor.js';
+import { extractBoundedTags, validateTagLabels, tagExtractorFor, type TagExtractor } from '../../src/modules/content-assets/tag-extractor.js';
 import { loadConfig } from '../../src/config/config.js';
 import {validateValues} from '../../src/modules/runtime-settings/registry.js';
 import {config} from '../helpers.js';
-const input={noteId:'material',noteRevisionId:'revision',title:'title',rawText:'body'};
+const input={contentAssetId:'material',contentAssetRevisionId:'revision',title:'title',rawText:'body'};
 describe('tag provider boundary',()=>{
  it('normalizes only literal labels, validates types/count/Unicode/controls',()=>{
   expect(validateTagLabels([' ＡＩ ','ai','内容创作'])).toEqual(['AI','内容创作']);

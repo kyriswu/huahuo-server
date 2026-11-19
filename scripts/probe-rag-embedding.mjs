@@ -19,7 +19,7 @@ let runtime;
 try{const state=await new RuntimeSettings(pool,base).load();runtime=applyValues(base,state.values,state.revision);}finally{await pool.end();}
 const endpoint = new URL(`${env.RAG_EMBEDDING_BASE_URL?.replace(/\/$/u, '')}/services/embeddings/text-embedding/text-embedding`);
 if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || !env.RAG_EMBEDDING_API_KEY) throw new Error('EMBEDDING_PROBE_CONFIG_REQUIRED');
-const input = 'PostgreSQL MVCC 花火 Note latency probe';
+const input = 'PostgreSQL MVCC 花火 content asset latency probe';
 const body = JSON.stringify({ model: env.RAG_EMBEDDING_MODEL, input: { texts: [input] }, parameters: { text_type: 'document' } });
 const count = Number(env.EMBEDDING_PROBE_COUNT ?? 3);
 if (!Number.isInteger(count) || count < 1 || count > 20) throw new Error('PROBE_COUNT_INVALID');

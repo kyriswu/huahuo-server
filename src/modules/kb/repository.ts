@@ -21,12 +21,14 @@ export async function createBuild(tx:pg.PoolClient,source:KbSource,taskId:string
 }
 export async function sourceState(tx:pg.PoolClient,build:Pick<KbBuild,'source_type'|'source_id'|'user_id'|'workspace_id'>,lock=false):Promise<{revision:string;content?:string;uri?:string;deleted:boolean;format:'text'|'markdown'}>{
  const params=[build.source_id,build.user_id,build.workspace_id];
- if(build.source_type==='note'){
+ if(build.source_type==='content_asset'){
   const row=(await tx.query(`SELECT n.state,n.processing_status,p.part_revision_id::text AS revision,p.content_markdown AS content
-   FROM notes n JOIN workspaces w ON w.id=n.workspace_id AND w.user_id=$2 AND w.state='ready' JOIN users u ON u.id=w.user_id AND u.status='active' AND u.deleted_at IS NULL
-   LEFT JOIN note_parts p ON p.note_id=n.note_id AND p.part='raw'
-   WHERE n.note_id=$1 AND n.workspace_id=$3 ${lock?'FOR UPDATE OF n':''}`,params)).rows[0];
-  if(!row)throw new DomainError(404,'NOTE_NOT_FOUND');
+   FROM content_assets n JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$3
+   JOIN workspaces w ON w.id=m.workspace_id AND w.user_id=n.user_id AND w.state='ready'
+   JOIN users u ON u.id=n.user_id AND u.status='active' AND u.deleted_at IS NULL
+   LEFT JOIN content_asset_parts p ON p.content_asset_id=n.content_asset_id AND p.part='raw'
+   WHERE n.content_asset_id=$1 AND n.user_id=$2 ${lock?'FOR UPDATE OF n':''}`,params)).rows[0];
+  if(!row)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
   return {revision:row.revision??'',content:row.content??'',deleted:row.state!=='active'||row.processing_status!=='ready'||!String(row.content??'').trim(),format:'markdown'};
  }
  if(build.source_type==='file'){
@@ -54,4 +56,4 @@ export async function sourceContent(pool:pg.Pool,config:AppConfig,build:KbBuild)
  if(content===undefined||digest(content)!==build.content_hash)throw new Error('KB_BODY_CHANGED');
  return {type:build.source_type,id:build.source_id,revision:build.source_revision,userId:build.user_id,workspaceId:build.workspace_id,content,format:build.snapshot.format};
 }
-export const modeForSource=(type:KbSourceType)=>type==='note'?'note-hybrid':'document-keyword';
+export const modeForSource=(type:KbSourceType)=>type==='content_asset'?'content-asset-hybrid':'document-keyword';

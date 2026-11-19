@@ -61,7 +61,7 @@ async function counts() {
     (SELECT count(*) FROM users)::int AS users,
     (SELECT count(*) FROM user_sessions)::int AS sessions,
     (SELECT count(*) FROM workspaces)::int AS workspaces,
-    (SELECT count(*) FROM notes)::int AS notes,
+    (SELECT count(*) FROM content_assets)::int AS content_assets,
     (SELECT count(*) FROM resources)::int AS resources,
     (SELECT count(*) FROM tasks)::int AS tasks,
     (SELECT count(*) FROM task_outbox)::int AS outbox,

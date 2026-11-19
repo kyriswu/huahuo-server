@@ -8,14 +8,14 @@ vi.mock('../../dist/config/config.js', () => ({
   loadConfig: (role: string) => {
     // Match the real loader's role invariant: the external gate runs as API.
     if (role !== process.env.SERVICE_ROLE) throw new Error('INVALID_CONFIG:SERVICE_ROLE');
-    return { milvus: {}, kb: { noteCollection: 'notes', documentCollection: 'documents' } };
+    return { milvus: {}, kb: { contentAssetCollection: 'content_assets', documentCollection: 'documents' } };
   },
 }));
 vi.mock('../../dist/integrations/search-index/milvus.js', () => ({
   createMilvusClient: () => ({
     connectPromise: Promise.resolve(), closeConnection: fixtures.close,
     describeCollection: async ({ collection_name }: { collection_name: string }) => ({
-      status: { error_code: 'Success' }, schema: { fields: collection_name === 'notes'
+      status: { error_code: 'Success' }, schema: { fields: collection_name === 'content_assets'
         ? [{ name: 'dense_vector', data_type: fixtures.denseType, type_params: [{ key: 'dim', value: fixtures.dimension }] }] : [] },
     }),
     describeIndex: async () => ({ status: { error_code: 'Success' }, index_descriptions:

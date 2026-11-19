@@ -4,7 +4,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config/config.js';
 import { loadMigrationFiles } from '../../src/db/migration-files.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
-import { defaults, validateValues } from '../../src/modules/runtime-settings/registry.js';
+import { defaults } from '../../src/modules/runtime-settings/registry.js';
 
 const database = process.env.TEST_DATABASE_MIGRATION_URL;
 if (!database || !/^huahuo_test_[a-z0-9_]+$/u.test(new URL(database).pathname.slice(1))) throw new Error('ISOLATED_DATABASE_REQUIRED');
@@ -27,12 +27,21 @@ async function fixture(stored: unknown, run: (tx: PoolClient, schema: string, sq
 
 describe('strict runtime configuration migration in an isolated schema', () => {
   it('removes only reviewed retired keys once, retaining settings, primary key and role permissions', async () => {
-    const current = { ...defaults(), 'tasks.maxAttempts': 5 };
+    const {
+      'features.contentAssetIndexing': contentAssetIndexing,
+      'rag.contentAssetRerankBudgetMs': contentAssetRerankBudgetMs,
+      ...unchanged
+    } = defaults();
+    const current = {
+      ...unchanged,
+      'features.noteIndexing': contentAssetIndexing,
+      'rag.noteRerankBudgetMs': contentAssetRerankBudgetMs,
+      'tasks.maxAttempts': 5,
+    };
     await fixture({ ...current, $schemaVersion: 1, 'storage.maxSourceBytes': 200, 'tasks.downloadTimeoutMs': 1000 }, async (tx, schema, sql) => {
       await tx.query(sql);
       const rows = (await tx.query(`SELECT * FROM ${schema}.runtime_configuration`)).rows;
       expect(rows[0]).toMatchObject({ revision: '8', values: current });
-      expect(validateValues(rows[0].values, config)).toEqual(current);
       await tx.query(sql);
       expect((await tx.query(`SELECT * FROM ${schema}.runtime_configuration`)).rows).toEqual(rows);
       const object = `${schema}.runtime_configuration`;

@@ -29,10 +29,10 @@ export class RagImageLinks {
   async resolve(scope: Scope, input: RagImageRequest[]): Promise<ReadonlyMap<string, RagImageLink>> {
     const requests = [...new Map(input.map(image => [ragImageKey(image), image])).values()];
     const result = new Map<string, RagImageLink>();
-    const notes = requests.filter(image => image.sourceType === 'note');
+    const contentAssets = requests.filter(image => image.sourceType === 'content_asset');
     // Keep workspace ownership in the batched lookup, including multi-workspace searches.
-    for (const workspaceId of new Set(notes.map(image => image.workspaceId))) {
-      const group = notes.filter(image => image.workspaceId === workspaceId);
+    for (const workspaceId of new Set(contentAssets.map(image => image.workspaceId))) {
+      const group = contentAssets.filter(image => image.workspaceId === workspaceId);
       const links = new Map((await this.storage.playbacks(scope, group.map(image => image.resourceId), workspaceId)).filter(link => link.mimeType.startsWith('image/')).map(link => [link.resourceId, link]));
       for (const image of group) { const link = links.get(image.resourceId); if (link) result.set(ragImageKey(image), { url: link.url, expiresAt: link.expiresAt }); }
     }

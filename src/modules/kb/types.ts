@@ -1,6 +1,6 @@
 import type { VectorTarget } from '../../lib/rag-indexing/index.js';
-export type IndexMode='note-hybrid'|'document-keyword';
-export type KbSourceType='note'|'file'|'text';
+export type IndexMode='content-asset-hybrid'|'document-keyword';
+export type KbSourceType='content_asset'|'file'|'text';
 export interface KbSnapshot {
   mode:IndexMode; providerMode:'live'|'mock'|'disabled'; format:'markdown'|'text';
   businessStore:string; rules:{maxChars:number;overlapChars:number;version:'paragraph-sections'};
@@ -12,10 +12,10 @@ export interface KbSnapshot {
 }
 export interface KbSource {type:KbSourceType;id:string;revision:string;userId:string;workspaceId:string;content:string;format:'text'|'markdown';}
 export interface KbBuild {
- note_revision_id?:string;id:string; source_type:KbSourceType; source_id:string; source_revision:string; user_id:string;workspace_id:string;
+ content_asset_revision_id?:string;id:string; source_type:KbSourceType; source_id:string; source_revision:string; user_id:string;workspace_id:string;
  task_id:string;content_hash:string;config_hash:string;snapshot:KbSnapshot;status:string;published:boolean;
  cleanup_status:string;chunk_count:number;planned:boolean;toc_status:'pending'|'ready'|'failed';toc:import('../../lib/document-processing/types.js').TocItem[]|null;
 }
-export const tablesFor=(mode:IndexMode)=>mode==='note-hybrid'
- ? {builds:'kb_note_hybrid_builds',chunks:'kb_note_hybrid_chunks'} as const
+export const tablesFor=(mode:IndexMode)=>mode==='content-asset-hybrid'
+ ? {builds:'kb_content_asset_hybrid_builds',chunks:'kb_content_asset_hybrid_chunks'} as const
  : {builds:'kb_document_keyword_builds',chunks:'kb_document_keyword_chunks'} as const;

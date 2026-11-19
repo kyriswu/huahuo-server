@@ -8,9 +8,9 @@ import { TaskEngine } from './engine.js';
 import { StorageJobs } from '../storage/jobs.js';
 import { storageFor } from '../storage/port.js';
 import { BillingService } from '../billing/service.js';
-import { tagExtractorFor } from '../assets/tag-extractor.js';
+import { tagExtractorFor } from '../content-assets/tag-extractor.js';
 import type { TaskExecutor } from './execution.js';
-import { NoteIndexJobs } from '../ingestion/jobs.js';
+import { ContentAssetIndexJobs } from '../ingestion/jobs.js';
 import {RuntimeSettings} from '../runtime-settings/service.js';
 import {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
 import { withApplicationMetrics, type TaskMetrics } from '../../plugins/metrics.js';
@@ -25,7 +25,7 @@ export class TaskWorkers {
  private readonly uploads?:RedisTemporaryUploads;private readonly uploadCleaner?:TemporaryUploadCleaner;
  private draining?:Promise<void>;private closing?:Promise<void>;private active=0;
  private readonly nodeJobs:ProcessingNodeJobs;
- readonly connection:Redis;readonly workers:Worker[];private stopping=false;private readonly noteIndex:NoteIndexJobs;private readonly textIngestion:TextIngestionJobs;
+ readonly connection:Redis;readonly workers:Worker[];private stopping=false;private readonly contentAssetIndex:ContentAssetIndexJobs;private readonly textIngestion:TextIngestionJobs;
  constructor(
   pool: pg.Pool,
   config: AppConfig,
@@ -35,14 +35,14 @@ export class TaskWorkers {
  ){
   this.nodeJobs=new ProcessingNodeJobs(pool,config);
   this.connection=new Redis(config.redisQueueUrl,{maxRetriesPerRequest:null,connectTimeout:1500,retryStrategy:n=>Math.min(n*200,2000)});
-  this.connection.on('error',()=>undefined);this.noteIndex=new NoteIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const settings=new RuntimeSettings(pool,config);
+  this.connection.on('error',()=>undefined);this.contentAssetIndex=new ContentAssetIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const settings=new RuntimeSettings(pool,config);
   this.workers=config.workerQueues.map(name=>{
    const w=new Worker(name,async job=>{
     // A delivery already fetched during pause remains recoverable from the PG outbox.
     if(this.stopping)return;
     this.active++;
     try{return await withApplicationMetrics(metrics,()=>settings.run(async()=>{
-    const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config),config),tagExtractorFor(config.tagExtractorProvider),this.rag,this.noteIndex,this.textIngestion,this.nodeJobs,metrics);
+    const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config),config),tagExtractorFor(config.tagExtractorProvider),this.rag,this.contentAssetIndex,this.textIngestion,this.nodeJobs,metrics);
     if(typeof job.data.taskId!=='string'||!/^[a-f0-9-]{36}$/.test(job.data.taskId))return;
     if(this.stopping)return;
     const a=await engine.claim(job.data.taskId,config.instanceId);if(!a)return;

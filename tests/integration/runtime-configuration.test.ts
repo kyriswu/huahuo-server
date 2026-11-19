@@ -89,7 +89,7 @@ describe('categorized runtime configuration: real isolated PostgreSQL/Redis, no 
   let held:ReturnType<typeof request>|undefined;
   try{
    expect((await save('rag',{'rag.bm25Candidates':7})).statusCode).toBe(200);
-   for(const url of ['/api/v1/rag/query','/api/v1/kb/notes/query','/api/v1/kb/documents/query','/internal/v1/rag/query'])expect((await request(url)).statusCode).toBe(200);
+   for(const url of ['/api/v1/rag/query','/api/v1/kb/content-assets/query','/api/v1/kb/documents/query','/internal/v1/rag/query'])expect((await request(url)).statusCode).toBe(200);
    expect(observations).toHaveLength(4);expect(observations.every(o=>o.candidates===7&&typeof o.revision==='number')).toBe(true);
    held=request('/internal/v1/rag/query','held');void held.then(()=>undefined);await started;
    expect((await save('rag',{'rag.bm25Candidates':11})).statusCode).toBe(200);
@@ -356,7 +356,7 @@ describe('manual startup: durable tasks, event notifications and mock cloud only
 });
 
 describe('Admin-only document trial, no business ingestion',()=>{
- const counts=async()=>Object.fromEntries(await Promise.all(['notes','resources','rag_ingestion_versions','text_ingestion_jobs','kb_document_keyword_builds','kb_document_keyword_chunks','tasks','task_inputs','task_outbox','document_parse_callbacks','processing_node_assignments','admin_audit_events'].map(async table=>[table,Number((await root.query('SELECT count(*) AS n FROM '+table)).rows[0].n)])));
+ const counts=async()=>Object.fromEntries(await Promise.all(['content_assets','resources','rag_ingestion_versions','text_ingestion_jobs','kb_document_keyword_builds','kb_document_keyword_chunks','tasks','task_inputs','task_outbox','document_parse_callbacks','processing_node_assignments','admin_audit_events'].map(async table=>[table,Number((await root.query('SELECT count(*) AS n FROM '+table)).rows[0].n)])));
  it('checks admin session, superadmin and CSRF before accepting a trial',async()=>{
   expect((await app.inject('/admin/api/v1/document-trials/capabilities')).statusCode).toBe(401);
   expect((await app.inject({url:'/admin/api/v1/document-trials/capabilities',headers:{cookie:operatorCookie}})).statusCode).toBe(403);
