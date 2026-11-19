@@ -24,7 +24,9 @@ const total = (body: string, kind: string, result: string) => body.split('\n')
 const terminalTotal=(body:string,state:string)=>body.split('\n').filter(line=>line.startsWith('task_terminal_total{')&&line.includes(`state="${state}"`)).reduce((sum,line)=>sum+Number(line.split(' ').at(-1)),0);
 async function queued(kind = 'maintenance.check', queue: QueueName = 'maintenance') {
   const id = randomUUID();
-  await root.query("INSERT INTO tasks(trace_id,id,kind,queue,state,user_id,workspace_id) VALUES(gen_random_uuid()::text,$1,$2,$3,'queued',$4,$5)", [id, kind, queue, userId, workspaceId]); return id;
+  await root.query(`INSERT INTO tasks(trace_id,id,kind,queue,state,user_id,workspace_id,created_at)
+    VALUES(gen_random_uuid()::text,$1,$2,$3,'queued',$4,$5,now()-interval '1 second')`, [id, kind, queue, userId, workspaceId]);
+  return id;
 }
 beforeAll(async () => {
   await migrate(migrator); await insertFixtureUser(root, userId);
