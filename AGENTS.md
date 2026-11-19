@@ -6,6 +6,8 @@ Fastify + PostgreSQL + Redis，Node 26.11.0（Volta 管理）、严格 TypeScrip
 不得操作其他项目、删除现有数据卷、重置已有凭据、公开管理端或调用生产付费服务。
 保持真实依赖测试与 mock 单元测试的证据区别；测试库独立，不能清空开发库。
 
+涉及跨模块功能、公开接口、数据库、鉴权或异步任务时，首次编辑前用当前 Git worktree 的 CodeGraph 从真实入口核对调用方和下游。改完复查受影响的调用方并运行相关测试。MCP 不可用时，在当前 worktree 运行 `sh scripts/codegraph-worktree.sh explore <入口符号>`。索引不可用时，用当前源码核对并说明限制。文案和单文件小修直接核对源码。
+
 用户管理的内容统一称为资产（`ContentAsset`），原文件称为 `Resource`。资产归用户，工作区和文件夹关系单独表达。搜索实现的模式使用通用的 `hybrid`、`keyword`，业务来源可用于存储命名。新增代码、接口、数据库、日志和说明遵循 [资产与搜索术语](docs/content-assets.md)。
 
 域名入口、Nginx、Certbot 与证书自动续期由宿主机独立管理；相关配置、脚本及运维文档不放入本仓库，不接入应用、Worker、Scheduler、Compose 或项目部署脚本。项目只维护应用监听、公开 URL 和可信代理等应用配置。
