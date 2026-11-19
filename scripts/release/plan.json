@@ -1,7 +1,7 @@
 {
   "version": 1,
   "id": "20261119-free-writing-account",
-  "baseRevision": "c5e9ee45d5760e561d0abdd3311603ee93bc4d91",
+  "baseRevision": "21dcb90610a7590d7f621cc6b4dfad2361a797e7",
   "services": [
     "api-server",
     "admin",
