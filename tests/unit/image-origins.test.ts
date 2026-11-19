@@ -17,7 +17,7 @@ const original = `<KBIMAGE page='2' alt="图" uuid="${id}" title='说明' width=
 
 describe('editable Markdown image metadata recovery', () => {
   it('recovers the complete original node from its fingerprint despite expired playback tokens', () => {
-    const markdown = `before\n![图](https://notes.test/api/v1/media/resources/${id}/object?playbackToken=expired#kbimage=${hash(original)} "说明")\nafter`;
+    const markdown = `before\n![图](https://content-assets.test/api/v1/media/resources/${id}/object?playbackToken=expired#kbimage=${hash(original)} "说明")\nafter`;
     const prepared = prepare(markdown);
     expect(prepared.parts.raw).not.toContain('playbackToken');
     expect(prepared.parts.raw).not.toContain('#kbimage');
@@ -50,13 +50,13 @@ describe('editable Markdown image metadata recovery', () => {
     const otherAlt = original.replace('alt="图"', "alt='别名'");
     expect(restoreOwnedImageParts({ raw: `${original}\n${otherAlt}` }, prepare(`![图](asset://${id} "说明")`)).raw).toBe(original);
     const different = original.replace('OCR ![literal]', 'different OCR ![literal]');
-    expect(() => restoreOwnedImageParts({ raw: `${original}\n${different}` }, prepare(`![图](asset://${id})`))).toThrowError(expect.objectContaining({ code: 'NOTE_IMAGE_ORIGIN_AMBIGUOUS' }));
+    expect(() => restoreOwnedImageParts({ raw: `${original}\n${different}` }, prepare(`![图](asset://${id})`))).toThrowError(expect.objectContaining({ code: 'IMAGE_ORIGIN_AMBIGUOUS' }));
   });
   it('rejects unknown or mismatched fingerprints, including create with no source body', () => {
     const prepared = prepare(`![图](asset://${id}#kbimage=${hash(original)})`);
-    expect(() => restoreOwnedImageParts({}, prepared)).toThrowError(expect.objectContaining({ code: 'NOTE_IMAGE_ORIGIN_NOT_FOUND' }));
-    expect(() => restoreOwnedImageParts({ raw: original.replace('OCR', 'changed OCR') }, prepared)).toThrowError(expect.objectContaining({ code: 'NOTE_IMAGE_ORIGIN_NOT_FOUND' }));
-    expect(() => restoreOwnedImageParts({ raw: original }, prepare(`![图](asset://${other}#kbimage=${hash(original)})`, other))).toThrowError(expect.objectContaining({ code: 'NOTE_IMAGE_ORIGIN_NOT_FOUND' }));
+    expect(() => restoreOwnedImageParts({}, prepared)).toThrowError(expect.objectContaining({ code: 'IMAGE_ORIGIN_NOT_FOUND' }));
+    expect(() => restoreOwnedImageParts({ raw: original.replace('OCR', 'changed OCR') }, prepared)).toThrowError(expect.objectContaining({ code: 'IMAGE_ORIGIN_NOT_FOUND' }));
+    expect(() => restoreOwnedImageParts({ raw: original }, prepare(`![图](asset://${other}#kbimage=${hash(original)})`, other))).toThrowError(expect.objectContaining({ code: 'IMAGE_ORIGIN_NOT_FOUND' }));
     expect(() => inputImages(`![图](asset://${id}#kbimage=malformed)`)).toThrow('MARKDOWN_IMAGE_ORIGIN_INVALID');
   });
   it('accepts ordinary new images and already canonical input without recovery', () => {

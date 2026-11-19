@@ -4,9 +4,9 @@ Server 的 Admin 和 API 按各自的数据库账号使用同一个业务 Postgr
 `0013_ai_templates.sql` 写入 Figma 对应的笔记纲要、编辑器润色和社会关系转变子项。
 Admin 在「AI 模板配置」编辑展示内容、首屏数量、顺序、分组、启停和提示词。
 草稿和发布版本有各自的版本号。每次发布或回滚在同一事务写入一个新版本和发布审计。
-已开始的请求记录开始时读取的版本。模板项键可长期用于关联笔记结果。
+已开始的请求记录开始时读取的版本。模板项键可长期用于关联资产结果。
 
-提示词支持 `{{templateTitle}}`，笔记纲要也可用 `{{sourceTitle}}`。提示词与正文
+提示词支持 `{{templateTitle}}`，资产纲要也可用 `{{sourceTitle}}`。提示词与正文
 分别作为模型指令和用户文本传给 Agent。
 
 ## App
@@ -15,15 +15,15 @@ App 通过现有鉴权入口访问 Server，所有工作区路径校验登录会
 
 | 方法和路径 | 请求与结果 |
 | --- | --- |
-| `GET /api/v1/ai-template-scenes/:sceneKey/items` | 场景为 `note_outline` 或 `editor_polish`。可传 `parentKey=relation_shift` 读取二级目录。返回 `revision`、`title`、`displayLimit`、`totalCount` 和排序后的 `items`。每项包含 `itemKey`、`kind`、标题、副标题、图标和子项数。 |
-| `POST /api/v1/workspaces/:workspaceId/ai-template-runs` | 传 `sceneKey`、`itemKey`、`input` 与 `X-Idempotency-Key`。纲要输入为 `{noteId, sourceRevision}`，其中 `sourceRevision` 是笔记 `parts.raw.partRevisionId`。润色输入为 `{text}`。 |
+| `GET /api/v1/ai-template-scenes/:sceneKey/items` | 场景为 `content_asset_outline` 或 `editor_polish`。可传 `parentKey=relation_shift` 读取二级目录。返回 `revision`、`title`、`displayLimit`、`totalCount` 和排序后的 `items`。每项包含 `itemKey`、`kind`、标题、副标题、图标和子项数。 |
+| `POST /api/v1/workspaces/:workspaceId/ai-template-runs` | 传 `sceneKey`、`itemKey`、`input` 与 `X-Idempotency-Key`。纲要输入为 `{contentAssetId, sourceRevision}`，其中 `sourceRevision` 是资产 `parts.raw.partRevisionId`。润色输入为 `{text}`。 |
 | `GET /api/v1/workspaces/:workspaceId/ai-template-runs/:runId` | 读取同一用户的运行状态或结果。进行中返回 202，成功返回 200，失败使用 Server 错误信封。 |
-| `GET /api/v1/workspaces/:workspaceId/notes/:noteId/ai-outline-results` | 返回当前原文版本下每个已生成模板的最新成功记录，用于「已整理」。记录含 `itemKey`、`runId`、`templateVersion` 和生成时间。 |
+| `GET /api/v1/workspaces/:workspaceId/content-assets/:contentAssetId/ai-outline-results` | 返回当前原文版本下每个已生成模板的最新成功记录，用于「已整理」。记录含 `itemKey`、`runId`、`templateVersion` 和生成时间。 |
 
 成功的 `data` 包含 `runId`、`sceneKey`、`itemKey`、`templateVersion`、
 `state: "succeeded"` 和 `result`。润色结果为 `{text}`，纲要为
-`{noteId, sourceRevision, outlineMarkdown}`。用户选择应用纲要时，可调用
-现有笔记 `PUT /parts/outline` 并携带 `If-Match` 与新的保存幂等键。
+`{contentAssetId, sourceRevision, outlineMarkdown}`。用户选择应用纲要时，可调用
+现有资产 `PUT /parts/outline` 并携带 `If-Match` 与新的保存幂等键。
 
 同一个生成接口的 OpenAPI 成功响应提供 `application/json` 和 `text/event-stream`。
 App 每次调用通过 `Accept` 选择，所有模板都支持以下两种方式。

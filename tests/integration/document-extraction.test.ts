@@ -395,8 +395,9 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
    s.apiConfig.rag.providerMode='disabled';s.workerConfig.rag.providerMode='disabled';
    const service=new TextIngestionService(s.apiPool,s.apiConfig),job=await service.create(s.scope,{source_type:'FILE_UPLOAD',origin_resource_uri:baseUrl+'/source.'+ext},randomUUID());
    const row=(await root.query('SELECT current_task_id FROM text_ingestion_jobs WHERE id=$1',[job.id])).rows[0];
-   const engine=new TaskEngine(s.workerPool,120000,undefined,undefined,undefined,undefined,undefined,text),a=await engine.claim(row.current_task_id,randomUUID());expect(a).not.toBeNull();
-   expect(await s.run(a!,engine)).toBeUndefined();const saved=(await root.query('SELECT * FROM text_ingestion_jobs WHERE id=$1',[job.id])).rows[0];
+   const engine=new TaskEngine(s.workerPool,120000,undefined,undefined,undefined,undefined,undefined,text);
+   const attempt=await s.attempt(row.current_task_id);
+   expect(await s.run(attempt,engine)).toBeUndefined();const saved=(await root.query('SELECT * FROM text_ingestion_jobs WHERE id=$1',[job.id])).rows[0];
    expect(sourceReads).toBe(0);expect(postCount).toBe(1);expect(requests[0]!.inputs).toEqual([{kind:'uri',uri:baseUrl+'/source.'+ext,mime_type:mime}]);
    expect(saved.ingest_status).toBe('success');expect(saved.raw_content).toBe(lastResponse!.results[0]!.content);expect(requests[0]!.contexts).toEqual([{source_resource_id:job.id,parse_run_id:row.current_task_id}]);
   }finally{await text.close();await s.close();}

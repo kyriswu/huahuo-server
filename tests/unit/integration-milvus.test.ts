@@ -18,7 +18,7 @@ function fixture(){
   dropDatabase:vi.fn(async()=>{exists=false;return success;}),
  };
  const scoped={connectPromise:Promise.resolve(),closeConnection:vi.fn(async()=>undefined),
-  showCollections:vi.fn(async()=>({status:success,data:[{name:`huahuo_test_note_${runId}`},{name:`huahuo_test_document_${runId}`}]})),
+  showCollections:vi.fn(async()=>({status:success,data:[{name:`huahuo_test_content_asset_${runId}`},{name:`huahuo_test_document_${runId}`}]})),
   dropCollection:vi.fn(async()=>success),
  };
  const factory=vi.fn((options:{database:string})=>options.database==='default'?admin:scoped);
@@ -28,7 +28,7 @@ function fixture(){
 describe('isolated cloud Milvus acceptance tooling',()=>{
  it('allowlists connection inputs and requires an explicit proxy',()=>{
   const env={MILVUS_ADDRESS:connection.address,MILVUS_USERNAME:connection.username,MILVUS_PASSWORD:connection.password,MILVUS_TLS:'true',
-   MILVUS_DATABASE:'business',KB_NOTE_HYBRID_COLLECTION:'business_notes',DATABASE_URL:'private-sql',RAG_EMBEDDING_API_KEY:'private-model',grpc_proxy:'http://host.docker.internal:1082'};
+   MILVUS_DATABASE:'business',KB_CONTENT_ASSET_HYBRID_COLLECTION:'business_content_assets',DATABASE_URL:'private-sql',RAG_EMBEDDING_API_KEY:'private-model',grpc_proxy:'http://host.docker.internal:1082'};
   expect(cloudMilvusConfig(env)).toEqual(connection);
   expect(cloudMilvusConfig({...env,TEST_MILVUS_GRPC_PROXY:'http://127.0.0.1:1082'}).proxy).toBe('http://127.0.0.1:1082');
   expect(()=>cloudMilvusConfig({...env,MILVUS_PASSWORD:''})).toThrow('TEST_CLOUD_MILVUS_CONFIG_REQUIRED');
@@ -44,7 +44,7 @@ describe('isolated cloud Milvus acceptance tooling',()=>{
   expect(f.factory.mock.calls.map(([options])=>options.database)).toEqual(['default',database]);
   await f.runner.cleanup();
   expect(f.scoped.dropCollection.mock.calls).toEqual([
-   [{db_name:database,collection_name:`huahuo_test_note_${runId}`}],
+   [{db_name:database,collection_name:`huahuo_test_content_asset_${runId}`}],
    [{db_name:database,collection_name:`huahuo_test_document_${runId}`}],
   ]);
   expect(f.admin.dropDatabase).toHaveBeenCalledExactlyOnceWith({db_name:database});
@@ -69,7 +69,7 @@ describe('isolated cloud Milvus acceptance tooling',()=>{
   expect(f.admin.closeConnection).toHaveBeenCalledOnce();expect(f.scoped.closeConnection).toHaveBeenCalledOnce();
  });
  it('refuses every deletion if an unexpected collection is found',async()=>{
-  const f=fixture();await f.runner.create();f.scoped.showCollections.mockResolvedValue({status:success,data:[{name:`huahuo_test_note_${runId}`},{name:'business_notes'}]});
+  const f=fixture();await f.runner.create();f.scoped.showCollections.mockResolvedValue({status:success,data:[{name:`huahuo_test_content_asset_${runId}`},{name:'business_content_assets'}]});
   await expect(f.runner.cleanup()).rejects.toThrow('TEST_CLOUD_MILVUS_UNEXPECTED_COLLECTION');
   expect(f.scoped.dropCollection).not.toHaveBeenCalled();expect(f.admin.dropDatabase).not.toHaveBeenCalled();
  });
@@ -82,9 +82,9 @@ describe('isolated cloud Milvus acceptance tooling',()=>{
   const f=fixture(),env=await f.runner.create(),cfg=loadConfig('api-server',baseEnv);
   configureTestMilvus(cfg,env);
   expect(cfg.milvus).toMatchObject({address:connection.address,username:connection.username,password:connection.password,database,tls:true,createIfMissing:true});
-  expect(cfg.kb.noteCollection).toBe(`huahuo_test_note_${runId}`);expect(cfg.kb.documentCollection).toBe(`huahuo_test_document_${runId}`);
+  expect(cfg.kb.contentAssetCollection).toBe(`huahuo_test_content_asset_${runId}`);expect(cfg.kb.documentCollection).toBe(`huahuo_test_document_${runId}`);
   expect(()=>configureTestMilvus(cfg,{...env,TEST_MILVUS_DATABASE:'default'})).toThrow('ISOLATED_CLOUD_MILVUS_REQUIRED');
-  expect(()=>configureTestMilvus(cfg,{...env,TEST_MILVUS_NOTE_COLLECTION:'business_notes'})).toThrow('ISOLATED_CLOUD_MILVUS_REQUIRED');
+  expect(()=>configureTestMilvus(cfg,{...env,TEST_MILVUS_CONTENT_ASSET_COLLECTION:'business_content_assets'})).toThrow('ISOLATED_CLOUD_MILVUS_REQUIRED');
   expect(()=>configureTestMilvus(cfg,{...env,TEST_MILVUS_PASSWORD:''})).toThrow('TEST_MILVUS_CONFIG_REQUIRED');
   await f.runner.cleanup();
  });

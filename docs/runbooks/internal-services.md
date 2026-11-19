@@ -37,10 +37,10 @@ Server 的业务 Service 继续在事务边界检查真实账号、会话、归�
 请求使用 `Content-Type: application/json`，严格 Schema 不接受未知字段。公开和内部 RAG 共用请求、响应 Schema、handler 与运行时配置快照，不维护内部默认值分支。
 
 ```json
-{"query":"查找相关内容","sourceType":"note","mode":"hybrid","assetMode":"ids","topK":7}
+{"query":"查找相关内容","sourceType":"content_asset","mode":"hybrid","assetMode":"ids","topK":7}
 ```
 
-`query` 为1—2000字符；可选 `sourceType` 为 `note/file`（file查询现同时覆盖file/text真实来源），`mode` 为 `dense/keyword/hybrid`，`assetMode` 为 `ids/links`，`topK` 为1—50整数，`documentKey` 最多128字符。未传字段由当前业务配置决定。文件与导入文本执行其现有关键词检索策略，不因为协议收敛新增模型行为。只在明确需要图片 URL 时传 `assetMode: links`。
+`query` 为1—2000字符；可选 `sourceType` 为 `content_asset/file`（file查询现同时覆盖file/text真实来源），`mode` 为 `dense/keyword/hybrid`，`assetMode` 为 `ids/links`，`topK` 为1—50整数，`documentKey` 最多128字符。未传字段由当前业务配置决定。文件与导入文本执行其现有关键词检索策略，不因为协议收敛新增模型行为。只在明确需要图片 URL 时传 `assetMode: links`。
 
 普通业务成功响应为 `{success:true,data,traceId}`；RAG data 为 `{mode,query,results}`。失败使用对应4xx/5xx和 `{success:false,error:{code,message,userMessageKey,retryable},traceId}`。调用方按状态、success 与 error.code 判断，不能解析人类 message 当协议。gateway认证的204与注销的专用响应属于明确例外；不包装成RAG Envelope。
 

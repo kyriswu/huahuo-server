@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
 import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
 import { scopedConfig } from '../modules/runtime-settings/service.js';
-import { NOTE_EMBEDDING_MODEL, NOTE_EMBEDDING_PROFILE, NOTE_EMBEDDING_MAX_BATCH_SIZE, NOTE_RERANK_MODEL } from '../modules/rag/model-profile.js';
+import { CONTENT_ASSET_EMBEDDING_MODEL, CONTENT_ASSET_EMBEDDING_PROFILE, CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_RERANK_MODEL } from '../modules/rag/model-profile.js';
 export type Role = 'api-server' | 'admin' | 'worker' | 'scheduler' | 'migrate';
 export type Env = Record<string, string | undefined>;
 export interface AppConfig {
@@ -42,7 +42,7 @@ export interface AppConfig {
   storageAliyunOss?: { endpoint:string; publicEndpoint?:string; region:string; bucket:string; accessKeyId:string; accessKeySecret:string; secure:boolean; timeoutMs:number; keyPrefix?:string; maxBytes:number };
   milvus: MilvusConfig;
   rag: RagConfig;
-  kb: { noteEnabled: boolean; noteCollection: string; documentCollection: string };
+  kb: { contentAssetEnabled: boolean; contentAssetCollection: string; documentCollection: string };
 }
 export interface MilvusConfig {
   address?: string;
@@ -76,7 +76,7 @@ export interface RagConfig {
   rerankApiKey?: string;
   rerankModel: string;
   rerankTimeoutMs: number;
-  noteRerankBudgetMs: number;
+  contentAssetRerankBudgetMs: number;
 }
 export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   const fail = (key: string): never => { throw new Error(`INVALID_CONFIG:${key}`); };
@@ -154,10 +154,10 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     plainTextMaxChars: 50_000,
     ...(env.RAG_EMBEDDING_BASE_URL?.trim() ? { embeddingBaseUrl: env.RAG_EMBEDDING_BASE_URL.trim() } : {}),
     ...(env.RAG_EMBEDDING_API_KEY?.trim() ? { embeddingApiKey: env.RAG_EMBEDDING_API_KEY.trim() } : {}),
-    embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || NOTE_EMBEDDING_MODEL,
+    embeddingModel: env.RAG_EMBEDDING_MODEL?.trim() || CONTENT_ASSET_EMBEDDING_MODEL,
     embeddingDimensions: integer('RAG_EMBEDDING_DIMENSIONS', 1024, 1024, 1024),
-    embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || NOTE_EMBEDDING_PROFILE,
-    embeddingBatchSize: NOTE_EMBEDDING_MAX_BATCH_SIZE,
+    embeddingProfile: env.RAG_EMBEDDING_PROFILE?.trim() || CONTENT_ASSET_EMBEDDING_PROFILE,
+    embeddingBatchSize: CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE,
     indexingConcurrency: 2,
     embeddingTimeoutMs: 30_000,
     embeddingMaxRetries: 2,
@@ -165,9 +165,9 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     rerankProvider: ((env.RAG_RERANK_PROVIDER?.trim() || 'disabled') as RagConfig['rerankProvider']),
     ...(env.RAG_RERANK_BASE_URL?.trim() ? { rerankBaseUrl: env.RAG_RERANK_BASE_URL.trim() } : {}),
     ...(env.RAG_RERANK_API_KEY?.trim() ? { rerankApiKey: env.RAG_RERANK_API_KEY.trim() } : {}),
-    rerankModel: env.RAG_RERANK_MODEL?.trim() || NOTE_RERANK_MODEL,
+    rerankModel: env.RAG_RERANK_MODEL?.trim() || CONTENT_ASSET_RERANK_MODEL,
     rerankTimeoutMs: 30_000,
-    noteRerankBudgetMs: 200,
+    contentAssetRerankBudgetMs: 200,
   };
   for(const [key,value] of [['RAG_EMBEDDING_BASE_URL',rag.embeddingBaseUrl],['RAG_RERANK_BASE_URL',rag.rerankBaseUrl]] as const){
     if(!value)continue;try{const endpoint=new URL(value);if(!['http:','https:'].includes(endpoint.protocol)||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||(appEnv==='production'&&endpoint.protocol!=='https:'))fail(key);}catch{fail(key);}
@@ -175,14 +175,14 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   if (!['disabled', 'mock', 'http'].includes(rag.rerankProvider)) fail('RAG_RERANK_PROVIDER');
   if (rag.rerankProvider === 'mock' && (appEnv === 'production' || env.ALLOW_MOCK_PROVIDERS !== 'true')) fail('RAG_RERANK_PROVIDER');
   if (rag.rerankProvider === 'http' && (!rag.rerankBaseUrl || !rag.rerankApiKey)) fail('RAG_RERANK_CONFIG');
-  if(rag.embeddingModel!==NOTE_EMBEDDING_MODEL||rag.embeddingProfile!==NOTE_EMBEDDING_PROFILE)fail('RAG_EMBEDDING_PROFILE');
-  if(rag.rerankProvider==='http'&&rag.rerankModel!==NOTE_RERANK_MODEL)fail('RAG_RERANK_MODEL');
+  if(rag.embeddingModel!==CONTENT_ASSET_EMBEDDING_MODEL||rag.embeddingProfile!==CONTENT_ASSET_EMBEDDING_PROFILE)fail('RAG_EMBEDDING_PROFILE');
+  if(rag.rerankProvider==='http'&&rag.rerankModel!==CONTENT_ASSET_RERANK_MODEL)fail('RAG_RERANK_MODEL');
   const kb = {
-    noteEnabled: false,
-    noteCollection: env.KB_NOTE_HYBRID_COLLECTION?.trim() || 'huahuo_kb_note_hybrid_chunks',
+    contentAssetEnabled: false,
+    contentAssetCollection: env.KB_CONTENT_ASSET_HYBRID_COLLECTION?.trim() || 'huahuo_kb_note_hybrid_chunks',
     documentCollection: env.KB_DOCUMENT_KEYWORD_COLLECTION?.trim() || 'huahuo_kb_keyword_chunks',
   };
-  if(kb.noteCollection===kb.documentCollection||![kb.noteCollection,kb.documentCollection].every(v=>/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(v)))fail('KB_COLLECTIONS');
+  if(kb.contentAssetCollection===kb.documentCollection||![kb.contentAssetCollection,kb.documentCollection].every(v=>/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(v)))fail('KB_COLLECTIONS');
   const maxUploadBytes=100*1024*1024;
   const uploadHardMaxBytes=integer('HTTP_UPLOAD_HARD_MAX_BYTES',2*1024*1024*1024,100*1024*1024,2*1024*1024*1024);
   const httpRequestTimeoutMs=integer('HTTP_REQUEST_TIMEOUT_MS',60_000,1_000,600_000);

@@ -51,10 +51,10 @@ describe('role configuration',()=>{
   expect(loadConfig('api-server',env).milvus.searchConcurrency).toBe(50);
   for(const value of [0,-1,1.5,51,NaN])expect(()=>validateValues({'rag.searchConcurrency':value},loadConfig('api-server',env))).toThrow('CONFIGURATION_INVALID');
  });
- it('sets a separate 200ms Note rerank budget without changing other rerank timeouts',()=>{
-  expect(loadConfig('api-server',env).rag).toMatchObject({noteRerankBudgetMs:200,rerankTimeoutMs:30000});
-  expect(applyValues(loadConfig('api-server',env),{'rag.noteRerankBudgetMs':350},1).rag.noteRerankBudgetMs).toBe(350);
-  for(const value of [0,-1,1.5,30001,NaN])expect(()=>validateValues({'rag.noteRerankBudgetMs':value},loadConfig('api-server',env))).toThrow('CONFIGURATION_INVALID');
+ it('sets a separate 200ms content asset rerank budget without changing other rerank timeouts',()=>{
+  expect(loadConfig('api-server',env).rag).toMatchObject({contentAssetRerankBudgetMs:200,rerankTimeoutMs:30000});
+  expect(applyValues(loadConfig('api-server',env),{'rag.contentAssetRerankBudgetMs':350},1).rag.contentAssetRerankBudgetMs).toBe(350);
+  for(const value of [0,-1,1.5,30001,NaN])expect(()=>validateValues({'rag.contentAssetRerankBudgetMs':value},loadConfig('api-server',env))).toThrow('CONFIGURATION_INVALID');
  });
  it('configures native Milvus recall budgets and the fixed Qwen native FP16 profile',()=>{
   const cfg=loadConfig('api-server',env);

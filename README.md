@@ -26,7 +26,7 @@ Server 进程本身不要求本机安装 CUDA 或 GPU；解析和模型服务按
 | 能力 | 依赖与配置边界 |
 | --- | --- |
 | 文件存储 | `StoragePort` 支持本地卷、阿里云 OSS、S3；同机 API/Worker 可共用本地卷，跨主机不能各用一份不共享的目录 |
-| 知识库 | 保留现有 Milvus 入库与查询实现、Note Embedding 和可选重排；搜索产品细节待定，现有技术参数不作为需求 |
+| 知识库 | 保留现有 Milvus 入库与查询实现、资产正文向量 和可选重排；搜索产品细节待定，现有技术参数不作为需求 |
 | PDF / Office | Xberg 解析服务；按后台节点配置调用常驻 API 或按需唤醒 ECS，内网地址须在实际运行环境可达 |
 | 短信登录 | 阿里云 SMS 的 RAM 凭据、已审核签名和模板；默认不因启动服务就发送短信 |
 | Agent 等服务 | 内部地址直连，传递可信用户/会话身份；不携带 JWT 或 ServiceKey |
@@ -52,7 +52,7 @@ flowchart LR
     Worker --> Files
     Worker -.文档解析.-> Parser[Xberg 解析服务]
     Worker --> Index[Milvus]
-    Worker -.笔记向量化.-> Models[Embedding / Rerank API]
+    Worker -.资产正文向量化.-> Models[Embedding / Rerank API]
     API --> Index
     API -.现有查询实现.-> Models
 ```

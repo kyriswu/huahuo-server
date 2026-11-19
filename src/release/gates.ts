@@ -7,6 +7,7 @@ import { loadConfig, type AppConfig, type Env, type Role } from '../config/confi
 import { preflightMigrations } from '../db/migrate.js';
 import { createDependencies, isReady, poolFor } from '../plugins/dependencies.js';
 import { RuntimeSettings } from '../modules/runtime-settings/service.js';
+import { DEFAULT_DRAIN_TIMEOUT_MS, DRAIN_TIMEOUT_KEY, MAX_DRAIN_TIMEOUT_MS } from '../modules/runtime-settings/registry.js';
 import { readConfigurationCheck, type ReleasePlan } from './plan.js';
 
 const execute = promisify(execFile);
@@ -48,13 +49,18 @@ export async function checkReleaseHistory(config: AppConfig, plan: ReleasePlan, 
   if (history.current === 0) fail('RELEASE_DATABASE_NOT_INITIALIZED');
   const declared = new Set(plan.database.migrations.map(file => Number(file.slice(0, 4))));
   if (history.pending.some(version => !declared.has(version))) fail('RELEASE_UNDECLARED_MIGRATION');
-  // This is a read-only policy lookup, before the new migrations are required.
-  // Missing optional keys use the candidate's reviewed registry defaults.
+  // The running release must drain before migrations can rename its runtime settings.
   const pool = poolFor(config); pool.on('error', () => undefined);
   try {
-    const state = await new RuntimeSettings(pool, config).load();
-    const drainTimeoutMs = Number(state.values['deployment.drainTimeoutMs']);
-    if (!Number.isSafeInteger(drainTimeoutMs) || drainTimeoutMs < 600000 || drainTimeoutMs > 3600000) fail('RELEASE_DRAIN_POLICY_INVALID');
+    const { rows } = await pool.query<{ timeout_ms: unknown }>(`SELECT
+      COALESCE("values" -> $1::text, to_jsonb($2::integer)) AS timeout_ms
+      FROM public.runtime_configuration WHERE singleton=true AND jsonb_typeof("values")='object'`,
+    [DRAIN_TIMEOUT_KEY, DEFAULT_DRAIN_TIMEOUT_MS]);
+    const drainTimeoutMs = rows[0]?.timeout_ms;
+    if (typeof drainTimeoutMs !== 'number' || !Number.isSafeInteger(drainTimeoutMs)
+      || drainTimeoutMs < DEFAULT_DRAIN_TIMEOUT_MS || drainTimeoutMs > MAX_DRAIN_TIMEOUT_MS) {
+      return fail('RELEASE_DRAIN_POLICY_INVALID');
+    }
     return { ...history, drainTimeoutMs };
   } finally { await pool.end(); }
 }

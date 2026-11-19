@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "id": "20261117-debt-cleanup",
-  "baseRevision": "c2a1897701531d1eba42bc555a165b39161a359d",
+  "id": "20261119-content-assets",
+  "baseRevision": "740fb8b74c99ddb7668183194e78418f0e6de50e",
   "services": [
     "api-server",
     "admin",
@@ -10,23 +10,20 @@
   ],
   "database": {
     "migrations": [
-      "0014_retire_processing_node_enabled.sql",
-      "0015_folder_deletion_origin.sql",
-      "0016_strict_runtime_configuration.sql",
-      "0017_disable_placeholder_maintenance.sql",
-      "0018_bearer_auth_cache_events.sql"
+      "0019_note_ownership_and_organization.sql",
+      "0020_content_asset_naming.sql"
     ],
-    "verifySql": "scripts/release/changes/20261117-debt-cleanup/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261119-content-assets/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "Remove only explicitly retired configuration metadata and node admission flags with bounded row-count guards; add nullable folder-deletion provenance without guessing history; disable the single bootstrap maintenance-check-v1 placeholder schedule while retaining its history and all other schedules. The Bearer cache migration adds commit-time invalidation notifications without a data backfill. No business-content backfill or physical foreign keys. Existing search functionality is retained as technical implementation; its product behavior is not finalized. This candidate is incompatible with old writers and old API consumers: stop/drain old roles before migration through a separately reviewed maintenance release. No shared or target database has been modified."
+      "reason": "Move ownership to the content asset and represent workspace visibility and folder placement as separate relations. Rename persisted asset identifiers, settings and task payloads in place. The test database preflight found no legacy assets, references, index builds or unfinished tasks, so no separate cleanup or backfill is scheduled. Stop all old Server roles and shared-database writers before the incompatible migrations."
     }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [
       {
-        "key": "PROVIDER_MODE",
+        "key": "KB_NOTE_HYBRID_COLLECTION",
         "operation": "remove",
         "roles": [
           "api-server",
@@ -38,8 +35,8 @@
         "hasDefault": false
       },
       {
-        "key": "DEV_AUTH_BYPASS",
-        "operation": "remove",
+        "key": "KB_CONTENT_ASSET_HYBRID_COLLECTION",
+        "operation": "add",
         "roles": [
           "api-server",
           "admin",
@@ -47,91 +44,7 @@
           "scheduler"
         ],
         "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "ALLOW_DEV_AUTH",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "PAYMENT_PROVIDER",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "ASR_PROVIDER",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "WORKFLOW_PROVIDER",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "PUSH_PROVIDER",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "APP_JWT_PREVIOUS_PUBLIC_KEY",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
-      },
-      {
-        "key": "APP_JWT_PREVIOUS_KEY_ID",
-        "operation": "remove",
-        "roles": [
-          "api-server",
-          "admin",
-          "worker",
-          "scheduler"
-        ],
-        "required": false,
-        "hasDefault": false
+        "hasDefault": true
       }
     ],
     "reviewedFiles": [
@@ -140,8 +53,11 @@
       ".env.example",
       ".env.compose.cloud.example",
       ".env.compose.local.example",
-      ".env.host.example"
-    ]
+      ".env.host.example",
+      "specs/backend-plan/examples/.env.compose.cloud.example",
+      "specs/backend-plan/examples/.env.compose.local.example"
+    ],
+    "verifyFile": "scripts/release/changes/20261119-content-assets/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {

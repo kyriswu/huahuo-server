@@ -1,4 +1,4 @@
-/** Acquisition method, distinct from the RAG business source (`note` / `file`). */
+/** Acquisition method, distinct from the RAG business source (`content_asset` / `file`). */
 export const TEXT_INGESTION_MAX_CHARS = 50_000;
 export const TEXT_INGESTION_MAX_URI_LENGTH = 4096;
 

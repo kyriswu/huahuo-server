@@ -44,7 +44,7 @@ describe('RAG query ranking helpers', () => {
     }
   });
 
-  it('cancels a slow HTTP reranker at the Note deadline and retains Milvus order', async () => {
+  it('cancels a slow HTTP reranker at the content asset deadline and retains Milvus order', async () => {
     vi.useFakeTimers();
     try {
       let signal: AbortSignal | undefined;

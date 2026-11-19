@@ -117,6 +117,16 @@ describe('release database gates on real isolated PostgreSQL', () => {
       expect((await pool.query('SELECT version FROM public.schema_migrations ORDER BY version')).rows).toEqual(expectedHistory);
     } finally { plan.database.migrations = []; await rm(path); }
   });
+  it('reads the drain budget even while the database holds the old release settings', async () => {
+    const snapshot = (await pool.query('SELECT "values" FROM public.runtime_configuration WHERE singleton=true')).rows[0].values;
+    await pool.query(`UPDATE public.runtime_configuration SET "values"="values" || $1::jsonb WHERE singleton=true`,
+      [JSON.stringify({ 'rag.noteRerankBudgetMs': 200, 'deployment.drainTimeoutMs': 720_000 })]);
+    try {
+      await expect(checkReleaseHistory(migrator, await loadFixture(), directory)).resolves.toMatchObject({ drainTimeoutMs: 720_000 });
+    } finally {
+      await pool.query('UPDATE public.runtime_configuration SET "values"=$1 WHERE singleton=true', [JSON.stringify(snapshot)]);
+    }
+  });
   it('runs the fixed zero-foreign-key assertion and the declared SQL with the actual application account', async () => {
     plan.database.verifySql = 'scripts/release/changes/gate-test/verify-db.sql';
     await writeFile(join(directory, plan.database.verifySql), `SELECT 'fixture_read' AS check_name,count(*)=1 AS ok FROM public.${table}`);

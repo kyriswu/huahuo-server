@@ -8,7 +8,7 @@ import { AdminApiError, adminRequest } from './session';
 type Item = Catalog['items'][number];
 type SceneView = Awaited<ReturnType<AiTemplateCatalog['get']>>;
 const scenes = [
-  { key: 'note_outline', label: '笔记纲要' },
+  { key: 'content_asset_outline', label: '资产纲要' },
   { key: 'editor_polish', label: '编辑器润色' },
 ] as const;
 const fallbackMessages: Record<string, string> = {
@@ -58,7 +58,7 @@ function CatalogPreview({ catalog }: { catalog: Catalog }) {
 }
 
 export function AiTemplatesPage({ csrfToken, onSessionExpired }: { csrfToken: string; onSessionExpired: () => void }) {
-  const [scene, setScene] = useState<SceneKey>('note_outline');
+  const [scene, setScene] = useState<SceneKey>('content_asset_outline');
   const [view, setView] = useState<SceneView>();
   const [catalog, setCatalog] = useState<Catalog>();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);

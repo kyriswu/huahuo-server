@@ -43,7 +43,7 @@ Scheduler每轮只读取一次运行配置，上传过期清理、任务恢复�
 
 正式运行路径不再读取旧 `DOCUMENT_PARSER_*`、`DOCUMENT_EXTRACTION_*`、`BILLING_POLICY_VERSION`、`TAG_EXTRACTOR_PROVIDER`、`MAX_UPLOAD_BYTES`、`STORAGE_QUOTA_BYTES`、`RAG_INGESTION_ENABLED`、`RAG_MAX_SOURCE_BYTES`、`RAG_DOWNLOAD_TIMEOUT_MS`。旧ENV加载器已删除；节点和提取配置只通过显式类型化构造器创建，不提供旧ENV兼容入口。既有非秘密业务值已核对导入当前开发库；本轮RAG参数同样先保存当前生效值、再清理主ENV，不覆盖已有后台设置。旧私有核对副本位于 `.local/runtime-config/previous-nonsecret-settings.json`，本轮记录在 `.local/env-cleanup/`。
 
-RAG运行参数也只读数据库：`rag.denseCandidates`、`rag.bm25Candidates`、`rag.hybridCandidates`、`rag.rrfK`、`rag.searchConcurrency`、`rag.embeddingBatchSize`、`rag.indexConcurrency`、`rag.embeddingTimeoutMs`、`rag.embeddingMaxRetries`、`rag.rerankTimeoutMs`、`rag.noteRerankBudgetMs`、`rag.plainTextMaxChars`；Note开关是 `features.noteIndexing`。对应旧ENV、Compose注入及示例已清理，没有环境变量回退。修改后新查询生效；检索参数变化会替换缓存客户端，旧客户端等在途查询结束才关闭，不积累空闲历史客户端。已创建索引构建的批次/并发/时限/重试沿用原快照。
+RAG运行参数也只读数据库：`rag.denseCandidates`、`rag.bm25Candidates`、`rag.hybridCandidates`、`rag.rrfK`、`rag.searchConcurrency`、`rag.embeddingBatchSize`、`rag.indexConcurrency`、`rag.embeddingTimeoutMs`、`rag.embeddingMaxRetries`、`rag.rerankTimeoutMs`、`rag.contentAssetRerankBudgetMs`、`rag.plainTextMaxChars`；资产索引开关是 `features.contentAssetIndexing`。对应旧ENV、Compose注入及示例已清理，没有环境变量回退。修改后新查询生效；检索参数变化会替换缓存客户端，旧客户端等在途查询结束才关闭，不积累空闲历史客户端。已创建索引构建的批次/并发/时限/重试沿用原快照。
 
 仍保留本地/云端Compose和宿主调试模板，因为角色URL、Profile和宿主地址各有用途；独立GPU预检配置及Xberg镜像运行模板属于不同进程，不是后台数据库配置的重复来源。`grpc_proxy` 是SDK传输环境，继续保留。应用无人读取的 `TOOL_TOKEN_SECRET`、`INTERNAL_API_BASE_URL`、`TOOLS_PUBLIC_BASE_URL` 和早已失效的分块/分析器ENV声明已删除，未改现用JWT/服务密钥/RAM凭据。
 

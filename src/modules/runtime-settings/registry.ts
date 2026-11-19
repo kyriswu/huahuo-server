@@ -7,18 +7,18 @@ export const MAX_DRAIN_TIMEOUT_MS=3600000;
 export interface SettingDefinition {key:string;category:Category;label:string;description:string;type:'number'|'boolean'|'select'|'string';default:unknown;min?:number;max?:number;options?:string[];effect:string;}
 export const settings:SettingDefinition[]=[
  {key:DRAIN_TIMEOUT_KEY,category:'deployment',label:'服务排空上限（毫秒）',description:'旧服务最多等待10–60分钟；工作完成后立即退出，达到上限强制结束。首次排空信号固定本次预算，重复停止信号不延长。',type:'number',min:DEFAULT_DRAIN_TIMEOUT_MS,max:MAX_DRAIN_TIMEOUT_MS,default:DEFAULT_DRAIN_TIMEOUT_MS,effect:'用于后续排空；发布期间请勿调整，不改变已开始的排空预算'},
- {key:'rag.denseCandidates',category:'rag',label:'向量召回候选数',description:'Note 混合检索中向量分支的候选数量。',type:'number',min:1,max:200,default:20,effect:'后续查询，执行中查询保持原参数'},
+ {key:'rag.denseCandidates',category:'rag',label:'向量召回候选数',description:'资产混合检索中向量分支的候选数量。',type:'number',min:1,max:200,default:20,effect:'后续查询，执行中查询保持原参数'},
  {key:'rag.bm25Candidates',category:'rag',label:'关键词召回候选数',description:'BM25 关键词分支的候选数量；最终返回数量仍由请求 topK 决定。',type:'number',min:1,max:200,default:20,effect:'后续查询'},
  {key:'rag.hybridCandidates',category:'rag',label:'混合检索候选数',description:'融合后送入权限复核与可选重排的候选预算。',type:'number',min:1,max:200,default:30,effect:'后续查询'},
  {key:'rag.rrfK',category:'rag',label:'RRF 融合平滑参数',description:'控制多路排序融合对名次差异的敏感程度；不是返回条数。',type:'number',min:1,max:10000,default:60,effect:'后续混合查询'},
  {key:'rag.searchConcurrency',category:'rag',label:'检索客户端并发上限',description:'每个缓存检索客户端的并发预算，不是集群总额度；旧请求完成后释放旧客户端。',type:'number',min:1,max:50,default:50,effect:'后续查询客户端，不中断执行中查询'},
- {key:'rag.embeddingBatchSize',category:'rag',label:'Embedding 索引批次',description:'Note 单次百炼请求最多20条，构建快照会将较大配置限制为20；资料关键词模式不调用 Embedding。',type:'number',min:1,max:256,default:20,effect:'新索引构建快照'},
+ {key:'rag.embeddingBatchSize',category:'rag',label:'Embedding 索引批次',description:'资产索引单次百炼请求最多20条，构建快照会将较大配置限制为20。资料关键词模式不调用 Embedding。',type:'number',min:1,max:256,default:20,effect:'新索引构建快照'},
  {key:'rag.indexConcurrency',category:'rag',label:'索引批次并发',description:'单次索引构建中的批次并发，独立于 Worker 队列并发。',type:'number',min:1,max:16,default:2,effect:'新索引构建快照'},
  {key:'rag.embeddingTimeoutMs',category:'rag',label:'Embedding 超时（毫秒）',description:'索引构建和查询向量请求的执行时限。',type:'number',min:1000,max:600000,default:30000,effect:'新索引构建快照及后续查询'},
  {key:'rag.embeddingMaxRetries',category:'rag',label:'Embedding 索引重试次数',description:'单批索引的额外尝试上限；查询保持现有不自动重试约定。',type:'number',min:0,max:5,default:2,effect:'新索引构建快照'},
  {key:'rag.rerankTimeoutMs',category:'rag',label:'重排请求超时（毫秒）',description:'已配置重排服务时使用的 HTTP 执行时限。',type:'number',min:1000,max:600000,default:30000,effect:'后续查询'},
- {key:'rag.noteRerankBudgetMs',category:'rag',label:'Note 重排等待预算（毫秒）',description:'超出预算沿用已授权召回顺序，不把等待预算当作服务调用超时。',type:'number',min:1,max:30000,default:200,effect:'后续 Note 查询'},
- {key:'rag.plainTextMaxChars',category:'rag',label:'手动正文字符上限',description:'手动文本和 Note 正文索引的字符数上限；不用于外部文件解析。',type:'number',min:1,max:5000000,default:50000,effect:'新执行批次'},
+ {key:'rag.contentAssetRerankBudgetMs',category:'rag',label:'资产重排等待预算（毫秒）',description:'超出预算沿用已授权召回顺序，不把等待预算当作服务调用超时。',type:'number',min:1,max:30000,default:200,effect:'后续资产查询'},
+ {key:'rag.plainTextMaxChars',category:'rag',label:'手动正文字符上限',description:'手动文本和资产正文索引的字符数上限。',type:'number',min:1,max:5000000,default:50000,effect:'新执行批次'},
  {key:'tasks.maxAttempts',category:'tasks',label:'自动执行次数上限',description:'包含首次执行；只应用到新建任务。',type:'number',min:1,max:9,default:3,effect:'新建任务'},
  {key:'tasks.retryBaseMs',category:'tasks',label:'重试基础间隔（毫秒）',description:'指数退避并保留抖动，未知外部结果不自动重提交。',type:'number',min:100,max:60000,default:1000,effect:'新执行批次'},
  {key:'tasks.retryMaxMs',category:'tasks',label:'重试最大间隔（毫秒）',description:'必须不小于基础间隔。',type:'number',min:100,max:3600000,default:60000,effect:'新执行批次'},
@@ -27,7 +27,7 @@ export const settings:SettingDefinition[]=[
  {key:'storage.quotaBytes',category:'storage',label:'用户存储额度（字节）',description:'当前统一额度；不自动删除已有对象。',type:'number',min:1,max:Number.MAX_SAFE_INTEGER,default:1073741824,effect:'后续容量检查'},
  {key:'billing.policyVersion',category:'billing',label:'计费策略版本',description:'选择已有不可变策略；历史账户和账本不重写。',type:'string',default:'credit-policy-v1',effect:'后续新发放/预留，沿用现有计费规则'},
  {key:'features.documentIngestion',category:'features',label:'文档入库',description:'控制资料受理，继续使用现有关键词流水线。',type:'boolean',default:true,effect:'后续请求'},
- {key:'features.noteIndexing',category:'features',label:'Note 正文索引',description:'控制后续正文修改是否创建索引任务，不删除已有索引或取消执行中任务。',type:'boolean',default:false,effect:'后续正文变更请求'},
+ {key:'features.contentAssetIndexing',category:'features',label:'资产正文索引',description:'控制后续正文修改是否创建索引任务，不删除已有索引或取消执行中任务。',type:'boolean',default:false,effect:'后续正文变更请求'},
  {key:'features.tagProvider',category:'features',label:'标签提取提供器',description:'生产禁用 deterministic；LLM/Dify 适配器尚未接入，选择后仍会明确失败。',type:'select',options:['disabled','llm','dify','deterministic'],default:'disabled',effect:'新执行批次'},
 ];
 export type Values=Record<string,unknown>;
@@ -64,9 +64,9 @@ export function applyValues(base:AppConfig,values:Values,revision:number):AppCon
   billingPolicyVersion:v['billing.policyVersion'] as string,tagExtractorProvider:v['features.tagProvider'] as AppConfig['tagExtractorProvider'],
   rag:{...base.rag,enabled:v['features.documentIngestion'] as boolean,
    plainTextMaxChars:Number(v['rag.plainTextMaxChars']),embeddingBatchSize:Number(v['rag.embeddingBatchSize']),indexingConcurrency:Number(v['rag.indexConcurrency']),
-   embeddingTimeoutMs:Number(v['rag.embeddingTimeoutMs']),embeddingMaxRetries:Number(v['rag.embeddingMaxRetries']),rerankTimeoutMs:Number(v['rag.rerankTimeoutMs']),noteRerankBudgetMs:Number(v['rag.noteRerankBudgetMs'])},
+   embeddingTimeoutMs:Number(v['rag.embeddingTimeoutMs']),embeddingMaxRetries:Number(v['rag.embeddingMaxRetries']),rerankTimeoutMs:Number(v['rag.rerankTimeoutMs']),contentAssetRerankBudgetMs:Number(v['rag.contentAssetRerankBudgetMs'])},
   milvus:{...base.milvus,searchConcurrency:Number(v['rag.searchConcurrency']),denseCandidates:Number(v['rag.denseCandidates']),bm25Candidates:Number(v['rag.bm25Candidates']),hybridCandidates:Number(v['rag.hybridCandidates']),rrfK:Number(v['rag.rrfK'])},
-  kb:{...base.kb,noteEnabled:v['features.noteIndexing'] as boolean},
+  kb:{...base.kb,contentAssetEnabled:v['features.contentAssetIndexing'] as boolean},
   taskPolicy:{maxAttempts:Number(v['tasks.maxAttempts']),retryBaseMs:Number(v['tasks.retryBaseMs']),retryMaxMs:Number(v['tasks.retryMaxMs']),
    concurrency:Object.fromEntries(['content','ai','commercial','maintenance'].map(q=>[q,Number(v[`tasks.concurrency.${q}`])])) as AppConfig['taskPolicy']['concurrency']}};
 }

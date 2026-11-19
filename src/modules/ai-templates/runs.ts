@@ -8,11 +8,11 @@ import { listCatalog, MaxPromptChars, MaxSourceChars, renderPrompt, visibleTempl
 
 type RunRow = {
   id: string; scene_key: SceneKey; item_key: string; template_version: number;
-  note_id: string | null; source_revision: string | null; request_hash: string; expired: boolean;
+  content_asset_id: string | null; source_revision: string | null; request_hash: string; expired: boolean;
   state: 'running' | 'succeeded' | 'failed'; result_text: string | null; error_code: string | null; error_status: number | null;
 };
 type Source = { title: string; content_markdown: string; part_revision_id: string };
-const fields = `id, scene_key, item_key, template_version, note_id, source_revision, request_hash,
+const fields = `id, scene_key, item_key, template_version, content_asset_id, source_revision, request_hash,
   state, result_text, error_code, error_status, deadline_at <= clock_timestamp() AS expired`;
 
 export const RunTimeoutMs = 90_000;
@@ -24,18 +24,19 @@ async function assertWorkspace(tx: pg.PoolClient, scope: Scope, workspaceId: str
   if (!result.rowCount) throw new DomainError(404, 'WORKSPACE_NOT_FOUND');
 }
 
-async function readSource(tx: pg.PoolClient, workspaceId: string, noteId: string, includeContent = false) {
-  // Note mutations lock the note before changing its parts.
-  const { rows: [note] } = await tx.query<{ title: string }>(
-    "SELECT title FROM notes WHERE workspace_id=$1 AND note_id=$2 AND state='active' FOR SHARE", [workspaceId, noteId],
+async function readSource(tx: pg.PoolClient, userId: string, workspaceId: string, contentAssetId: string, includeContent = false) {
+  // Lock the content asset before reading its parts, matching the write path.
+  const { rows: [contentAsset] } = await tx.query<{ title: string }>(
+    `SELECT n.title FROM content_assets n JOIN content_asset_workspaces m ON m.content_asset_id=n.content_asset_id AND m.workspace_id=$1
+     WHERE n.content_asset_id=$2 AND n.user_id=$3 AND n.state='active' FOR SHARE OF n`, [workspaceId, contentAssetId, userId],
   );
-  if (!note) throw new DomainError(404, 'NOTE_NOT_FOUND');
+  if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
   const { rows: [part] } = await tx.query<Omit<Source, 'title'>>(
     `SELECT CASE WHEN $2 THEN content_markdown ELSE '' END AS content_markdown, part_revision_id
-     FROM note_parts WHERE note_id=$1 AND part='raw'`, [noteId, includeContent],
+     FROM content_asset_parts WHERE content_asset_id=$1 AND part='raw'`, [contentAssetId, includeContent],
   );
-  if (!part) throw new DomainError(404, 'NOTE_PART_NOT_FOUND');
-  return { ...note, ...part };
+  if (!part) throw new DomainError(404, 'CONTENT_ASSET_PART_NOT_FOUND');
+  return { ...contentAsset, ...part };
 }
 
 function assertSourceRevision(source: Source, revision: string) {
@@ -64,8 +65,8 @@ export function runData(row: RunRow) {
   if (row.state === 'failed') throw new DomainError(row.error_status!, row.error_code!);
   const base = { runId: row.id, sceneKey: row.scene_key, itemKey: row.item_key, templateVersion: row.template_version };
   if (row.state === 'running') return { ...base, state: 'running' as const };
-  const result = row.scene_key === 'note_outline'
-    ? { noteId: row.note_id!, sourceRevision: row.source_revision!, outlineMarkdown: row.result_text! }
+  const result = row.scene_key === 'content_asset_outline'
+    ? { contentAssetId: row.content_asset_id!, sourceRevision: row.source_revision!, outlineMarkdown: row.result_text! }
     : { text: row.result_text! };
   return { ...base, state: 'succeeded' as const, result };
 }
@@ -93,7 +94,7 @@ export class AiTemplateRuns {
       );
       if (previous) {
         if (previous.request_hash !== requestHash) throw new DomainError(409, 'IDEMPOTENCY_CONFLICT');
-        if (previous.note_id) await readSource(tx, workspaceId, previous.note_id);
+        if (previous.content_asset_id) await readSource(tx, scope.userId, workspaceId, previous.content_asset_id);
         return { run: await expireRun(tx, previous) };
       }
 
@@ -102,14 +103,14 @@ export class AiTemplateRuns {
       if (!template) throw new DomainError(404, 'AI_TEMPLATE_UNAVAILABLE');
       if (!executorAvailable) throw new DomainError(503, 'AI_TEMPLATE_EXECUTOR_UNAVAILABLE');
 
-      let noteId: string | null = null;
+      let contentAssetId: string | null = null;
       let sourceRevision: string | null = null;
       let sourceTitle = '';
       let text: string;
-      if (request.sceneKey === 'note_outline') {
-        const source = await readSource(tx, workspaceId, request.input.noteId, true);
+      if (request.sceneKey === 'content_asset_outline') {
+        const source = await readSource(tx, scope.userId, workspaceId, request.input.contentAssetId, true);
         assertSourceRevision(source, request.input.sourceRevision);
-        noteId = request.input.noteId;
+        contentAssetId = request.input.contentAssetId;
         sourceRevision = source.part_revision_id;
         sourceTitle = source.title;
         text = source.content_markdown;
@@ -125,11 +126,11 @@ export class AiTemplateRuns {
       }
       const { rows: [run] } = await tx.query<RunRow>(
         `INSERT INTO ai_template_runs (id, user_id, workspace_id, scene_key, item_key, template_version,
-          note_id, source_revision, idempotency_key, request_hash, trace_id, deadline_at)
+          content_asset_id, source_revision, idempotency_key, request_hash, trace_id, deadline_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp()+$12*interval '1 millisecond')
          RETURNING ${fields}`,
         [randomUUID(), scope.userId, workspaceId, request.sceneKey, template.itemKey, revision,
-          noteId, sourceRevision, key, requestHash, scope.traceId, RunTimeoutMs + 5_000],
+          contentAssetId, sourceRevision, key, requestHash, scope.traceId, RunTimeoutMs + 5_000],
       );
       return { run: run!, input: { prompt, text } };
     });
@@ -139,7 +140,7 @@ export class AiTemplateRuns {
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
       await assertWorkspace(tx, scope, workspaceId);
-      if (run.note_id) assertSourceRevision(await readSource(tx, workspaceId, run.note_id), run.source_revision!);
+      if (run.content_asset_id) assertSourceRevision(await readSource(tx, scope.userId, workspaceId, run.content_asset_id), run.source_revision!);
       signal.throwIfAborted();
       const { rows: [row] } = await tx.query<RunRow>(
         `UPDATE ai_template_runs SET state='succeeded', result_text=$2, finished_at=clock_timestamp()
@@ -163,24 +164,24 @@ export class AiTemplateRuns {
         [runId, workspaceId, scope.userId],
       );
       if (!row) throw new DomainError(404, 'AI_TEMPLATE_RUN_NOT_FOUND');
-      if (row.note_id) await readSource(tx, workspaceId, row.note_id);
+      if (row.content_asset_id) await readSource(tx, scope.userId, workspaceId, row.content_asset_id);
       return expireRun(tx, row);
     });
   }
 
-  outlineResults(scope: Scope, workspaceId: string, noteId: string) {
+  outlineResults(scope: Scope, workspaceId: string, contentAssetId: string) {
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
       await assertWorkspace(tx, scope, workspaceId);
-      const source = await readSource(tx, workspaceId, noteId);
+      const source = await readSource(tx, scope.userId, workspaceId, contentAssetId);
       const { rows } = await tx.query<{ id: string; item_key: string; template_version: number; finished_at: Date }>(
         `SELECT DISTINCT ON (item_key) id, item_key, template_version, finished_at FROM ai_template_runs
-         WHERE workspace_id=$1 AND note_id=$2 AND source_revision=$3 AND user_id=$4
-           AND scene_key='note_outline' AND state='succeeded'
-         ORDER BY item_key, finished_at DESC, id DESC`, [workspaceId, noteId, source.part_revision_id, scope.userId],
+         WHERE workspace_id=$1 AND content_asset_id=$2 AND source_revision=$3 AND user_id=$4
+           AND scene_key='content_asset_outline' AND state='succeeded'
+         ORDER BY item_key, finished_at DESC, id DESC`, [workspaceId, contentAssetId, source.part_revision_id, scope.userId],
       );
       return {
-        noteId,
+        contentAssetId,
         sourceRevision: source.part_revision_id,
         items: rows.map(row => ({
           runId: row.id, itemKey: row.item_key, templateVersion: row.template_version, generatedAt: row.finished_at.toISOString(),

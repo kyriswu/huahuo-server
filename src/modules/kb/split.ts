@@ -37,20 +37,20 @@ export function embeddingText(content: string, headings: string[]): string {
     .replace(/https?:\/\/[^\s)]+/giu,'');
 }
 /** Both modes preserve original UTF-16 positions. Keyword never receives a tokenizer. */
-export async function splitKnowledgeContent(content: string, mode: 'note-hybrid'|'document-keyword', options: {
+export async function splitKnowledgeContent(content: string, mode: 'content-asset-hybrid'|'document-keyword', options: {
   format?:'text'|'markdown'; structure?:DocumentStructure; tokenizer?:TokenCounter;
 } = {}): Promise<{chunks:KbDraft[];structure?:DocumentStructure}> {
-  const max=mode==='note-hybrid'?500:2000;
-  const structure=mode==='note-hybrid' ? options.structure ?? await analyzeDocumentStructure(content,{format:options.format??'markdown'}) : undefined;
+  const max=mode==='content-asset-hybrid'?500:2000;
+  const structure=mode==='content-asset-hybrid' ? options.structure ?? await analyzeDocumentStructure(content,{format:options.format??'markdown'}) : undefined;
   const ranges=structure?.toc.length ? structure.ranges : paragraphs(content,0,content.length);
   const chunks:KbDraft[]=[];
-  if(mode==='note-hybrid'&&!options.tokenizer)throw new Error('KB_TOKENIZER_REQUIRED');
+  if(mode==='content-asset-hybrid'&&!options.tokenizer)throw new Error('KB_TOKENIZER_REQUIRED');
   for(const range of ranges){
     let cursor=range.sourceStart;
     while(cursor<range.sourceEnd){
       const previous=chunks.at(-1);
       let start=cursor;
-      if(mode==='note-hybrid'&&previous&&previous.coreEnd===cursor&&previous.coreStart>=range.sourceStart){
+      if(mode==='content-asset-hybrid'&&previous&&previous.coreEnd===cursor&&previous.coreStart>=range.sourceStart){
         const overlap=boundaries(content,previous.coreStart,cursor);
         start=overlap[Math.max(0,overlap.length-1-50)]!;
       }
@@ -58,11 +58,11 @@ export async function splitKnowledgeContent(content: string, mode: 'note-hybrid'
       let end=cut(content,cursor,points[Math.min(max,points.length-1)]!,range.sourceEnd);
       if(end<=cursor){start=cursor;const core=boundaries(content,cursor,range.sourceEnd,max);end=core[Math.min(max,core.length-1)]!;}
       let raw=content.slice(start,end);
-      let input=mode==='note-hybrid'?embeddingText(raw,range.headingPath):raw;
-      let tokens=mode==='note-hybrid'?await options.tokenizer!.count(input):0;
+      let input=mode==='content-asset-hybrid'?embeddingText(raw,range.headingPath):raw;
+      let tokens=mode==='content-asset-hybrid'?await options.tokenizer!.count(input):0;
       // Shrink generated context first; if necessary split the source without dropping a codepoint.
-      if(mode==='note-hybrid'&&tokens>options.tokenizer!.maxInputTokens){input=embeddingText(raw,[]);tokens=await options.tokenizer!.count(input);}
-      while(mode==='note-hybrid'&&tokens>options.tokenizer!.maxInputTokens){
+      if(mode==='content-asset-hybrid'&&tokens>options.tokenizer!.maxInputTokens){input=embeddingText(raw,[]);tokens=await options.tokenizer!.count(input);}
+      while(mode==='content-asset-hybrid'&&tokens>options.tokenizer!.maxInputTokens){
         const core=boundaries(content,cursor,end);
         if(core.length<=2)throw new Error('KB_MODEL_INPUT_TOO_LONG');
         end=core[Math.max(1,Math.floor((core.length-1)/2))]!;

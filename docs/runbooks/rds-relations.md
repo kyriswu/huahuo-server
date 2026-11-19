@@ -19,21 +19,21 @@ PostgreSQL / RDS 使用普通关联 ID 和查询索引，不创建物理外键�
 | 客户端会话 | `user_sessions.user_id → users.id`；客户端由 `client_type + client_id` 描述 |
 | 刷新令牌 | `refresh_tokens.session_id → user_sessions.id`；服务层处理轮转、撤销和复用检测 |
 | 协议接受 | `user_agreement_acceptances.user_id/session_id`；记录协议与隐私版本及接受入口 |
-| 业务归属 | `workspaces.user_id`；Note、Folder、资源、任务与账务分别保存明确的所属 ID |
-| 笔记内容 | `note_part_revisions.note_id`、标签映射、资源引用和显式关系由笔记业务校验 |
+| 业务归属 | `workspaces.user_id`；资产、Folder、资源、任务与账务分别保存明确的所属 ID |
+| 资产内容 | `content_asset_parts.content_asset_id`、标签映射、资源引用和显式关系由资产业务校验 |
 | 文件 RAG | `kb_document_keyword_builds.source_type/source_id` 指向所属整篇资料；分段只存构建 ID 与位置 |
-| 笔记 RAG | `kb_note_hybrid_builds.source_id` 指向整篇 `notes`；修订定位真实 raw part，分段不存正文 |
+| 资产 RAG | `kb_content_asset_hybrid_builds.source_id` 指向整篇 `content_assets`；修订定位真实 raw part，分段不存正文 |
 
 箭头表示应用语义，不是物理外键声明。普通关联字段建立与实际过滤、连接和清理路径匹配的索引；不为替代外键增加全局关系模拟器或逐请求全表扫描。
 
 ## 应用层校验与删除
 
 - Identity 统一验证 JWT、用户 active 状态、数据库会话和撤销；业务层不能用请求中的裸 userId 覆盖身份。
-- Workspace、Note、Folder 和 Tag 写入在所属业务事务内检查目标、归属与 ETag；来源或 Workspace 不匹配时拒绝。
-- 资源绑定复用 `attachResource()`，校验资源和真实 Workspace 归属，并与删除使用同一资源行锁。Note 的资源引用与引用计数在同一事务中写入。
+- Workspace、资产、Folder 和 Tag 写入在所属业务事务内检查目标、归属与 ETag；来源或 Workspace 不匹配时拒绝。
+- 资源绑定复用 `attachResource()`，校验资源和真实 Workspace 归属，并与删除使用同一资源行锁。资产 的资源引用与引用计数在同一事务中写入。
 - 上传完成核对 Workspace、预留额度的用户/资源键/大小，以及资源与上传的实际关联。存储任务创建和执行都核对目标及用户/Workspace 范围。
 - Billing 在写入额度前验证 active 用户，并检查任务、Run、预留额度的归属和关联一致性。
-- Note、Folder、Resource 保留软删除语义；标签集合替换只删除映射，显式关系删除只删除该叶关系。不存在依赖数据库 CASCADE 硬删这些主记录的运行路径。
+- 资产、Folder、Resource 保留软删除语义；标签集合替换只删除映射，显式关系删除只删除该叶关系。不存在依赖数据库 CASCADE 硬删这些主记录的运行路径。
 - RAG 清理固定来源、整篇 ID、修订、稳定 Chunk ID 和原目标；失败保持可重试状态，不能扩大范围。
 
 如果未来新增主记录硬删除，所属业务必须显式设计子记录清理和失败恢复；不能恢复物理外键或依赖隐藏级联。

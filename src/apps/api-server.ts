@@ -12,11 +12,11 @@ import { registerBillingRoutes } from '../modules/billing/routes.js';
 import { StorageService } from '../modules/storage/service.js';
 import { RedisTemporaryUploads } from '../modules/storage/temporary-uploads.js';
 import { ResourceClaims } from '../modules/storage/resource-claims.js';
-import { registerAssetRoutes } from '../modules/assets/routes.js';
-import { AssetService } from '../modules/assets/service.js';
+import { registerContentAssetRoutes } from '../modules/content-assets/routes.js';
+import { ContentAssetService } from '../modules/content-assets/service.js';
 import { registerStorageRoutes } from '../modules/storage/routes.js';
 import { registerIngestionRoutes } from '../modules/ingestion/routes.js';
-import { NoteIndexService } from '../modules/ingestion/service.js';
+import { ContentAssetIndexService } from '../modules/ingestion/service.js';
 import { registerRagRoutes } from '../modules/rag/routes.js';
 import { RagIngestionRepository } from '../modules/rag/repository.js';
 import { RagQueryService, type RagQueryDependencies } from '../modules/rag/query-service.js';
@@ -66,7 +66,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  if (options.config.billingMode !== 'disabled') registerBillingRoutes(app,billing);
  const storageService = new StorageService(pool,options.config,undefined,uploads);
  registerStorageRoutes(app,storageService);
- registerIngestionRoutes(app,new NoteIndexService(pool,options.config));
+ registerIngestionRoutes(app,new ContentAssetIndexService(pool,options.config));
  const textIngestion=new TextIngestionService(pool,options.config,resourceClaims);
  registerTextIngestionRoutes(app,textIngestion,storageService);
  const imageLinks=new RagImageLinks(pool,options.config,storageService);
@@ -77,7 +77,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  app.addHook('onClose',async()=>{await ragQuery.close();});
  registerInternalRoutes(app,{identity,callbacks,ragQuery,settings});
  registerAiTemplateRoutes(app, new AiTemplateRuns(pool), new AiTemplateAgentClient(options.config.agentBaseUrl));
- registerAssetRoutes(app,new AssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService);
+ registerContentAssetRoutes(app,new ContentAssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService);
  registerRagRoutes(app,new RagIngestionRepository(pool,options.config,resourceClaims),storageService.storage,ragQuery);
  registerTaskRoutes(app,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
 }

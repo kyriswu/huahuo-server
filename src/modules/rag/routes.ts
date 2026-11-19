@@ -60,7 +60,7 @@ export function registerRagRoutes(
   if (queryService) {
     const { route, handler } = createRagQueryRoute(queryService, guard);
     app.post('/api/v1/rag/query', route, handler);
-    app.post('/api/v1/kb/notes/query', route, async req => { req.body={...(req.body as object),sourceType:'note'};return handler(req); });
+    app.post('/api/v1/kb/content-assets/query', route, async req => { req.body={...(req.body as object),sourceType:'content_asset'};return handler(req); });
     app.post('/api/v1/kb/documents/query', route, async req => { req.body={...(req.body as object),sourceType:'file'};return handler(req); });
   }
 }

@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { NoteQueryTiming } from '../../src/modules/rag/query-timing.js';
+import { ContentAssetQueryTiming } from '../../src/modules/rag/query-timing.js';
 import { createRagQueryRoute } from '../../src/modules/rag/query-routes.js';
 import type { RagQueryService, RagQueryInput } from '../../src/modules/rag/query-service.js';
 import { ApplicationMetrics } from '../../src/plugins/metrics.js';
@@ -15,17 +15,17 @@ describe('RAG duration and count semantics',()=>{
  it('keeps embedding attempt counts out of Server-Timing duration fields and counts fallback once per request',async()=>{
   const metrics=new ApplicationMetrics(config());
   for(let query=0;query<2;query++){
-   const timing=new NoteQueryTiming();
+   const timing=new ContentAssetQueryTiming();
    await timing.measure('embedding',async()=>{await new Promise(resolve=>setTimeout(resolve,2));});
    timing.embeddingAttempts.push({attempt:0,durationMs:10,succeeded:false,status:503},{attempt:1,durationMs:20,succeeded:true,status:200});
    timing.fallback='timeout';
    const snapshot=timing.snapshot();expect(snapshot.embeddingAttemptCount).toBe(2);expect(snapshot.rerankFallbackCount).toBe(1);expect(snapshot).not.toHaveProperty('rerankFallbackTotal');
    expect(timing.serverTiming()).toContain('embedding;dur=');expect(timing.serverTiming()).toContain('embedding_attempts;desc="2"');
    expect(timing.serverTiming()).not.toMatch(/(?:embedding_attempts|rerank_fallback);dur=/);
-   timing.record(metrics,'note',200);
+   timing.record(metrics,'content_asset',200);
   }
   const body=await metrics.registry.metrics();
-  expect(total(body,'rag_operations_total',['operation="note_query"','outcome="success"'])).toBe(2);
+  expect(total(body,'rag_operations_total',['operation="content_asset_query"','outcome="success"'])).toBe(2);
   expect(total(body,'rag_operations_total',['operation="embedding_attempt"','outcome="success"'])).toBe(2);
   expect(total(body,'rag_operations_total',['operation="embedding_attempt"','outcome="failure"'])).toBe(2);
   expect(total(body,'rag_fallbacks_total',['reason="timeout"'])).toBe(2);
@@ -33,18 +33,18 @@ describe('RAG duration and count semantics',()=>{
   expect(total(body,'rag_operation_duration_seconds_sum',['operation="embedding_attempt"'])).toBeCloseTo(0.06);
  });
  it('retains stage duration on failures and never lets diagnostic failure replace a query result',async()=>{
-  const timing=new NoteQueryTiming(),failure=Error('private provider text');
+  const timing=new ContentAssetQueryTiming(),failure=Error('private provider text');
   expect(timing.serverTiming()).toBe('embedding_attempts;desc="0", rerank_fallback;desc="0"');
   await expect(timing.measure('index_search',async()=>{throw failure;})).rejects.toBe(failure);
   expect(timing.snapshot().stages.index_search).toBeGreaterThanOrEqual(0);
-  expect(()=>timing.record({recordRagOperation:()=>{throw Error('METRICS_UNAVAILABLE');},recordRagStage:vi.fn(),recordRagFallback:vi.fn()},'note',503)).not.toThrow();
+  expect(()=>timing.record({recordRagOperation:()=>{throw Error('METRICS_UNAVAILABLE');},recordRagStage:vi.fn(),recordRagFallback:vi.fn()},'content_asset',503)).not.toThrow();
  });
 });
 
-it('observes omitted sourceType as note and emits safe per-request metrics/logs for both success and failure',async()=>{
+it('defaults sourceType to content_asset and emits safe metrics/logs for successes and failures',async()=>{
  const lines:string[]=[],stream=new Writable({write(chunk,_encoding,done){lines.push(String(chunk));done();}});
  const app=await buildBase({config:{...config(),logLevel:'info'},dependencies:dependencies(),loggerStream:stream});
- const query=vi.fn(async(_scope:Scope,input:RagQueryInput,timing?:NoteQueryTiming)=>{
+ const query=vi.fn(async(_scope:Scope,input:RagQueryInput,timing?:ContentAssetQueryTiming)=>{
   await timing!.measure('pg_scope',async()=>undefined);
   if(input.query==='failing-private-query')throw new DomainError(503,'RAG_SEARCH_UNAVAILABLE');
   timing!.embeddingAttempts.push({attempt:0,durationMs:3,succeeded:true,status:200});
@@ -57,7 +57,7 @@ it('observes omitted sourceType as note and emits safe per-request metrics/logs 
  app.post('/api/v1/rag/query',route,handler);
  const base=await app.listen({host:'127.0.0.1',port:0});
  try{
-  for(const payload of [{query:'private-default-query'},{query:'private-explicit-query',sourceType:'note'},{query:'failing-private-query'}]){
+  for(const payload of [{query:'private-default-query'},{query:'private-explicit-query',sourceType:'content_asset'},{query:'failing-private-query'}]){
    const response=await fetch(base+'/api/v1/rag/query',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
    expect(response.status).toBe(payload.query.startsWith('failing')?503:200);
    expect(response.headers.get('server-timing')).toContain('auth;dur=');
@@ -65,12 +65,12 @@ it('observes omitted sourceType as note and emits safe per-request metrics/logs 
    await response.text();
   }
   const body=await app.metrics.registry.metrics();
-  expect(total(body,'rag_operations_total',['operation="note_query"','outcome="success"'])).toBe(2);
-  expect(total(body,'rag_operations_total',['operation="note_query"','outcome="failure"'])).toBe(1);
+  expect(total(body,'rag_operations_total',['operation="content_asset_query"','outcome="success"'])).toBe(2);
+  expect(total(body,'rag_operations_total',['operation="content_asset_query"','outcome="failure"'])).toBe(1);
   expect(total(body,'rag_fallbacks_total',['reason="error"'])).toBe(2);
   const logs=lines.flatMap(line=>line.trim().split('\n').filter(Boolean).map(value=>JSON.parse(value) as Record<string,unknown>));
   const rag=logs.filter(log=>log.event==='rag.query.finished');expect(rag).toHaveLength(3);
-  expect(rag.every(log=>log.sourceType==='note'&&typeof log.trace_id==='string'&&typeof log.span_id==='string')).toBe(true);
+  expect(rag.every(log=>log.sourceType==='content_asset'&&typeof log.trace_id==='string'&&typeof log.span_id==='string')).toBe(true);
   expect(rag.map(log=>log.rerankFallbackCount)).toEqual([1,1,0]);
   expect(JSON.stringify(rag)).not.toMatch(/private-default-query|private-explicit-query|failing-private-query|private-user-id|private-session-id|rerankFallbackTotal/);
   expect(body).not.toMatch(/private-|query="|taskId|trace_id=|span_id=/);

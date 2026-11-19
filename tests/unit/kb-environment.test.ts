@@ -5,7 +5,7 @@ const examples = ['.env.example', '.env.compose.local.example', '.env.compose.cl
   'specs/backend-plan/examples/.env.compose.local.example', 'specs/backend-plan/examples/.env.compose.cloud.example'];
 const contract = {
   RAG_EMBEDDING_MODEL: 'qwen3.7-text-embedding-flash', RAG_EMBEDDING_DIMENSIONS: '1024', RAG_EMBEDDING_PROFILE: 'qwen3.7-text-embedding-flash-1024-fp16',
-  KB_NOTE_HYBRID_COLLECTION: 'huahuo_kb_note_hybrid_chunks',
+  KB_CONTENT_ASSET_HYBRID_COLLECTION: 'huahuo_kb_note_hybrid_chunks',
   KB_DOCUMENT_KEYWORD_COLLECTION: 'huahuo_kb_keyword_chunks',
 };
 const retired = new Set(['BILLING_POLICY_VERSION','TAG_EXTRACTOR_PROVIDER','MAX_UPLOAD_BYTES','STORAGE_QUOTA_BYTES',

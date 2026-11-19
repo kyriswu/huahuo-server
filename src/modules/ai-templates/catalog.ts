@@ -39,7 +39,7 @@ export class AiTemplateCatalog {
       draftRevision: row.draft_revision,
       publishedRevision: row.published_revision,
       hasUnpublishedDraft: row.has_unpublished_draft,
-      variables: scene === 'note_outline' ? [...promptVariables] : ['templateTitle'],
+      variables: scene === 'content_asset_outline' ? [...promptVariables] : ['templateTitle'],
       history: history.map(version => ({
         version: version.revision, publishedAt: version.published_at.toISOString(), restoredFrom: version.restored_from,
       })),

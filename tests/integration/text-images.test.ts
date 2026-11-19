@@ -121,7 +121,7 @@ describe('manual text image canonicalization with isolated PostgreSQL', () => {
     await root.query("INSERT INTO workspaces(id,user_id,display_name,is_default,bootstrap_receipt_id) VALUES($1,$2,'Other',false,$3)", [otherWorkspace, f.scope.userId, randomUUID()]);
     await image(f, otherWorkspace);
     for (const id of [foreign, randomUUID()]) await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: tag(id) }, randomUUID())).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
-    await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: tag(document) }, randomUUID())).rejects.toMatchObject({ code: 'NOTE_RESOURCE_NOT_IMAGE' });
+    await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: tag(document) }, randomUUID())).rejects.toMatchObject({ code: 'IMAGE_RESOURCE_NOT_IMAGE' });
     for (const target of ['data:image/png;base64,AA', 'file:///tmp/image.png', 'asset://not-a-uuid', `https://other.test/${randomUUID()}`]) {
       await expect(texts.create(f.scope, { source_type: TextIngestionSourceType.MANUAL_INPUT, raw_content: `![图](${target})` }, randomUUID())).rejects.toMatchObject({ statusCode: 400 });
     }
@@ -210,9 +210,9 @@ describe('manual text image canonicalization with isolated PostgreSQL', () => {
     expect(await texts.update(f.scope, created.id, { raw_content: edit.replace(/x-oss-date=[^&#>\s)]+/gu, 'x-oss-date=20000101T000000Z') }, key, initial.etag)).toEqual(updated);
     expect(await counts(f.workspaceId)).toEqual(before);
     await expect(texts.update(f.scope, created.id, { raw_content: edit }, randomUUID(), initial.etag)).rejects.toMatchObject({ code: 'TEXT_INGESTION_CHANGED' });
-    await expect(texts.update(f.scope, created.id, { raw_content: edit }, randomUUID(), current.etag)).rejects.toMatchObject({ code: 'NOTE_IMAGE_ORIGIN_NOT_FOUND' });
+    await expect(texts.update(f.scope, created.id, { raw_content: edit }, randomUUID(), current.etag)).rejects.toMatchObject({ code: 'IMAGE_ORIGIN_NOT_FOUND' });
     const forged = view.raw_content!.replaceAll(`/resources/${id}/`, `/resources/${otherImage}/`);
-    await expect(texts.update(f.scope, created.id, { raw_content: forged }, randomUUID(), current.etag)).rejects.toMatchObject({ code: 'NOTE_IMAGE_ORIGIN_NOT_FOUND' });
+    await expect(texts.update(f.scope, created.id, { raw_content: forged }, randomUUID(), current.etag)).rejects.toMatchObject({ code: 'IMAGE_ORIGIN_NOT_FOUND' });
     expect((await texts.get(f.scope, created.id)).data.raw_content).toBe(updated.raw_content);
     expect(await refs(created.id)).toEqual([id]);
   });

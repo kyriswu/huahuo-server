@@ -1,3 +1,19 @@
+## 资产命名统一（2026-11-19，本地候选）
+
+Server 统一采用 `ContentAsset` 表达用户可以管理的资产，中文显示为「资产」。当前 PostgreSQL 主表为 `content_assets`，归属字段为 `user_id`，标识字段为 `content_asset_id`。正文、资源引用、工作区、文件夹和标签沿用现有关系模型。上传原文件使用 `Resource` 和 `resourceId`。
+
+资产公开路径以 `/api/v1/workspaces/{workspaceId}/content-assets` 为入口，接口字段使用 `contentAssetId` 和 `contentAssetRevisionId`。资产全文查询使用 `/api/v1/kb/content-assets/query`，通用查询的业务类型为 `content_asset`。AI 纲要使用 `content_asset_outline`，正文润色继续按模板提示词生成通用文本。
+
+增量迁移 `0020` 原地调整表、字段和必要的任务载荷，并删除旧文件夹级联恢复标记。本轮验收以新资产流程为准。旧客户端格式与新契约不兼容。共享开发和测试库切换时，API、Admin、Worker 与 Scheduler 一起切换。物理 Milvus 资产集合继续沿用现有对象，显式配置时将集合值填入 `KB_CONTENT_ASSET_HYBRID_COLLECTION`。
+
+## 笔记归属与组织关系（2026-11-19，本地候选）
+
+笔记用 `note_id` 标识，账号归属直接保存在 `notes.user_id`。现有工作区可见范围读 `note_workspaces`，文件夹位置读 `note_folders`。数据库允许笔记没有组织关联。现有路由继续校验账号和工作区，列表和详情从当前关系投影 `folderId`。
+
+删除文件夹时，文件夹及其子目录进入回收状态，关联的笔记保持原状态，未删除的笔记仍可从笔记列表读取。已删除的文件夹在笔记列表和搜索中视为无活动位置。恢复文件夹会恢复仍存在的组织关联。升级前由旧级联删除产生的标记随关联迁移，可按原有流程找回对应笔记，单独删除的笔记仍由笔记恢复操作处理。
+
+迁移 `0019` 把原工作区账号、文件夹位置和历史恢复标记转入新结构，保留笔记 ID、正文、附件和版本。同库的 API 和 Worker 需要协调更新。隔离演练检查从旧版本升级和重复执行，真实目标的数据量与锁时长待部署前核对。
+
 ## 禁用标签服务时的请求结果（2026-11-18，本地候选）
 
 `features.tagProvider=disabled` 时保存/编辑 Note 不再创建必败的自动标签任务，显式 tag-extractions 返回已声明的 `503 TAG_PROVIDER_UNAVAILABLE`；权限/归属校验仍先执行，成功 key 仍可重放，内容、手动标签、事件与索引照常。没有新增请求/响应字段、产品接口或 App 接线。队列与 chunk 写入仅优化底层交接与批量操作，搜索产品细节仍待定。见[验收](acceptance/pg-row-growth-optimization-20261118.md)，未部署。

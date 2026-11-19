@@ -5,34 +5,34 @@ import { DomainError } from '../identity/store.js';
 import { idempotencyKey } from '../identity/routes.js';
 import { Envelope, Strict, Text } from '../identity/schemas.js';
 import type { RagQueryService } from './query-service.js';
-import { NoteQueryTiming } from './query-timing.js';
+import { ContentAssetQueryTiming } from './query-timing.js';
 import { currentTelemetryFields, tracedOperation } from '../../observability/telemetry.js';
-const queryBody=Type.Object({query:Text(2000),sourceType:Type.Optional(Type.Union([Type.Literal('file'),Type.Literal('note')])),assetMode:Type.Optional(Type.Union([Type.Literal('ids'),Type.Literal('links')])),mode:Type.Optional(Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')])),topK:Type.Optional(Type.Integer({minimum:1,maximum:50})),documentKey:Type.Optional(Text(128)),},Strict);
+const queryBody=Type.Object({query:Text(2000),sourceType:Type.Optional(Type.Union([Type.Literal('file'),Type.Literal('content_asset')])),assetMode:Type.Optional(Type.Union([Type.Literal('ids'),Type.Literal('links')])),mode:Type.Optional(Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')])),topK:Type.Optional(Type.Integer({minimum:1,maximum:50})),documentKey:Type.Optional(Text(128)),},Strict);
 const queryResult=Type.Object({mode:Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')]),query:Type.String(),results:Type.Array(Type.Any())},Strict);
 
 /** Public and service callers use identical query validation, execution and timing. */
 export function createRagQueryRoute(queryService: RagQueryService, authorize: (request: FastifyRequest) => Promise<void>) {
-  const timings = new WeakMap<FastifyRequest, NoteQueryTiming>();
+  const timings = new WeakMap<FastifyRequest, ContentAssetQueryTiming>();
   const sourceType=(request:FastifyRequest)=>{
-    const value=(request.body as {sourceType?:unknown}|undefined)?.sourceType??'note';
-    return value==='note'||value==='file'?value:'other';
+    const value=(request.body as {sourceType?:unknown}|undefined)?.sourceType??'content_asset';
+    return value==='content_asset'||value==='file'?value:'other';
   };
   const handler = async (request: FastifyRequest) => {
     if (!request.authScope) throw new DomainError(401,'UNAUTHORIZED');
     const scope=request.authScope;
     const body=request.body as Parameters<RagQueryService['query']>[1];
-    return tracedOperation('rag.query',{'rag.source_type':sourceType(request),'rag.mode':body.mode??(sourceType(request)==='note'?'hybrid':'keyword')},async()=>
+    return tracedOperation('rag.query',{'rag.source_type':sourceType(request),'rag.mode':body.mode??(sourceType(request)==='content_asset'?'hybrid':'keyword')},async()=>
       success(await queryService.query(scope,body,timings.get(request)),request.id));
   };
   const route = {
-    onRequest: async (request: FastifyRequest) => { timings.set(request, new NoteQueryTiming()); },
+    onRequest: async (request: FastifyRequest) => { timings.set(request, new ContentAssetQueryTiming()); },
     preHandler: async (request: FastifyRequest) => {
       idempotencyKey(request,'optional');
       await timings.get(request)!.measure('auth',()=>authorize(request));
     },
     onSend: async (request: FastifyRequest, reply: FastifyReply) => {
       reply.header('Cache-Control','no-store');
-      if (sourceType(request)==='note') reply.header('Server-Timing',timings.get(request)?.serverTiming()??'');
+      if (sourceType(request)==='content_asset') reply.header('Server-Timing',timings.get(request)?.serverTiming()??'');
     },
     onResponse: async (request: FastifyRequest, reply: FastifyReply) => {
       const timing=timings.get(request);timings.delete(request);

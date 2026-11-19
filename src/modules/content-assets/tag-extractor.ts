@@ -1,6 +1,6 @@
 export interface TagExtractionInput {
-  noteId: string;
-  noteRevisionId: string;
+  contentAssetId: string;
+  contentAssetRevisionId: string;
   title: string;
   rawText: string;
   segment?: { index: number; count: number };
@@ -11,7 +11,7 @@ export interface TagExtractionResult {
   labels: unknown;
 }
 
-/** Provider boundary for tag extraction. It never owns note/tag persistence. */
+/** Provider boundary for tag extraction. It never owns contentAsset/tag persistence. */
 export interface TagExtractor {
   readonly provider: string;
   extract(input: TagExtractionInput): Promise<TagExtractionResult>;
