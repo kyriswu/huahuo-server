@@ -16,8 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  server-ci:
-    name: Server CI
+  code-checks:
+    name: Server code checks
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -44,6 +44,24 @@ jobs:
         run: pnpm release:review
       - name: Unit and contract tests
         run: pnpm test
+
+  integration:
+    name: PostgreSQL and Redis integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.11.0'
+          package-manager-cache: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global pnpm@10.15.1
+          pnpm install --frozen-lockfile
       - name: Prepare isolated integration images
         # integration.mjs deliberately uses --pull=never. These match its pins.
         run: |
@@ -54,6 +72,25 @@ jobs:
         # loopback ports, tmpfs and credentials, and cleans only resources it owns.
         # No --milvus or --milvus-cloud: remote providers stay disabled.
         run: pnpm test:integration
+
+  server-ci:
+    # Preserve the required check and require a pass from both isolated jobs.
+    name: Server CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    needs: [code-checks, integration]
+    if: ${{ always() }}
+    steps:
+      - name: Require both check suites to pass
+        env:
+          CODE_CHECKS_RESULT: ${{ needs.code-checks.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+        run: |
+          if [[ "$CODE_CHECKS_RESULT" != success || "$INTEGRATION_RESULT" != success ]]; then
+            printf '::error::Server code checks: %s. Integration: %s.\n' "$CODE_CHECKS_RESULT" "$INTEGRATION_RESULT"
+            exit 1
+          fi
 
   release-impact:
     name: Release impact report
