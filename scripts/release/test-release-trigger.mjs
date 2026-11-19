@@ -5,6 +5,8 @@ import { githubReader, isSha, readReleaseEventContext, REPOSITORY, verifyCiTrigg
 const fail = code => { throw Error(code); };
 const controlFiles = new Set([
   '.github/workflows/test-server-release.yml', '.github/workflows/main-release-readiness.yml',
+  '.github/workflows/release-smoke-check.yml', '.github/release-impact/package.json',
+  '.github/release-impact/pnpm-lock.yaml', '.github/release-impact/report.mjs',
   'scripts/release/release-events.mjs', 'scripts/release/test-release-source.mjs',
   'scripts/release/test-release-trigger.mjs', 'scripts/release/main-release-readiness.mjs',
   'scripts/release/deployment-policy.py', 'tests/unit/deployment-policy.test.ts',
