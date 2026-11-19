@@ -54,3 +54,31 @@ jobs:
         # loopback ports, tmpfs and credentials, and cleans only resources it owns.
         # No --milvus or --milvus-cloud: remote providers stay disabled.
         run: pnpm test:integration
+
+  release-impact:
+    name: Release impact report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.11.0'
+          package-manager-cache: false
+      - name: Generate advisory impact report
+        timeout-minutes: 3
+        env:
+          IMPACT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          IMPACT_TARGET_BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: |
+          npm install --global pnpm@10.15.1
+          pnpm --dir .github/release-impact install --frozen-lockfile --ignore-scripts
+          node .github/release-impact/report.mjs
+      - name: Record unavailable report
+        if: ${{ failure() }}
+        run: |
+          printf '%s\n\n%s\n' '## Server 变更影响报告' '本次分析未完成。请查看报告任务日志。' >> "$GITHUB_STEP_SUMMARY"
