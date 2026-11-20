@@ -1,14 +1,14 @@
 {
   "version": 1,
-  "id": "20261120-worktree-sync",
-  "baseRevision": "40410bfb04ff2de97eda9d37a242251bd961849a",
+  "id": "20261120-ai-template-variables",
+  "baseRevision": "943437edbd3a8dc4f03518086d42cba2321ad977",
   "services": [
     "api-server",
-    "worker"
+    "admin"
   ],
   "database": {
     "migrations": [],
-    "verifySql": "scripts/release/changes/20261120-worktree-sync/verify-db.sql",
+    "verifySql": null,
     "dataChange": {
       "mode": "none",
       "reason": ""
@@ -17,9 +17,7 @@
   "configuration": {
     "mode": "reuse",
     "changes": [],
-    "reviewedFiles": [
-      "src/config/config.ts"
-    ]
+    "reviewedFiles": []
   },
   "dependencies": [],
   "backfill": {

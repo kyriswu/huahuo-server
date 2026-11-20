@@ -4,7 +4,8 @@ import type pg from 'pg';
 import { canonical, digest } from '../../lib/crypto.js';
 import { assertScope, DomainError, lock, transaction, type Scope } from '../identity/store.js';
 import { readPublished } from './catalog.js';
-import { listCatalog, MaxPromptChars, MaxSourceChars, renderPrompt, visibleTemplates, type RunRequest, type SceneKey } from './model.js';
+import { listCatalog, MaxRenderedPromptChars, MaxSourceChars, visibleTemplates, type RunRequest, type SceneKey } from './model.js';
+import { renderPrompt } from './prompt-variables.js';
 
 type RunRow = {
   id: string; scene_key: SceneKey; item_key: string; template_version: number;
@@ -76,7 +77,10 @@ export class AiTemplateRuns {
   }
 
   begin(scope: Scope, key: string, request: RunRequest, executorAvailable: boolean) {
-    const requestHash = digest(canonical(request));
+    const { variables = {}, ...payload } = request;
+    const entries = Object.entries(variables).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    // The old payload hash remains valid when variables are omitted or empty.
+    const requestHash = digest(canonical(entries.length ? [payload, entries] : payload));
     return transaction(this.pool, async tx => {
       await assertScope(tx, scope);
 
@@ -113,8 +117,8 @@ export class AiTemplateRuns {
       if (!text.trim() || text.length > MaxSourceChars || text.includes('\u0000')) {
         throw new DomainError(400, 'AI_TEMPLATE_SOURCE_INVALID');
       }
-      const prompt = renderPrompt(template, sourceTitle).trim();
-      if (!prompt || prompt.length > MaxPromptChars + 2_000 || prompt.includes('\u0000')) {
+      const prompt = renderPrompt(request.sceneKey, template, sourceTitle, variables, MaxRenderedPromptChars);
+      if (!prompt || prompt.includes('\u0000')) {
         throw new DomainError(400, 'AI_TEMPLATE_PROMPT_INVALID');
       }
       const { rows: [run] } = await tx.query<RunRow>(

@@ -5,6 +5,7 @@ import { DomainError } from '../identity/store.js';
 export const MaxSourceChars = 50_000;
 export const MaxOutputChars = 10_000;
 export const MaxPromptChars = 10_000;
+export const MaxRenderedPromptChars = MaxPromptChars + 2_000;
 export const SceneKeySchema = Type.Union([Type.Literal('content_asset_outline'), Type.Literal('editor_polish')]);
 export type SceneKey = Static<typeof SceneKeySchema>;
 export const ItemKeySchema = Type.String({ pattern: '^[a-z][a-z0-9_]{0,63}$' });
@@ -35,27 +36,45 @@ export const CatalogSchema = Type.Object({
 export type Catalog = Static<typeof CatalogSchema>;
 export type Template = Static<typeof TemplateSchema>;
 
+const RunVariablesSchema = Type.Optional(Type.Record(
+  Type.String({ pattern: '^[\\s\\S]*$' }), Type.String({ maxLength: MaxPromptChars }),
+  { description: '按名称匹配提示词变量。值为字符串，支持空字符串。' },
+));
+
 export const RunRequestSchema = Type.Union([
   Type.Object({
     sceneKey: Type.Literal('content_asset_outline'), itemKey: ItemKeySchema,
     input: Type.Object({ contentAssetId: Id, sourceRevision: Id }, Strict),
+    variables: RunVariablesSchema,
   }, Strict),
   Type.Object({
     sceneKey: Type.Literal('editor_polish'), itemKey: ItemKeySchema,
     input: Type.Object({ text: Text(MaxSourceChars) }, Strict),
+    variables: RunVariablesSchema,
   }, Strict),
 ]);
 export type RunRequest = Static<typeof RunRequestSchema>;
 
-export const promptVariables = ['templateTitle', 'sourceTitle'] as const;
+function hasInvalidText(value: string): boolean {
+  return value.includes('\u0000') || /\p{Surrogate}/u.test(value);
+}
+
+export function validateRunVariables(variables: unknown): void {
+  if (variables === undefined) return;
+  if (variables === null || typeof variables !== 'object' || Array.isArray(variables)
+      || Object.entries(variables).some(([name, value]) => typeof value !== 'string'
+        || value.length > MaxPromptChars || hasInvalidText(name) || hasInvalidText(value))) {
+    throw new DomainError(400, 'AI_TEMPLATE_VARIABLES_INVALID');
+  }
+}
 
 function validateText(...values: string[]) {
-  if (values.some(value => value.includes('\u0000') || /\p{Surrogate}/u.test(value))) {
+  if (values.some(hasInvalidText)) {
     throw new DomainError(400, 'AI_TEMPLATE_TEXT_INVALID');
   }
 }
 
-export function validateCatalog(scene: SceneKey, catalog: Catalog, publishing: boolean): void {
+export function validateCatalog(catalog: Catalog, publishing: boolean): void {
   validateText(catalog.title);
   const items = new Map(catalog.items.map(item => [item.itemKey, item]));
   if (items.size !== catalog.items.length) throw new DomainError(400, 'AI_TEMPLATE_ITEM_KEY_DUPLICATE');
@@ -68,11 +87,6 @@ export function validateCatalog(scene: SceneKey, catalog: Catalog, publishing: b
     if (item.parentKey !== null && parent?.kind !== 'group') throw new DomainError(400, 'AI_TEMPLATE_PARENT_INVALID');
     if (publishing && item.enabled && (parent?.enabled ?? true) && !item.prompt.trim()) {
       throw new DomainError(400, 'AI_TEMPLATE_PROMPT_REQUIRED');
-    }
-    for (const [, name] of item.prompt.matchAll(/\{\{\s*([^{}]*?)\s*\}\}/gu)) {
-      if (name !== 'templateTitle' && (name !== 'sourceTitle' || scene !== 'content_asset_outline')) {
-        throw new DomainError(400, 'AI_TEMPLATE_VARIABLE_INVALID');
-      }
     }
   }
 }
@@ -100,9 +114,4 @@ export function listCatalog(catalog: Catalog, parentKey?: string) {
     return item.parentKey === (parentKey ?? null) && templates.includes(item) ? [{ ...display, childCount: 0 }] : [];
   });
   return { title: parent?.title ?? catalog.title, displayLimit: parent?.displayLimit ?? catalog.displayLimit, totalCount: items.length, items };
-}
-
-export function renderPrompt(template: Template, sourceTitle: string): string {
-  return template.prompt.replace(/\{\{\s*(templateTitle|sourceTitle)\s*\}\}/gu,
-    (_, variable: string) => variable === 'templateTitle' ? template.title : sourceTitle);
 }
