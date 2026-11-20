@@ -2,7 +2,7 @@
 
 # 内部身份传递
 
-外部用户通过宿主入口的鉴权子请求认证。Bearer 可读取共享 Redis 会话状态，缓存未命中时由 Server 验 JWT、账号有效状态、会话撤销及有效期。详见[入口鉴权](gateway-auth.md)。
+外部用户通过宿主 Nginx 的 `auth_request` 子请求认证。Server 先验 Bearer JWT，再查 Redis 会话缓存，未命中时从 PostgreSQL 确认账号和会话状态。详见[入口鉴权](gateway-auth.md)。
 普通业务接口不接受 Bearer 作为身份来源；它们接收网关注入或可信内部服务转传的身份头：
 
 - `X-Huahuo-User-Id`：用户 UUID。

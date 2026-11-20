@@ -16,7 +16,7 @@
 | 依赖故障 | 5xx，拒绝业务调用，不能当作注销或跳转登录 |
 | 未登录的 Studio HTML 导航 | 401，另有 `X-Huahuo-Login-Redirect`，值为配置的 `<publicPath>/studio-login`；由入口生成浏览器重定向 |
 
-认证接口不返回 302。API、资源文件、带无效 Bearer 的请求都不会获得登录重定向提示。HTTP 响应保持 `Cache-Control: no-store`。Bearer 会话状态通过下述 Redis 契约共享。
+认证接口不返回 302。API、资源文件、带无效 Bearer 的请求都不会获得登录重定向提示。HTTP 响应保持 `Cache-Control: no-store`。现有及新增环境的 Nginx 均使用原生 `auth_request` 转发鉴权子请求，由 Server 管理 Bearer 会话缓存。
 
 通过后的身份头为 `X-Huahuo-User-Id`、`X-Huahuo-Session-Id`、`X-Huahuo-Auth-Method`、`X-Trace-Id`。入口覆盖客户端同名头，并移除发送给业务上游的 Authorization、Cookie 和旧 ServiceKey。公开登录、签名资源等无需用户认证的入口也必须清除客户端自报身份。业务权限继续在所属 Service 的事务中检查。
 
@@ -24,7 +24,7 @@
 
 缓存键为 `<REDIS_KEY_PREFIX>:auth:bearer:v1:<APP_JWT_KEY_ID>:<JWT 的 SHA-256 小写十六进制>`，摘要只计算原始 JWT，不包含 `Bearer `。值是包含 `userId`、`sessionId` 两个 UUID 和 `expiresAt`（Unix 毫秒）的 JSON。它只代表此令牌已通过入口鉴权，工作区与资源权限仍由业务服务校验。追踪 ID 为每个请求单独生成。
 
-Server 首次验签并从 PostgreSQL 确认会话后写入 Redis。有效期上限为从开始查库起 15 秒，并受 JWT、当前 access 和整个会话剩余有效期约束，命中不续期。可信入口可用原令牌计算键，直接读取有效记录。缺键、失效标记 `!`、过期、读取故障或无法解析的记录均走 Server 鉴权。Cookie 鉴权始终由 Server 执行。
+Server 对每个 Bearer 请求先验签，再读 Redis。命中时直接使用缓存中的会话身份。缺键、失效标记 `!`、过期、读取故障或无法解析时，Server 查 PostgreSQL 并在确认会话有效后尝试写入缓存。有效期上限为从开始查库起 15 秒，并受 JWT、当前 access 和整个会话剩余有效期约束，命中不续期。Studio Cookie 鉴权与刷新继续使用原流程。
 
 刷新令牌在数据库提交后标记旧摘要失效，并写入新令牌状态。注销当前/全部设备及刷新令牌复用撤销在返回前尝试标记对应摘要。数据库用户状态变更和会话状态变更提交后发出失效通知，API 实例监听并更新 Redis。失效标记阻挡并发旧状态回填，数据库仍可在重新启用账号后立即确认有效会话。Redis 写入失败或通知中断时，已缓存的放行状态可能持续到原定有效期结束。带事务的业务校验继续执行。
 

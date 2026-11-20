@@ -165,7 +165,7 @@ export class StorageService {
   const signUrl=this.storage.signUrl.bind(this.storage),bucket=this.config.storageAliyunOss.bucket;
   const {rows,permanent}=await transaction(this.pool,async tx=>{
    await this.authorize(tx,scope,workspaceId);
-   const rows=(await tx.query<{resource_id:string;mime_type:string;file_name:string;object_key:string;object_version:string}>(`SELECT r.resource_id,r.mime_type,r.file_name,r.object_key,r.object_version FROM resources r
+   const rows=(await tx.query<{resource_id:string;mime_type:string;file_name:string;size_bytes:string|number;object_key:string;object_version:string}>(`SELECT r.resource_id,r.mime_type,r.file_name,r.size_bytes,r.object_key,r.object_version FROM resources r
     WHERE r.resource_id=ANY($1::uuid[]) AND r.user_id=$2 AND r.status='ready' AND r.storage_driver='aliyun-oss' AND r.storage_bucket=$3`,[unique,scope.userId,bucket])).rows;
    // A deleting/deleted resource must never become readable through an old Redis receipt.
    const permanent=(await tx.query<{resource_id:string}>('SELECT resource_id FROM resources WHERE resource_id=ANY($1::uuid[])',[unique])).rows.map(row=>row.resource_id);
@@ -175,9 +175,9 @@ export class StorageService {
   const pending=(await Promise.all(unique.filter(id=>!registered.has(id)).map(id=>this.uploads.get(id))))
    .filter((upload):upload is TemporaryUpload=>Boolean(upload&&upload.userId===scope.userId&&upload.status==='completed'&&upload.object&&upload.expiresAt>Date.now()
     &&upload.storageDriver==='aliyun-oss'&&upload.storageBucket===bucket));
-  for(const upload of pending)rows.push({resource_id:upload.id,mime_type:upload.mimeType,file_name:upload.fileName,object_key:upload.id,object_version:upload.object!.version});
+  for(const upload of pending)rows.push({resource_id:upload.id,mime_type:upload.mimeType,file_name:upload.fileName,size_bytes:upload.object!.bytes,object_key:upload.id,object_version:upload.object!.version});
   const exp=Date.now()+15*60_000;
-  return Promise.all(rows.map(async row=>({resourceId:row.resource_id,url:await signUrl(row.object_key,900,{contentDisposition:`inline; filename="${row.file_name.replace(/[^A-Za-z0-9._-]/gu,'_')}"`,contentEncoding:'identity',version:row.object_version}),mimeType:row.mime_type,fileName:row.file_name,expiresAt:new Date(exp).toISOString()})));
+  return Promise.all(rows.map(async row=>({resourceId:row.resource_id,url:await signUrl(row.object_key,900,{contentDisposition:`inline; filename="${row.file_name.replace(/[^A-Za-z0-9._-]/gu,'_')}"`,contentEncoding:'identity',version:row.object_version}),mimeType:row.mime_type,fileName:row.file_name,sizeBytes:Number(row.size_bytes),expiresAt:new Date(exp).toISOString()})));
  }
  async playback(scope:Scope,id:string){
   if(!uuid(id))throw new DomainError(404,'RESOURCE_NOT_FOUND');

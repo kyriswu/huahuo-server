@@ -32,6 +32,13 @@
 
 Embedding仍用现有百炼同步接口，单HTTP批次最多20条；输入预算用UTF-8字节数加16保守估计，不冒充供应商真实token用量。端点/模型/凭据在授权部署配置中提供，后台仅管理索引批次、并发、超时、重试及正文上限。已有可选重排仍使用 RAG_RERANK_* 技术配置；不因保留配置自动启用或调用真实模型。
 
+## Zilliz Cloud 连接
+
+使用 Zilliz Cloud 作为索引目标时，API 和 Worker 沿用 Node.js SDK `2.6.17`，通过 gRPC 连接。在私有环境文件中设置集群的公网 `MILVUS_ADDRESS`、`MILVUS_TLS=true` 和该集群的 `MILVUS_USERNAME`、`MILVUS_PASSWORD`。
+
+已发布的构建快照绑定原来的 Milvus 连接标识、数据库和集合。对于已有索引的环境，切换前需要在新目标重建并发布索引，使用已发布的快照验证 RAG 查询。
+
+
 ## 0021 集合名称切换
 
 切换通过现有不兼容升级维护流程执行。API、Admin、Worker 和 Scheduler 采用同一版运行配置。若本地进程与测试环境共用数据库和 Milvus，一同排空相关工作。 [标准发布](standard-release.md)

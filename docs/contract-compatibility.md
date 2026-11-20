@@ -366,7 +366,7 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 | `POST /api/v1/media/uploads/{uploadId}/complete` | Bearer + 幂等键；body 可含 workspaceId；响应丢失可用同 uploadId 重试 | 本地候选；校验单分片和 HEAD 元数据，保存 Redis completed；返回 `resourceId/fileName/mimeType/sizeBytes/sha256:null`，不触发后续业务 |
 | `GET /api/v1/media/uploads/{uploadId}` | Bearer；返回状态、大小与临时有效期 | 本地候选；Redis 临时状态；业务已认领则从 PG 返回 `claimed` 与 `expiresAt:null` |
 | `POST /api/v1/media/uploads/{uploadId}/cancel` | Bearer + 幂等键；空 body；返回 `cancel_pending` | 本地候选；取消与业务认领互斥；已认领资源不能当临时上传取消 |
-| `GET /api/v1/media/resources/{resourceId}/playback` | Bearer；返回可直接 GET 的短期 URL 与 mime/fileName/expiresAt | 正式或仍有效的 completed 临时自有资源；跨用户拒绝；实际 GET／Range 由 OSS 承接 |
+| `GET /api/v1/media/resources/{resourceId}/playback` | Bearer；返回 `resourceId/url/mimeType/fileName/expiresAt/sizeBytes`，`sizeBytes` 为必填正整数字节数 | 正式资源使用认领时保存的字节数，仍有效的已完成上传使用完成时校验的 OSS 对象字节数；跨用户拒绝；实际 GET／Range 由 OSS 承接 |
 | 旧 `PUT /api/v1/media/uploads/{uploadId}/object`、`GET /api/v1/media/resources/{resourceId}/object` | 旧 Server 字节代理路径 | 已删除，不提供代理回退或兼容模式 |
 | `DELETE /api/v1/workspaces/{workspaceId}/media/resources/{resourceId}` | Bearer + 幂等；解析 `resourceId/workspaceId/status`，status 接受 `deleted` 或 `delete_pending` | CODE；引用检查后返回 `delete_pending`，Worker 异步删除，不在 API 同步删文件 |
 
@@ -450,5 +450,4 @@ Note索引依赖功能开关；只改outline/germination不会按raw变化重建
 
 ## AI 模板配置
 
-支持资产纲要与编辑器润色目录、生成接口及纲要结果查询。生成接口通过 Accept 支持
-默认 JSON 和 SSE。接口和隔离验证见 [AI 模板配置与 App 契约](runbooks/ai-templates.md)。
+支持资产纲要与编辑器润色目录、生成接口及纲要结果查询。接口和隔离验证见 [AI 模板配置与 App 契约](runbooks/ai-templates.md)。

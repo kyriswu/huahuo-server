@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { BailianEmbeddingClient, type EmbeddingAttempt } from '../../src/modules/rag/adapters/embedding.js';
+import { BailianEmbeddingClient, type EmbeddingAttempt } from '../../src/integrations/embedding.js';
 import { withTraceContext, tracedOperation } from '../../src/observability/telemetry.js';
 
 const options = { baseUrl: 'https://embedding.test/v1', apiKey: 'test-only-not-a-real-key', model: 'test', dimensions: 2, timeoutMs: 1000, maxRetries: 2 };

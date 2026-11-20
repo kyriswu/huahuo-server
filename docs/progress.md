@@ -1,3 +1,12 @@
+## 资产搜索测试部署（2026-11-20）
+
+北京时间 00:08:57，测试环境完成 `40410bf` 的五阶段维护。迁移 0024 和 0025 已登记，旧目录关系表已退役，业务表物理外键为零。四个角色健康且当前镜像与记录一致，旧角色正常退出。 [业务 PR](https://github.com/kyriswu/huahuo-server/pull/53) · [test CI](https://github.com/kyriswu/huahuo-server/actions/runs/44561369830)
+
+## 播放链接返回资源字节数（2026-11-19，本地验收）
+
+`GET /api/v1/media/resources/{resourceId}/playback` 的 `data.sizeBytes` 为必填正整数。正式资源读取 PostgreSQL 的 `resources.size_bytes`，有效的已完成临时上传读取完成时验过的对象字节数。HTTP 集成用例以同一文件验证认领前后均返回 13 字节。类型检查、Lint、构建、1199 项单元及契约测试、491 项集成测试通过，集成测试跳过 7 项。存储用例使用隔离的真实 PostgreSQL 和 Redis 以及本地 OSS 测试替身。参见 [App 源码核对](app-reference.md#播放链接字节数契约核对2026-11-19)。
+
+
 ## 资产单文件夹归类（2026-11-19，本地验收）
 
 资产使用可空的 `content_assets.folder_id`。列表、详情、创建、编辑、批量移动和搜索使用该字段。文件夹软删时保留存储位置，列表和详情返回空，按该文件夹搜索无结果。恢复时重新显示原位置，软删期间主动移动或清空的资产采用新位置。文件夹归属继续在事务内校验，普通组合索引按文件夹、账号、状态和更新时间组织。API 继续使用 `folderId`。 [资产契约](contract-compatibility.md)
@@ -16,9 +25,15 @@
 
 类型检查、Lint、构建、1199 项单元与契约测试和 499 项隔离集成测试通过。业务 schema 物理外键为零。本次交付停在本地验收。
 
-## Milvus 无正文检索（2026-11-19，测试发布候选）
+## Milvus 无正文检索（2026-11-19，测试发布验收）
 
 Server 提供独立的无正文资产和文档集合，支持稀疏关键词与 RRF 混合召回。默认候选关闭外部重排，正文按最终候选批量读取并按排名补齐失效片段。0022 在隔离 PostgreSQL 升级验证通过，复跑无待应用迁移。测试环境只读核对两套旧集合均为零点，已发布构建与待索引任务均为零，已确认 Jieba 可用。切换和退役继续走现有审核、CI 与维护门禁。 [候选与验收](runbooks/milvus-textless-search.md)
+
+隔离测试通过 1199 项单元与契约、498 项 PostgreSQL、Redis、Milvus 集成测试。304 个分块、并发 4、Top K 为 3 的合成语料对照里，两个模式的 Recall@3 均为 100%。以每轮 400 次请求核算吞吐，预热的 `keyword` 为 146.9 → 209.6 QPS，`hybrid` 为 120.4 → 171.2 QPS。未命中查询缓存时分别为 138.8 → 161.7 和 114.0 → 151.7 QPS。实验使用合成 embedding。 [验收方法](runbooks/milvus-textless-search.md)
+
+北京时间 17:42:24 完成五阶段维护。测试业务 SHA 为 `21dcb906`，控制 SHA 为 `a001e606`。首次预检因 migrate 容器未提供搜索配置被阻断，四运行角色和共享库当时仍在旧版。修正脚本后重新经过 PR、CI 和发布门禁。0022 校验和匹配，物理外键为零，四角色健康且排空无强退。实际测试 Milvus 的 `keyword` 和 `hybrid` 都通过冒烟，样本点已删除。 [控制 PR #47](https://github.com/kyriswu/huahuo-server/pull/47) · [业务 PR #48](https://github.com/kyriswu/huahuo-server/pull/48) · [预检修复 #49](https://github.com/kyriswu/huahuo-server/pull/49) · [test CI](https://github.com/kyriswu/huahuo-server/actions/runs/44497941984)
+
+17:43:59 退役两套零点旧集合，回读确认旧名已消失，两套新集合的 ID 与冒烟记录一致，字段无 `text`。测试环境使用 RRF，外部 rerank 关闭并保留配置入口。健康端点返回 200。App 保持在 `fe6a02c`。
 
 ## 资产术语与通用搜索模式（2026-11-19，测试环境）
 
@@ -42,9 +57,9 @@ Server 资产主表及关联、接口字段、路由、AI 纲要、索引任务�
 
 类型检查、Lint 和构建通过。1195 项单元与契约测试和 486 项隔离 PostgreSQL/Redis 集成测试通过，4 项真实 Milvus 测试跳过。迁移演练从 13 升至 19，重跑无待执行迁移，业务表物理外键为零。演练覆盖跨账号隔离、旧笔记和附件引用、文件夹删除后搜索及历史恢复。全量复跑前修正了任务领取时机、审计顺序和管理员测试样本清理。迁移在隔离库执行。
 
-## Redis Bearer 鉴权缓存（2026-11-19，本地验收）
+## Redis Bearer 鉴权缓存（2026-11-19，测试环境已发布）
 
-入口支持直读 Redis 中的短期 Bearer 会话。Server 负责验签、首次填充、令牌刷新和状态失效，默认最长 15 秒。0018 提供提交后的账号与会话状态失效通知。1,195 项单元/契约、484 项隔离集成通过，Lua 模块通过真实 Nginx/Redis 和 HTTP 鉴权替身测试。当前停在本地验收点。[验收记录](acceptance/bearer-auth-cache.md)
+现有及新增环境的 Nginx 沿用原生 `auth_request`。Server 验签后查询 Redis，缓存最长 15 秒。0018 提供提交后的账号与会话状态失效通知。1,195 项单元/契约、484 项隔离集成通过。测试环境 `740fb8b` 发布五阶段通过。[验收记录](acceptance/bearer-auth-cache.md)
 
 ## PostgreSQL底层写入优化（2026-11-18，本地候选，未发布）
 

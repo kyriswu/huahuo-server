@@ -12,6 +12,8 @@ Fastify + PostgreSQL + Redis，Node 26.11.0（Volta 管理）、严格 TypeScrip
 
 域名入口、Nginx、Certbot 与证书自动续期由宿主机独立管理；相关配置、脚本及运维文档不放入本仓库，不接入应用、Worker、Scheduler、Compose 或项目部署脚本。项目只维护应用监听、公开 URL 和可信代理等应用配置。
 
+现有及新增环境的用户鉴权沿用宿主 Nginx 原生 `auth_request`。Server 负责 JWT 验签、Redis 会话缓存及失效，Nginx 按鉴权结果代理请求。
+
 搜索功能确定需要，现有技术实现可以保留；具体业务范围、交互、接口和排序等细节尚未确定。不得把现有代码或 App 本地搜索界面当作用户已确认的产品需求，也不据此继续扩展功能；后续按明确业务调整。
 
 数据库规则：PostgreSQL / 阿里云 RDS 不设计、不新增任何物理外键。禁止在业务 Schema、增量迁移或 ORM Model 中使用 `FOREIGN KEY`、`REFERENCES`、`.references()`、`foreignKey()`，也不使用触发器模拟外键。关联 ID 使用普通字段及必要的普通索引；主键、唯一约束、NOT NULL 和业务 CHECK 继续保留。
