@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_EMBEDDING_MAX_INPUT_TOKENS } from '../model-profile.js';
-import { ServiceHttpClient, readJsonResponse } from '../../../integrations/http-client.js';
+import { CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_EMBEDDING_MAX_INPUT_TOKENS } from '../lib/search-index/model-profile.js';
+import { ServiceHttpClient, readJsonResponse } from './http-client.js';
 export class EmbeddingError extends Error {
   constructor(readonly code:string, message:string, readonly retryable=true, options?:{cause?:unknown}) { super(message,options); this.name='EmbeddingError'; }
 }

@@ -1,43 +1,35 @@
 {
   "version": 1,
-  "id": "20261119-content-asset-search",
-  "baseRevision": "f6a8ca09e7efa9e0f9a512b9b05a859cc1ce44d8",
+  "id": "20261120-worktree-sync",
+  "baseRevision": "40410bfb04ff2de97eda9d37a242251bd961849a",
   "services": [
     "api-server",
-    "admin",
-    "worker",
-    "scheduler"
+    "worker"
   ],
   "database": {
-    "migrations": [
-      "0024_content_asset_folder_id.sql",
-      "0025_content_asset_search_metadata.sql"
-    ],
-    "verifySql": "scripts/release/changes/20261119-content-asset-search/verify-db.sql",
+    "migrations": [],
+    "verifySql": "scripts/release/changes/20261120-worktree-sync/verify-db.sql",
     "dataChange": {
-      "mode": "inline",
-      "reason": "Apply the folder and asset-kind migrations after old-role drain and verification that the test asset inventory is empty. Migration 0025 refuses a live legacy index and creates no model work."
+      "mode": "none",
+      "reason": ""
     }
   },
   "configuration": {
     "mode": "reuse",
     "changes": [],
-    "reviewedFiles": ["src/config/config.ts"]
+    "reviewedFiles": [
+      "src/config/config.ts"
+    ]
   },
-  "dependencies": [
-    {
-      "name": "milvus-asset-v2",
-      "checkFile": "scripts/release/changes/20261119-content-asset-search/verify-external.mjs"
-    }
-  ],
+  "dependencies": [],
   "backfill": {
     "required": false,
     "reference": null
   },
   "compatibility": {
-    "database": false,
+    "database": true,
     "api": true,
-    "tasks": false,
+    "tasks": true,
     "configuration": true
   },
   "smoke": "health"

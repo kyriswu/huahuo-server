@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-const { BailianEmbeddingClient } = await import(pathToFileURL(resolve('dist/modules/rag/adapters/embedding.js')).href);
+const { BailianEmbeddingClient } = await import(pathToFileURL(resolve('dist/integrations/embedding.js')).href);
 
 // Run inside the API container as well as on the host. Credentials stay in the
 // environment; reports contain only synthetic request hashes and timing data.

@@ -13,7 +13,7 @@ import { readingToc } from '../../lib/document-processing/toc.js';
 import type { DocumentStructure } from '../../lib/document-processing/types.js';
 import { type FileProcessingSnapshot } from './processing-profile.js';
 import { indexTocBytes, type CanonicalTocItem } from './canonical-toc.js';
-import { EmbeddingError } from './adapters/embedding.js';
+import { EmbeddingError } from '../../integrations/embedding.js';
 import { SearchIndexError } from '../../lib/search-index/types.js';
 import { RagIngestionRepository, type RagVersionRow } from './repository.js';
 import { DocumentPreparationError } from './document-preparation.js';

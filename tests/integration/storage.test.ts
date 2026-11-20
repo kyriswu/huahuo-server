@@ -136,6 +136,7 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
       expect(new URL(playback.url).searchParams.get('response-content-encoding')).toBe('identity');
       expect(new URL(playback.url).searchParams.get('response-content-disposition')).toMatch(/^inline; filename=/);
       expect(playback.mimeType).toBe(metadata.mimeType);
+      expect(playback.sizeBytes).toBe(bytes.length);
       expect(head).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled();
     } finally { head.mockRestore(); read.mockRestore(); }
   });
@@ -567,6 +568,26 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
       await expect(service.createUpload(user.scope, metadata,randomUUID())).rejects.toMatchObject({ code: 'DIRECT_UPLOAD_NOT_CONFIGURED' });
     }
     expect(await redis.keys(`${prefix}:storage:temporary:record:*`)).toHaveLength(0);
+  });
+
+  it('returns the verified playback size before and after the resource is claimed', async () => {
+    const { user, upload } = await uploaded(true);
+    const app = await buildApiServer({ config });
+    const url = `/api/v1/media/resources/${upload.resourceId}/playback`;
+    const headers = fixtureScopeHeaders(user.bearer);
+    try {
+      const temporary = await app.inject({ url, headers });
+      expect(temporary.statusCode, temporary.body).toBe(200);
+      expect(temporary.headers['cache-control']).toBe('no-store');
+      expect(temporary.json().data).toMatchObject({ resourceId: upload.resourceId, sizeBytes: bytes.length });
+
+      await claim(user, upload.resourceId);
+      expect(await uploads.get(upload.resourceId)).toBeUndefined();
+      const claimed = await app.inject({ url, headers });
+      expect(claimed.statusCode, claimed.body).toBe(200);
+      expect(claimed.headers['cache-control']).toBe('no-store');
+      expect(claimed.json().data).toMatchObject({ resourceId: upload.resourceId, sizeBytes: bytes.length });
+    } finally { await app.close(); }
   });
 
   it('provides a generic metadata-only HTTP contract and never accepts a file-body proxy request', async () => {

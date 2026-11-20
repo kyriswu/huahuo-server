@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { EmbeddingAttempt } from './adapters/embedding.js';
+import type { EmbeddingAttempt } from '../../integrations/embedding.js';
 import type { RerankFallback } from './search.js';
 import type { ApplicationMetrics } from '../../plugins/metrics.js';
 import { tracedOperation } from '../../observability/telemetry.js';

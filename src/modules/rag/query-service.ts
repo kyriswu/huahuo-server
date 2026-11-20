@@ -2,25 +2,23 @@ import type pg from 'pg';
 import type {AppConfig} from '../../config/config.js';
 import {DomainError,assertScope,transaction,type Scope} from '../identity/store.js';
 import {snapshotForSource,kbEmbedding,kbTokenizer,knowledgeIndex,type IndexFactory} from '../kb/profile.js';
-import {readSourceBody} from '../kb/repository.js';
-import {tablesForSource,type KbBuild,type KbSourceType,type KbSnapshot} from '../kb/types.js';
+import {listPublishedBuilds,listPublishedChunks,readSourceBody,type KbBuildFilters,type KbChunkCursor,type KbPublishedBuild,type KbPublishedChunk} from '../kb/read.js';
+import type {KbSourceType,KbSnapshot} from '../kb/types.js';
 import type {HybridIndex,KeywordIndex,RecallFilter,SearchOptions} from '../../lib/search-index/types.js';
 import {requireIndexKind} from '../../lib/search-index/factory.js';
 import {digest} from '../../lib/crypto.js';
-import type {EmbeddingClient} from './adapters/embedding.js';
+import type {EmbeddingClient} from '../../integrations/embedding.js';
 import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,fuseRankedRecall,type RerankAdapter,type RagSearchCandidate} from './search.js';
 import {SearchQueryTiming} from './query-timing.js';
-import { assetKinds, type AssetKind } from '../content-assets/asset-kind.js';
+import { assetKinds } from '../content-assets/asset-kind.js';
 import {kbImages,renderKbImages,type KbImage} from '../../lib/kb-images.js';
 export type RagQueryMode='keyword'|'dense'|'hybrid';
-export interface RagQueryInput{query:string;mode?:RagQueryMode;sourceType?:'content_asset'|'file';topK?:number;documentKey?:string;assetMode?:'ids'|'links';filters?:{folderIds?:string[];tagIds?:string[];sourceKinds?:string[];assetKinds?:AssetKind[];from?:string;to?:string;timeField?:'created_at'|'updated_at';};}
+export interface RagQueryInput extends KbBuildFilters {query:string;mode?:RagQueryMode;sourceType?:'content_asset'|'file';topK?:number;assetMode?:'ids'|'links';}
 export interface RagImageRequest{sourceType:KbSourceType;sourceId:string;workspaceId?:string;sourceRevision:string;resourceId:string;}
 export interface RagImageLink{url:string;expiresAt:string;}
 export const ragImageKey=(image:RagImageRequest)=>JSON.stringify([image.sourceType,image.sourceId,image.workspaceId,image.sourceRevision,image.resourceId]);
 export interface RagQueryDependencies{embedding?:EmbeddingClient;index?:IndexFactory;rerank?:RerankAdapter;resolveImages?:(scope:Scope,images:RagImageRequest[])=>Promise<ReadonlyMap<string,RagImageLink>>;}
-interface EligibleBuild extends KbBuild {cursor_created_at:string;source_body?:string|null;source_uri?:string|null;chunk?:ChunkRow;}
 const sourcePageSize=128;
-interface ChunkRow{build_id:string;point_id:string;ordinal:number;source_start:number;source_end:number;content_hash:string;chunk_count:number;}
 export class RagQueryService {
  private indexes=new Map<string,{target:string;index:HybridIndex|KeywordIndex;active:number;revision:number;retired:boolean}>();
  constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly dependencies:RagQueryDependencies={}){}
@@ -45,50 +43,6 @@ export class RagQueryService {
   }};
  }
  async close(){await Promise.all([...this.indexes.values()].map(entry=>entry.index.close()));this.indexes.clear();}
- private async eligible(scope:Scope,input:RagQueryInput,type:'content_asset'|'file',
-  {cursor,ids,includeBody=false,match}:{cursor?:{createdAt:string;id:string};ids?:string[];includeBody?:boolean;match?:{pointIds:string[];target:KbSnapshot['target']}}={}){
-  const {builds}=tablesForSource(type);
-  return transaction(this.pool,async tx=>{await assertScope(tx,scope);
-   const values:unknown[]=[scope.userId,type==='content_asset'?['content_asset']:['file','text'],input.documentKey??null,cursor?.createdAt??null,cursor?.id??null,ids??null,match?.pointIds.length??ids?.length??sourcePageSize];
-   let sourceJoin=type==='content_asset'?`JOIN content_assets asset ON asset.content_asset_id=b.source_id AND asset.user_id=b.user_id AND asset.state='active' AND asset.processing_status='ready'
-     JOIN content_asset_parts p ON p.content_asset_id=asset.content_asset_id AND p.part='raw' AND p.part_revision_id::text=b.source_revision`
-    :`LEFT JOIN rag_ingestion_versions v ON b.source_type='file' AND v.id=b.source_id AND v.user_id=b.user_id AND v.workspace_id=b.workspace_id AND v.content_hash=b.source_revision AND v.active AND v.deleted_at IS NULL AND v.status='SUCCEEDED'
-      LEFT JOIN text_ingestion_jobs j ON b.source_type='text' AND j.id=b.source_id AND j.created_by=b.user_id AND j.workspace_id=b.workspace_id AND j.content_hash=b.source_revision AND j.ingest_status='success'`;
-   if(type==='content_asset'){
-    if(input.filters?.folderIds?.length)sourceJoin+=` AND asset.folder_id=ANY($${values.push(input.filters.folderIds)}::uuid[])
-      AND EXISTS(SELECT 1 FROM asset_folders f WHERE f.folder_id=asset.folder_id AND f.user_id=asset.user_id AND f.state='active')`;
-    if(input.filters?.sourceKinds?.length)sourceJoin+=` AND asset.source_kind=ANY($${values.push(input.filters.sourceKinds)}::text[])`;
-    if(input.filters?.tagIds?.length)sourceJoin+=` AND EXISTS(SELECT 1 FROM content_asset_tags membership JOIN asset_tags at ON at.tag_id=membership.tag_id AND at.user_id=b.user_id WHERE membership.content_asset_id=asset.content_asset_id AND membership.tag_id=ANY($${values.push(input.filters.tagIds)}::uuid[]))`;
-    if(input.filters?.assetKinds?.length)sourceJoin+=` AND asset.asset_kind=ANY($${values.push(input.filters.assetKinds)}::text[])`;
-    const timeField=input.filters?.timeField??'updated_at';
-    if(input.filters?.from)sourceJoin+=` AND date_trunc('milliseconds',asset.${timeField}) >= $${values.push(new Date(input.filters.from).toISOString())}::timestamptz`;
-    if(input.filters?.to)sourceJoin+=` AND date_trunc('milliseconds',asset.${timeField}) <= $${values.push(new Date(input.filters.to).toISOString())}::timestamptz`;
-   }
-   let chunkProjection='',matchedTarget='';
-   if(match){
-    const {chunks}=tablesForSource('content_asset');
-    sourceJoin+=` JOIN ${chunks} c ON c.build_id=b.id AND c.index_status='ready' AND c.point_id=ANY($${values.push(match.pointIds)}::text[])`;
-    chunkProjection=",to_jsonb(c)||jsonb_build_object('chunk_count', b.chunk_count) AS chunk";
-    matchedTarget=` AND b.snapshot #>> '{target,collection}'=$${values.push(match.target.collection)}
-      AND b.snapshot #>> '{target,database}'=$${values.push(match.target.database)}
-      AND b.snapshot #>> '{target,connectionId}'=$${values.push(match.target.connectionId)}`;
-   }
-   const bodyProjection=type==='content_asset'?',p.content_markdown AS source_body':',j.raw_content AS source_body,v.canonical_content_uri AS source_uri';
-   return (await tx.query<EligibleBuild>(`SELECT b.*,to_char(b.created_at,'YYYY-MM-DD HH24:MI:SS.USOF') AS cursor_created_at${type==='content_asset'?',asset.content_asset_revision_id::text AS content_asset_revision_id':''}${includeBody?bodyProjection:''}${chunkProjection} FROM ${builds} b ${type==='file'?`JOIN workspaces w ON w.id=b.workspace_id AND w.user_id=b.user_id AND w.state='ready'`:''}
-     ${sourceJoin} WHERE b.user_id=$1 AND b.source_type=ANY($2::text[]) AND ($3::text IS NULL OR b.source_id::text=$3)
-     AND ($4::timestamptz IS NULL OR (b.created_at,b.id)<($4::timestamptz,$5::uuid))
-     AND ($6::uuid[] IS NULL OR b.id=ANY($6::uuid[])) ${type==='file'?'AND (v.id IS NOT NULL OR j.id IS NOT NULL)':''}
-     AND b.published AND b.status='ready'${matchedTarget} ORDER BY b.created_at DESC,b.id DESC LIMIT $7`,values)).rows;
-  });
- }
- private async chunkPage(scope:Scope,sourceType:KbSourceType,builds:EligibleBuild[],size:number,cursor?:{buildId:string;ordinal:number}){
-  return transaction(this.pool,async tx=>{await assertScope(tx,scope);const tables=tablesForSource(sourceType);
-   return (await tx.query<ChunkRow>(`SELECT c.*,b.chunk_count FROM ${tables.chunks} c JOIN ${tables.builds} b ON b.id=c.build_id
-    WHERE c.build_id=ANY($1::uuid[]) AND b.user_id=$2 AND b.published AND b.status='ready' AND c.index_status='ready'
-    AND ($3::uuid IS NULL OR (c.build_id,c.ordinal)>($3::uuid,$4::integer))
-    ORDER BY c.build_id,c.ordinal LIMIT $5`,[builds.map(b=>b.id),scope.userId,cursor?.buildId??null,cursor?.ordinal??null,size])).rows;
-  });
- }
  async query(scope:Scope,input:RagQueryInput,timing=new SearchQueryTiming()):Promise<{mode:RagQueryMode;query:string;results:Array<Record<string,unknown>>}>{
   const query=input.query?.trim();if(!query||query.length>2000)throw new DomainError(400,'RAG_QUERY_INVALID');
   if(input.assetMode&&!['ids','links'].includes(input.assetMode))throw new DomainError(400,'RAG_ASSET_MODE_INVALID');
@@ -101,7 +55,8 @@ export class RagQueryService {
   const from=filters?.from?Date.parse(filters.from):undefined,to=filters?.to?Date.parse(filters.to):undefined;
   if(isContentAsset&&(!['created_at','updated_at'].includes(timeField)||[from,to].some(n=>n!==undefined&&!Number.isFinite(n))||(from!==undefined&&to!==undefined&&from>to)))throw new DomainError(400,'SEARCH_DATE_INVALID');
   if(isContentAsset&&filters?.assetKinds?.some(kind=>!assetKinds.includes(kind)))throw new DomainError(400,'SEARCH_ASSET_KIND_INVALID');
-  let builds:EligibleBuild[]=[];
+  const buildLookup={sourceType,input,limit:sourcePageSize};
+  let builds:KbPublishedBuild[]=[];
   if(isContentAsset){
    await transaction(this.pool,tx=>assertScope(tx,scope));
    if(!this.config.milvus.address&&!this.dependencies.index){
@@ -110,11 +65,11 @@ export class RagQueryService {
    }
   }
   else{
-   builds=await timing.measure('pg_scope',()=>this.eligible(scope,input,sourceType));
+   builds=await timing.measure('pg_scope',()=>listPublishedBuilds(this.pool,scope,buildLookup));
    if(!builds.length)return {mode,query,results:[]};
   }
   const selected=snapshotForSource(this.config,sourceType,'markdown');
-  const validateBuilds=(page:EligibleBuild[])=>{
+  const validateBuilds=(page:KbPublishedBuild[])=>{
    if(page.some(b=>b.snapshot.target.connectionId!==selected.target.connectionId||b.snapshot.target.database!==selected.target.database||b.snapshot.target.collection!==selected.target.collection||b.snapshot.indexLayout!==selected.indexLayout))throw new DomainError(503,'KB_TARGET_CHANGED');
   };
   validateBuilds(builds);
@@ -126,7 +81,7 @@ export class RagQueryService {
   // ID-only responses let sparse collections amortize filter and RPC overhead.
   const pointPageSize=Math.max(selected.indexLayout==='sparse-v1'?512:256,limit,denseLimit,keywordLimit);
   type Hit=Awaited<ReturnType<KeywordIndex['searchKeyword']>>[number];
-  type Candidate={hit:Hit;row:ChunkRow;build:EligibleBuild};
+  type Candidate={hit:Hit;row:KbPublishedChunk;build:KbPublishedBuild};
   const best=new Map<string,Candidate>();
   try{
    await timing.measure('index_ready',()=>index.ensureReady());
@@ -161,7 +116,7 @@ export class RagQueryService {
       :[await recall(mode,budget)];
      const ids=[...new Set(recalls.flatMap(hits=>hits.filter(hit=>Number.isFinite(hit.score)).map(hit=>hit.chunkKey)))];
      if(!ids.length)break;
-     const matches=await timing.measure('pg_hydrate',()=>this.eligible(scope,input,'content_asset',{match:{pointIds:ids,target:selected.target}}));
+     const matches=await timing.measure('pg_hydrate',()=>listPublishedBuilds(this.pool,scope,{...buildLookup,match:{pointIds:ids,target:selected.target}}));
      const byId=new Map(matches.map(build=>[build.chunk!.point_id,build]));
      const currentRecalls=recalls.map(items=>items.filter(hit=>byId.has(hit.chunkKey)));
      const hits=mode==='hybrid'?fuseRankedRecall(currentRecalls,limit,this.config.milvus.rrfK):currentRecalls[0]!.slice(0,limit);
@@ -179,11 +134,12 @@ export class RagQueryService {
    while(builds.length){
     validateBuilds(builds);
     const byBuild=new Map(builds.map(b=>[b.id,b]));
-    let cursor:{buildId:string;ordinal:number}|undefined;
+    const chunkLookup={sourceType,buildIds:builds.map(build=>build.id),limit:pointPageSize};
+    let cursor:KbChunkCursor|undefined;
     while(true){
-     const rows=await timing.measure('pg_scope',()=>this.chunkPage(scope,sourceType,builds,pointPageSize,cursor));
+     const rows=await timing.measure('pg_scope',()=>listPublishedChunks(this.pool,scope,{...chunkLookup,cursor}));
      if(!rows.length)break;
-     const byPoint=new Map(rows.map(row=>[row.point_id,row])),byWorkspace=new Map<string|undefined,ChunkRow[]>();
+     const byPoint=new Map(rows.map(row=>[row.point_id,row])),byWorkspace=new Map<string|undefined,KbPublishedChunk[]>();
      for(const row of rows){const workspaceId=byBuild.get(row.build_id)!.workspace_id;const group=byWorkspace.get(workspaceId)??[];group.push(row);byWorkspace.set(workspaceId,group);}
      for(const [workspaceId,group]of byWorkspace){
       // Published PostgreSQL chunks authorize these point IDs independently of stored index labels.
@@ -203,7 +159,7 @@ export class RagQueryService {
      const last=rows.at(-1)!;cursor={buildId:last.build_id,ordinal:last.ordinal};
     }
     if(builds.length<sourcePageSize)break;
-    const last=builds.at(-1)!;builds=await timing.measure('pg_scope',()=>this.eligible(scope,input,sourceType,{cursor:{createdAt:last.cursor_created_at,id:last.id}}));
+    const last=builds.at(-1)!;builds=await timing.measure('pg_scope',()=>listPublishedBuilds(this.pool,scope,{...buildLookup,cursor:{createdAt:last.cursor_created_at,id:last.id}}));
    }
    // Source lookup, not a duplicate chunk-text column, is the authority.
    const shortlist=[...best.values()].sort((a,b)=>b.hit.score-a.hit.score||a.hit.chunkKey.localeCompare(b.hit.chunkKey));
@@ -211,7 +167,7 @@ export class RagQueryService {
    const hydrate=async(batch:Candidate[])=>timing.measure('pg_hydrate',async()=>{
     const missing=[...new Set(batch.map(({build})=>build.id).filter(id=>!loaded.has(id)))];
     if(missing.length){
-     const bodies=new Map((await this.eligible(scope,input,sourceType,{ids:missing,includeBody:true})).map(build=>[build.id,build]));
+     const bodies=new Map((await listPublishedBuilds(this.pool,scope,{...buildLookup,ids:missing,includeBody:true})).map(build=>[build.id,build]));
      for(const id of missing){
       const body=bodies.get(id);
       let source:string|null=null;
@@ -236,10 +192,10 @@ export class RagQueryService {
     return hydrated;
    });
    let ranked:RagSearchCandidate[]=[];
-   let current=new Map<string,EligibleBuild>();
+   let current=new Map<string,KbPublishedBuild>();
    const recheck=async()=>{
     const buildIds=[...new Set(ranked.map(c=>String(c.metadata!.buildId)))];
-    current=new Map((buildIds.length?await timing.measure('pg_recheck',()=>this.eligible(scope,input,sourceType,{ids:buildIds})):[]).map(b=>[b.id,b]));
+    current=new Map((buildIds.length?await timing.measure('pg_recheck',()=>listPublishedBuilds(this.pool,scope,{...buildLookup,ids:buildIds})):[]).map(b=>[b.id,b]));
     ranked=ranked.filter(c=>current.get(String(c.metadata!.buildId))?.source_revision===c.metadata!.sourceRevision);
    };
    if(rerank&&shortlist.length){

@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
 import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
 import { scopedConfig } from '../modules/runtime-settings/service.js';
-import { CONTENT_ASSET_EMBEDDING_MODEL, CONTENT_ASSET_EMBEDDING_PROFILE, CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_RERANK_MODEL } from '../modules/rag/model-profile.js';
+import { CONTENT_ASSET_EMBEDDING_MODEL, CONTENT_ASSET_EMBEDDING_PROFILE, CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_RERANK_MODEL } from '../lib/search-index/model-profile.js';
 export const DEFAULT_CONTENT_ASSET_COLLECTION = 'huahuo_kb_content_asset_hybrid_chunks';
 export type Role = 'api-server' | 'admin' | 'worker' | 'scheduler' | 'migrate';
 export type Env = Record<string, string | undefined>;
