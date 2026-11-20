@@ -450,4 +450,4 @@ Note索引依赖功能开关；只改outline/germination不会按raw变化重建
 
 ## AI 模板配置
 
-支持资产纲要与编辑器润色目录、生成接口及纲要结果查询。接口和隔离验证见 [AI 模板配置与 App 契约](runbooks/ai-templates.md)。
+支持资产纲要与编辑器润色目录、生成接口及纲要结果查询。两个场景的生成请求均可通过顶层 `variables` 给提示词中的同名变量传值。请求示例和隔离验证见 [AI 模板配置与 App 契约](runbooks/ai-templates.md)。

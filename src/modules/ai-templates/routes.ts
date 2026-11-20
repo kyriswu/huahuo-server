@@ -9,7 +9,7 @@ import { Envelope, Id, Strict } from '../identity/schemas.js';
 import { DomainError } from '../identity/store.js';
 import { readTrustedScope } from '../identity/trusted-scope.js';
 import type { AiTemplateAgentClient } from './agent-client.js';
-import { ItemKeySchema, RunRequestSchema, SceneKeySchema, type RunRequest, type SceneKey } from './model.js';
+import { ItemKeySchema, RunRequestSchema, SceneKeySchema, validateRunVariables, type RunRequest, type SceneKey } from './model.js';
 import { runData, RunTimeoutMs, type AiTemplateRuns } from './runs.js';
 
 const runPath = '/api/v1/ai-template-runs';
@@ -125,12 +125,15 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
     return success(await runs.outlineResults(scoped(req), contentAssetId), req.id);
   });
 
-  app.post(runPath, {
+  app.post<{ Body: RunRequest }>(runPath, {
     bodyLimit: 400_000,
+    // Check raw variable values before Ajv can coerce JSON types to strings.
+    preValidation: async req => validateRunVariables(req.body?.variables),
     schema: {
       summary: '使用 AI 模板生成文本',
       description: '默认一次性返回 JSON。发送 Accept: text/event-stream 选择 SSE。'
-        + '流式成功以 result 事件结束，其数据与 JSON 的成功响应一致。进行中和开流前的错误使用 JSON。',
+        + '流式成功以 result 事件结束，其数据与 JSON 的成功响应一致。进行中和开流前的错误使用 JSON。'
+        + '可用 variables 为提示词的同名占位符提供字符串值。系统变量优先，未匹配的占位符会移除。',
       body: RunRequestSchema,
       response: {
         200: { content: {
@@ -158,7 +161,7 @@ export function registerAiTemplateRoutes(app: FastifyInstance, runs: AiTemplateR
     const signal = AbortSignal.any([disconnect.signal, AbortSignal.timeout(RunTimeoutMs)]);
     reply.header('Vary', 'Accept');
     const stream = acceptsStream(req.headers.accept);
-    const { run, input } = await runs.begin(scope, key, req.body as RunRequest, agent.available);
+    const { run, input } = await runs.begin(scope, key, req.body, agent.available);
     if (!input) {
       if (run.state !== 'succeeded' || !stream) return readRun(reply, run, req.id);
       const result = success(runData(run), req.id);

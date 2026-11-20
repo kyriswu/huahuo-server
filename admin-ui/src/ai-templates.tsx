@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 
 import type { AiTemplateCatalog } from '../../src/modules/ai-templates/catalog.js';
 import type { Catalog, SceneKey } from '../../src/modules/ai-templates/model.js';
+import { PromptEditor } from './prompt-editor';
 import { AdminApiError, adminRequest } from './session';
 
 type Item = Catalog['items'][number];
@@ -14,7 +15,6 @@ const scenes = [
 const fallbackMessages: Record<string, string> = {
   AI_TEMPLATE_DRAFT_CONFLICT: '其他人已更新草稿。请先复制需要保留的内容，再重新加载。',
   AI_TEMPLATE_PROMPT_REQUIRED: '请为每个可用模板填写提示词。',
-  AI_TEMPLATE_VARIABLE_INVALID: '提示词含有当前场景不支持的变量。',
   AI_TEMPLATE_PARENT_INVALID: '请为子模板选择已有分组。',
   AI_TEMPLATE_TEXT_INVALID: '文案或提示词含有无效字符，请检查复制的内容。',
   BAD_REQUEST: '请检查标题、提示词和展示数量。',
@@ -202,6 +202,16 @@ export function AiTemplatesPage({ csrfToken, onSessionExpired }: { csrfToken: st
         ? <Button size="small" onClick={() => { if (!dirty || window.confirm('重新加载并放弃未保存的修改？')) load(scene); }}>重新加载</Button>
         : undefined} />}
 
+      <details className="min-w-0 rounded-lg border border-console-line bg-white px-3 py-2 text-sm">
+        <summary className="cursor-pointer font-medium">变量用法与 API 传参</summary>
+        <div className="mt-2 grid gap-2 text-console-muted">
+          <p>在提示词中写入 <code>{'{{语气}}'}</code> 或 <code>{'{{目标.读者}}'}</code>。同名变量会用相同颜色标记。</p>
+          <p><code className="wrap-anywhere text-console-ink">POST /api/v1/ai-template-runs</code> 的请求体可添加顶层 <code>variables</code>。字段名自定，值为字符串。</p>
+          <pre className="rounded-md bg-console-canvas px-3 py-2 whitespace-pre-wrap wrap-anywhere text-console-ink">{'{ "variables": { "语气": "简洁", "目标.读者": "项目组" } }'}</pre>
+          <p>变量按名称逐字匹配，区分大小写。系统变量优先，缺值的占位符会移除，多余字段会忽略。</p>
+        </div>
+      </details>
+
       {!catalog && !notice && <Skeleton active paragraph={{ rows: 6 }} />}
       {catalog && <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(240px,0.9fr)_minmax(0,2fr)]">
         <section className="min-w-0 self-start rounded-xl border border-console-line bg-white p-3 sm:p-4" aria-label="模板目录">
@@ -272,12 +282,10 @@ export function AiTemplatesPage({ csrfToken, onSessionExpired }: { csrfToken: st
                   </button>
                 </Tooltip>
               </div>
-              <Field label="提示词">
-                <Input.TextArea rows={8} maxLength={10_000} showCount value={selected.prompt}
-                  onChange={change => updateItem({ ...selected, prompt: change.target.value })} />
-              </Field>
+              <PromptEditor key={selected.itemKey} maxLength={10_000} value={selected.prompt}
+                onChange={prompt => updateItem({ ...selected, prompt })} />
               <div className="flex flex-wrap items-center gap-2 text-sm text-console-muted">
-                <span>插入变量</span>
+                <span>插入系统变量</span>
                 {view?.variables.map(variable => {
                   const placeholder = `{{${variable}}}`;
                   return <Button size="small" key={variable} disabled={!!pending || selected.prompt.length + placeholder.length > 10_000}

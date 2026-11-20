@@ -110,8 +110,11 @@ afterAll(async () => {
 
 const editor = '/api/v1/ai-template-scenes/editor_polish/items';
 const adminEditor = '/admin/api/v1/ai-template-scenes/editor_polish';
+const adminOutline = '/admin/api/v1/ai-template-scenes/content_asset_outline';
 const runPath = () => `/api/v1/ai-template-runs`;
-const editorBody = { sceneKey: 'editor_polish', itemKey: 'relation_peer', input: { text: '一段原文' } };
+const editorBody = {
+  sceneKey: 'editor_polish', itemKey: 'relation_peer', input: { text: '一段含有{{templateTitle}}和{{读者}}的原文' },
+};
 const generate = (payload: object, idempotency = randomUUID() as string, accept?: string) =>
   api.inject({
     method: 'POST', url: runPath(),
@@ -141,7 +144,7 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     const peer = catalog.items.find(item => item.itemKey === 'relation_peer');
     if (!peer || peer.kind !== 'template') throw new Error('Missing peer template');
     peer.title = '平等沟通';
-    peer.prompt = '请按{{templateTitle}}改写。';
+    peer.prompt = '请按{{ templateTitle }}改写。语气：{{ tone.level-name }}。读者：{{读者}}。备注：{{未填写}}。标题：{{sourceTitle}}。';
     const edit = { draftRevision: view.draftRevision, catalog };
     const csrfFailure = await admin.inject({ method: 'PUT', url: adminEditor + '/draft', headers: { ...auth, 'x-csrf-token': 'invalid' }, payload: edit });
     expect(csrfFailure.statusCode).toBe(403);
@@ -160,17 +163,34 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     expect((await groupList()).json().data.items[0]).toMatchObject({ title: '平等沟通' });
     expect((await groupList()).body).not.toContain('请按');
 
+    const rejectedVariables = await generate({ ...editorBody, variables: { 读者: 123 } });
+    expect(rejectedVariables.statusCode).toBe(400);
+    expect(rejectedVariables.json().error.code).toBe('AI_TEMPLATE_VARIABLES_INVALID');
+
+    const variables = {
+      'tone.level-name': '自然', 读者: '同事', sourceTitle: '示例标题', templateTitle: '错误的模板标题',
+      '未填写 ': '不匹配的同名字段', unused: '多余值',
+    };
+    const jsonBody = { ...editorBody, variables };
     const jsonKey = randomUUID();
-    const json = await generate(editorBody, jsonKey);
+    const json = await generate(jsonBody, jsonKey);
     expect(json.statusCode).toBe(200);
     expect(json.headers['content-type']).toContain('application/json');
     expect(json.headers.vary).toBe('Accept');
     expect(json.json().data).toMatchObject({
       state: 'succeeded', templateVersion: active.publishedRevision, result: { text: '花火生成结果' },
     });
-    expect(fakeCalls.at(-1)).toEqual({ prompt: '请按平等沟通改写。', text: editorBody.input.text, stream: false });
+    expect(fakeCalls.at(-1)).toEqual({
+      prompt: '请按平等沟通改写。语气：自然。读者：同事。备注：。标题：示例标题。',
+      text: editorBody.input.text,
+      stream: false,
+    });
     const jsonCalls = fakeCalls.length;
-    const sseReplay = await generate(editorBody, jsonKey, 'text/event-stream');
+    const conflict = await generate({ ...jsonBody, variables: { ...variables, 读者: '朋友' } }, jsonKey);
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error.code).toBe('IDEMPOTENCY_CONFLICT');
+    const reorderedVariables = Object.fromEntries(Object.entries(variables).reverse());
+    const sseReplay = await generate({ ...jsonBody, variables: reorderedVariables }, jsonKey, 'text/event-stream');
     expect(sseReplay.headers['content-type']).toContain('text/event-stream');
     expect(sseReplay.body).toContain('event: result\ndata:');
     expect(sseReplay.body).toContain('"runId":"' + json.json().data.runId + '"');
@@ -186,9 +206,11 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     expect(streamed.body).toContain('event: result\ndata:');
     expect(streamed.body).toContain('"text":"花火生成结果"');
     expect(fakeCalls).toHaveLength(jsonCalls + 1);
-    expect(fakeCalls.at(-1)?.stream).toBe(true);
+    expect(fakeCalls.at(-1)).toEqual({
+      prompt: '请按平等沟通改写。语气：。读者：。备注：。标题：。', text: editorBody.input.text, stream: true,
+    });
     const streamedCalls = fakeCalls.length;
-    const jsonReplay = await generate(editorBody, streamKey, 'text/event-stream;q=0, application/json');
+    const jsonReplay = await generate({ ...editorBody, variables: {} }, streamKey, 'text/event-stream;q=0, application/json');
     expect(jsonReplay.headers['content-type']).toContain('application/json');
     expect(streamed.body).toContain('"runId":"' + jsonReplay.json().data.runId + '"');
     expect(fakeCalls).toHaveLength(streamedCalls);
@@ -218,11 +240,24 @@ describe('AI template configuration against isolated PostgreSQL', () => {
   });
 
   it('deduplicates generation, scopes results and invalidates outline status when raw content changes', async () => {
+    const view = (await admin.inject({ url: adminOutline, headers: auth })).json().data as SceneView;
+    const catalog = structuredClone(view.draft);
+    const meeting = catalog.items.find(item => item.itemKey === 'work_meeting');
+    if (!meeting || meeting.kind !== 'template') throw new Error('Missing meeting template');
+    meeting.prompt = '使用{{templateTitle}}整理《{{sourceTitle}}》。受众为{{会议/受众}}。';
+    const published = await admin.inject({
+      method: 'POST', url: adminOutline + '/publish', headers: auth, payload: { draftRevision: view.draftRevision, catalog },
+    });
+    expect(published.statusCode).toBe(200);
+
     const contentAsset = await contentAssets.createContentAsset(fixture.scope, {
       title: '会议笔记', parts: { raw: '会议需要确认三项决定。' },
     }, randomUUID());
     const input = { contentAssetId: contentAsset.contentAssetId, sourceRevision: contentAsset.parts.raw!.partRevisionId };
-    const payload = { sceneKey: 'content_asset_outline', itemKey: 'work_meeting', input };
+    const payload = {
+      sceneKey: 'content_asset_outline', itemKey: 'work_meeting', input,
+      variables: { '会议/受众': '业务组', templateTitle: '错误的模板标题', sourceTitle: '错误的资产标题' },
+    };
     const statePath = `/api/v1/content-assets/${contentAsset.contentAssetId}/ai-outline-results`;
     const idempotency = randomUUID();
     const before = fakeCalls.length;
@@ -244,6 +279,9 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     }
     const success = (await first).json().data;
     expect(success).toMatchObject({ state: 'succeeded', result: { ...input, outlineMarkdown: '花火生成结果' } });
+    expect(fakeCalls.at(-1)).toEqual({
+      prompt: '使用工作会议整理《会议笔记》。受众为业务组。', text: '会议需要确认三项决定。', stream: false,
+    });
     expect((await generate(payload, idempotency)).json().data).toEqual(success);
     expect(fakeCalls).toHaveLength(before + 1);
     expect((await api.inject({ url: statePath, headers: fixture.headers })).json().data.items).toEqual([

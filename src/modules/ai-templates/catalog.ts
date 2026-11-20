@@ -3,7 +3,8 @@ import type pg from 'pg';
 
 import { assertAdminSession, type AdminScope } from '../admin/service.js';
 import { DomainError, transaction } from '../identity/store.js';
-import { promptVariables, validateCatalog, type Catalog, type SceneKey } from './model.js';
+import { validateCatalog, type Catalog, type SceneKey } from './model.js';
+import { systemPromptVariables } from './prompt-variables.js';
 
 type DraftRow = { draft: Catalog; draft_revision: number; published_revision: number };
 type VersionRow = { revision: number; published_at: Date; restored_from: number | null };
@@ -39,7 +40,7 @@ export class AiTemplateCatalog {
       draftRevision: row.draft_revision,
       publishedRevision: row.published_revision,
       hasUnpublishedDraft: row.has_unpublished_draft,
-      variables: scene === 'content_asset_outline' ? [...promptVariables] : ['templateTitle'],
+      variables: [...systemPromptVariables[scene]],
       history: history.map(version => ({
         version: version.revision, publishedAt: version.published_at.toISOString(), restoredFrom: version.restored_from,
       })),
@@ -75,7 +76,7 @@ export class AiTemplateCatalog {
       } else {
         catalog = edit.catalog;
       }
-      validateCatalog(scene, catalog, edit.action !== 'save');
+      validateCatalog(catalog, edit.action !== 'save');
 
       let publishedRevision = current.published_revision;
       if (edit.action !== 'save') {

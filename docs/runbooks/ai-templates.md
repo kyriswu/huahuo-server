@@ -6,8 +6,10 @@ Admin 在「AI 模板配置」编辑展示内容、首屏数量、顺序、分�
 草稿和发布版本有各自的版本号。每次发布或回滚在同一事务写入一个新版本和发布审计。
 已开始的请求记录开始时读取的版本。模板项键可长期用于关联资产结果。
 
-提示词支持 `{{templateTitle}}`，资产纲要也可用 `{{sourceTitle}}`。提示词与正文
-分别作为模型指令和用户文本传给 Agent。润色正文、修改位置、建议和理由可由后台发布的提示词定义，前端可按约定的分隔符解析同一次生成返回的文本。分隔符可能跨多个 SSE 片段。
+在提示词里输入或粘贴 `{{变量名}}` 后，Admin 自动标出变量。同一提示词内同名变量使用同色。
+展开「变量用法与 API 传参」可查看匹配规则和请求示例。
+两个场景均提供系统变量 `{{templateTitle}}`，资产纲要也提供 `{{sourceTitle}}`。
+提示词与正文分别作为模型指令和用户文本传给 Agent。润色正文、修改位置、建议和理由可由后台发布的提示词定义，前端可按约定的分隔符解析同一次生成返回的文本。分隔符可能跨多个 SSE 片段。
 
 ## App
 
@@ -16,7 +18,7 @@ App 通过现有鉴权入口访问 Server，模板运行按登录账号校验会
 | 方法和路径 | 请求与结果 |
 | --- | --- |
 | `GET /api/v1/ai-template-scenes/:sceneKey/items` | 场景为 `content_asset_outline` 或 `editor_polish`。可传 `parentKey=relation_shift` 读取二级目录。返回 `revision`、`title`、`displayLimit`、`totalCount` 和排序后的 `items`。每项包含 `itemKey`、`kind`、标题、副标题、图标和子项数。 |
-| `POST /api/v1/ai-template-runs` | 传 `sceneKey`、`itemKey`、`input` 与 `X-Idempotency-Key`。纲要输入为 `{contentAssetId, sourceRevision}`，其中 `sourceRevision` 是资产 `parts.raw.partRevisionId`。润色输入为 `{text}`。 |
+| `POST /api/v1/ai-template-runs` | 传 `sceneKey`、`itemKey`、`input` 与 `X-Idempotency-Key`。可选的顶层 `variables` 为提示词提供变量值。纲要输入为 `{contentAssetId, sourceRevision}`，其中 `sourceRevision` 是资产 `parts.raw.partRevisionId`。润色输入为 `{text}`。 |
 | `GET /api/v1/ai-template-runs/:runId` | 读取同一用户的运行状态或结果。进行中返回 202，成功返回 200，失败使用 Server 错误信封。 |
 | `GET /api/v1/content-assets/:contentAssetId/ai-outline-results` | 返回当前原文版本下每个已生成模板的最新成功记录，用于「已整理」。记录含 `itemKey`、`runId`、`templateVersion` 和生成时间。 |
 
@@ -24,6 +26,22 @@ App 通过现有鉴权入口访问 Server，模板运行按登录账号校验会
 `state: "succeeded"` 和 `result`。润色结果为 `{text}`，纲要为
 `{contentAssetId, sourceRevision, outlineMarkdown}`。用户选择应用纲要时，可调用
 现有资产 `PUT /parts/outline` 并携带 `If-Match` 与新的保存幂等键。
+
+例如，提示词 `请用 {{语气}} 为 {{目标.读者}} 润色以下文字。` 可使用以下请求体。
+
+```json
+{
+  "sceneKey": "editor_polish",
+  "itemKey": "improve_opening",
+  "input": { "text": "今天讨论了新方案。" },
+  "variables": { "语气": "简洁", "目标.读者": "项目组" }
+}
+```
+
+`variables` 的字段名可以自定义，值为字符串，也可传空字符串。Server 去掉占位符名称两端的空白，再与请求字段名逐字匹配，区分大小写。当前场景的系统变量优先。没有对应值的占位符会移除，模板未引用的字段不参与生成。值里带有双花括号时只插入一次。正文按原样传给 Agent。
+
+变量值最多 10,000 个 UTF-16 码元，生成请求体最多 400,000 字节，展开后的提示词最多 12,000 个 UTF-16 码元。若展开后没有实际指令，返回 `400 AI_TEMPLATE_PROMPT_INVALID`。
+使用同一幂等键重试时，提交的变量键和值要一致，键顺序可以变动。省略 `variables` 等同于传空对象。
 
 同一个生成接口的 OpenAPI 成功响应提供 `application/json` 和 `text/event-stream`。
 App 每次调用通过 `Accept` 选择，所有模板都支持以下两种方式。
@@ -56,4 +74,5 @@ Server 将终态写入业务库，并为 App 转换 SSE 事件。内部接口的
 
 `tests/integration/ai-templates.test.ts` 用真实隔离 PostgreSQL/Redis、API 和
 Admin 各自的数据库账号，以及本机 Agent HTTP 替身验证配置发布、并发冲突、
-回滚、目录子项、身份和 CSRF、幂等执行、JSON/SSE、工作区归属、纲要应用与原文版本。
+回滚、目录子项、身份和 CSRF、两场景的变量匹配、幂等执行、JSON/SSE、账号归属、纲要应用与原文版本。
+只读核对 App 提交 `fe6a02c`，`free_writing_page.dart` 和 `compose_inspiration_page.dart` 的 AI 润色按钮当前显示「AI 润色暂未接入」。本轮验收覆盖 Admin 与 Server HTTP 契约。
