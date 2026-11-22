@@ -17,6 +17,7 @@ const controlFiles = new Set([
   '.codex/config.toml', 'scripts/codegraph-worktree.sh',
 ]);
 const noApplicationChange = path => controlFiles.has(path) || path.startsWith('docs/') || path.startsWith('.agents/skills/')
+  || path.startsWith('deploy/k8s/')
   || ['.github/CODEOWNERS', '.gitignore', 'AGENTS.md'].includes(path);
 
 /** Read merged-PR changes, including rename sources; never run test code/artifacts. */
