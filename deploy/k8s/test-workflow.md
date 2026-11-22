@@ -6,12 +6,13 @@
 
 既有 **Server CI** 跑类型检查、Lint、应用编译、单元和契约测试，以及独立的 PostgreSQL、Redis 集成测试。集成任务会从发布清单的基准演练迁移。[Server CI](../../.github/workflows/release-smoke-check.yml) · [集成测试入口](../../scripts/integration.mjs)
 
-[Test server release](../../.github/workflows/test-server-release.yml) 在准确的 `test` push CI 通过后启动，也可以从受保护的 `main` 手动触发。它先检查发布意图和兼容清单，再校验当前 `main`、`test` 和对应的成功 CI。取得 OIDC 临时身份后重新核对目标，调用一次固定云助手命令并等待部署回执。先完成宿主手动演练和变量配置，再合入切换工作流。
+[Test server release](../../.github/workflows/test-server-release.yml) 使用受保护的 `main` 上的控制代码，部署通过 CI 的 `test` 提交到测试 ACK。它先检查发布意图和兼容清单，取得 OIDC 临时身份后重新核对提交，再调用一次固定云助手命令并等待部署回执。先完成 Node01 发布权限、固定命令和公网入口验收，再合入工作流。合入后从 `main` 手动运行并核对部署回执，通过后再开启 `test` push CI 后的自动发布。
 
 | 变量 | 对应值 |
 | --- | --- |
 | `TEST_ACK_BUILDER_INSTANCE_ID` | 北京 Node01 ECS 实例 ID |
 | `TEST_ACK_RELEASE_COMMAND_ID` | 该 ECS 的固定发布命令 ID |
+| `TEST_ACK_AUTO_RELEASE` | 仓库级变量。手动验收通过后设为 `true`。未设置时只接受手动触发 |
 
 专用 RAM 角色 `huahuo-server-test-release` 使用固定 Node01 和保存命令所需的 `InvokeCommand` 与 `DescribeInvocationResults` 权限。保存命令接收唯一参数 `sha`，从受保护的宿主控制目录执行 `verify-from-ecs.sh "$sha" --rollout`。保存命令上限 85 分钟，Actions 轮询上限 87 分钟，STS 会话上限 90 分钟。构建或预检耗时过长、剩余时间不足时，执行器在更新 Deployment 前停止。提交结果不确定或轮询失败时，先查云助手调用和构建机日志。
 

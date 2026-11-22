@@ -1,6 +1,6 @@
 name: Test server release
 
-# Protected main reacts to successful test push CI; manual dispatch remains for recovery.
+# Exercise the ACK release with manual dispatch before enabling the test CI trigger.
 # All runner-side control code and dependencies come from main, never test.
 # This does not replace the authenticated release-smoke workflow.
 on:
@@ -31,7 +31,8 @@ jobs:
       github.repository == 'kyriswu/huahuo-server' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' &&
+       (github.event_name == 'workflow_run' && vars.TEST_ACK_AUTO_RELEASE == 'true' &&
+        github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'test' &&
         github.event.workflow_run.head_repository.full_name == 'kyriswu/huahuo-server'))
     environment: test
