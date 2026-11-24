@@ -36,7 +36,7 @@
 
 分段协调输入身份/版本/标题/正文，最多 32 段、每段 16,000 UTF-16 单元，逐段输出严格校验后按频次稳定合并最多 5 标签。超预算/不合法结果拒绝整个结果，不写部分标签；分段临时内存处理，无向量切片表。
 
-原文件先完成通用上传。在需要整理为资产的业务里，可调用 `POST /content-assets` 传入空 `parts.raw` 并引用 `resourceId`，此时资产状态为 `needs-processing`，可手动编辑标签。`POST /content-asset-imports` 用于可编辑的纯文本和 Markdown。 [资源上传](user-storage-layout.md)
+原文件先完成通用上传。在需要整理为资产的业务里，可调用 `POST /content-assets` 传入空 `parts.raw` 并引用 `resourceId`。此时资产的 `contentStatus` 为 `draft`，可手动编辑标签。`POST /content-asset-imports` 用于可编辑的纯文本和 Markdown。标签接口继续通过 `processingStatus` 返回 `ready` 或 `needs-processing`，后者表示内容尚未就绪。标签提取进度由 `extraction` 返回。 [资源上传](user-storage-layout.md) · [资产内容状态](../content-assets.md#资产内容状态)
 
 ## 历史验收 · P06 初次验收
 

@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "id": "20261124-asset-link-kind",
+  "id": "20261124-content-asset-status",
   "baseRevision": "4589d94f3b256df972f868f7c67fd17ec74c5070",
   "services": ["api-server", "admin", "worker", "scheduler"],
   "database": {
-    "migrations": ["0026_asset_link_kind.sql"],
-    "verifySql": "scripts/release/changes/20261124-asset-link-kind/verify-db.sql",
-    "dataChange": {"mode": "separate", "reason": "迁移转换明确标记为链接的旧资产。已发布的 Milvus 分块另行刷新分类元数据，工作量按目标环境的分块数量核对。"}
+    "migrations": ["0026_asset_link_kind.sql", "0027_content_asset_status.sql"],
+    "verifySql": "scripts/release/changes/20261124-content-asset-status/verify-db.sql",
+    "dataChange": {"mode": "separate", "reason": "0026 转换明确标记为链接的旧资产，已发布的 Milvus 分块另行刷新分类元数据。0027 在迁移事务内把旧状态 needs-processing 转换为 draft。发布预检核对待转换资产规模和锁预算，迁移前暂停并排空旧资产写入方，验收通过后只恢复新版写入。"}
   },
   "configuration": {
     "mode": "candidate",
@@ -16,7 +16,7 @@
       { "key": "PROCESSING_NODES_ENABLED", "operation": "add", "roles": ["api-server", "admin", "worker", "scheduler"], "required": false, "hasDefault": true }
     ],
     "reviewedFiles": [".env.example", ".env.host.example", ".env.host.migrate.example", ".env.compose.cloud.example", ".env.compose.local.example", "compose.yaml", "deploy/local/compose.deps.yaml", "deploy/k8s/config/api.env.example", "deploy/k8s/config/common.env.example", "src/config/config.ts", "src/config/processing-nodes.ts", "src/config/sms.ts"],
-    "verifyFile": "scripts/release/changes/20261124-asset-link-kind/verify-config.mjs"
+    "verifyFile": "scripts/release/changes/20261124-content-asset-status/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": { "required": true, "reference": "docs/runbooks/milvus.md" },

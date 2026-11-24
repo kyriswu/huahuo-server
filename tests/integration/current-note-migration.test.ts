@@ -324,4 +324,39 @@ describe('current-only note content and retired settings migrations',()=>{
   await tx.query('ROLLBACK TO SAVEPOINT invalid_kind');
  }));
 
+
+ it('backfills legacy asset content status and enforces the four supported values',async()=>fixture(async(tx,schema)=>{
+  await tx.query(`SET LOCAL search_path TO ${schema}, pg_catalog;
+   CREATE TABLE content_assets(
+    content_asset_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    title text NOT NULL,
+    state text NOT NULL DEFAULT 'active',
+    processing_status text NOT NULL DEFAULT 'ready',
+    updated_at timestamptz NOT NULL DEFAULT '2026-02-01T00:00:00.654321Z',
+    CONSTRAINT content_assets_processing_status_check CHECK (processing_status IN ('ready','needs-processing'))
+   );
+   INSERT INTO content_assets(title,state,processing_status) VALUES
+    ('empty asset','active','needs-processing'),
+    ('deleted asset','deleted','needs-processing'),
+    ('usable asset','active','ready');`);
+  const read = async()=> (await tx.query(`SELECT content_asset_id,title,state,processing_status,
+   updated_at::text AS updated_at FROM content_assets ORDER BY title`)).rows;
+  const before = await read();
+
+  await tx.query(sql(27,schema));
+
+  expect(await read()).toEqual(before.map(row=>row.processing_status==='needs-processing'?{...row,processing_status:'draft'}:row));
+  expect((await tx.query(`INSERT INTO content_assets(title) VALUES ('default asset')
+   RETURNING processing_status`)).rows).toEqual([{processing_status:'ready'}]);
+  const statuses = ['draft','failed','processing','ready'];
+  const inserted = await tx.query<{processing_status:string}>(`INSERT INTO content_assets(title,processing_status)
+    SELECT 'new ' || status,status FROM unnest($1::text[]) AS supplied(status)
+    RETURNING processing_status`,[statuses]);
+  expect(inserted.rows.map(row=>row.processing_status).sort()).toEqual(statuses);
+  await tx.query('SAVEPOINT invalid_status');
+  await expect(tx.query(`INSERT INTO content_assets(title,processing_status) VALUES ('legacy writer','needs-processing')`))
+   .rejects.toMatchObject({code:'23514',constraint:'content_assets_processing_status_check'});
+  await tx.query('ROLLBACK TO SAVEPOINT invalid_status');
+ }));
+
 });

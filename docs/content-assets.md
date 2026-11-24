@@ -23,6 +23,19 @@
 
 新增分类时，在公共枚举追加稳定的值，确保可存入 Milvus 现有 32 字节字段，并追加一条 PostgreSQL 迁移扩展 `CHECK`。更新已有客户端接口文档。需要给存量资产重新分类时，再评估对应的数据迁移与索引元数据刷新。隔离集成测试核对最新 PostgreSQL 约束与代码枚举。 [约束回归](../tests/integration/content-asset-pagination.test.ts) · [迁移和索引刷新](runbooks/milvus.md#0026-链接资产分类同步)
 
+## 资产内容状态
+
+列表中的每项资产和详情均返回 `contentStatus`，由服务端写入 `content_assets.processing_status`。自由创作、图片、音频、文件和链接共用同一组状态。资产的 `state` 记录是否软删除，原文件的上传状态由 `Resource` 管理。 [公共契约](../src/contracts/content-status.ts)
+
+| 值 | 含义 |
+|---|---|
+| `draft` | 撰写中，或资产所需内容尚未就绪且没有正在处理的任务。 |
+| `processing` | 后台任务正在处理资产内容。 |
+| `ready` | 资产所需的内容已就绪。 |
+| `failed` | 后台任务处理资产内容失败。 |
+
+当前创建和编辑以保存的原文为准。空白原文进入 `draft`，保存非空原文或成功导入纯文本／Markdown 后进入 `ready`，仅修改标题、文件夹或资源关联时保留原状态。音频转写和链接内容提取尚未接入资产状态写回。标签提取和搜索索引各自管理任务状态。 [接口对照](contract-compatibility.md#p06-个人资产文件夹检索与图谱)
+
 ## 搜索与观测
 
 *Hybrid search* 对应 `hybrid`，支持关键词和向量召回。*Keyword search* 对应 `keyword`，使用关键词召回。业务来源决定表与集合，搜索模式决定索引能力。当前资产原文使用 `hybrid` 索引，独立文件和文本记录使用 `keyword` 索引。 [索引与查询](runbooks/milvus.md)
