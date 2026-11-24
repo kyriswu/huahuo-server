@@ -168,12 +168,20 @@ it('keeps SQL round trips bounded and independent of page length', async () => {
   expect(twenty.count).toBeLessThanOrEqual(8);
 });
 
-it('keeps full Markdown in the separate contentAsset detail response', async () => {
+it('returns full Markdown using one locked contentAsset lookup', async () => {
   const f = await fixture(), ids = await seed(f, 1), content = '完整正文\n'.repeat(2000);
   await root.query(`INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256)
     VALUES($1,$2,'raw',1,$3,$4)`, [randomUUID(), ids[0], content, createHash('sha256').update(content).digest('hex')]);
-  const contentAsset = await contentAssets.getContentAsset(f.scope, ids[0]!);
-  expect(contentAsset.parts.raw!.contentMarkdown).toBe(content);
+  const client = await pool.connect();
+  const queries = vi.spyOn(client, 'query');
+  const detailPool = { connect: async () => client } as unknown as typeof pool;
+  try {
+    const contentAsset = await new ContentAssetService(detailPool, config.appTokenSecret!).getContentAsset(f.scope, ids[0]!);
+    expect(contentAsset.parts.raw!.contentMarkdown).toBe(content);
+    const assetLookups = queries.mock.calls.map(([sql]) => sql).filter(sql => sql.includes('FROM content_assets asset'));
+    expect(assetLookups).toHaveLength(1);
+    expect(assetLookups[0]).toContain('FOR SHARE OF asset');
+  } finally { queries.mockRestore(); }
 });
 
 it('returns the persisted asset kind and content status in both list and detail responses', async () => {

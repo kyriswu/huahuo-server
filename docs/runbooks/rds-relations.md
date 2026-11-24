@@ -2,13 +2,9 @@
 
 PostgreSQL / RDS 使用普通关联 ID 和查询索引，不创建物理外键，也不使用触发器模拟跨表外键。主键、唯一、NOT NULL 和业务 CHECK 保留。所属 Service / Repository 在事务边界检查对象存在、用户与 Workspace 归属、修订和有效状态；删除遵循软删除或显式定向清理，不依赖数据库级联。
 
-## 唯一数据库基线
+## 数据库初始化
 
-`migrations/0001_initial_schema.sql` 是当前唯一初始化 Schema，覆盖统一身份、业务数据、任务、存储与 RAG。它不包含用户数据、密钥、物理外键或旧结构升级路径。运行代码和 ORM 只面向这份最终模型，没有旧用户表别名、旧章节 Parent 表或历史结构兼容分支。
-
-已在原阿里云 `huahuo` 数据库完成保留数据的安全切换，未创建新数据库。自动审批允许的方案将旧 `public` 整个Schema原样改名为 `initialization_backup`，再创建新 `public` 并应用唯一基线；此前DELETE/DROP清空操作未执行，任何旧行都未删除。日常启动、迁移重放和应用请求不重复归档或清库。
-
-新 `public.schema_migrations` 记录该基线的checksum，当前版本为1，重放已验证返回`applied=[]`。封存Schema的旧账本不作为当前基线，不通过旧表或旧账本继续运行。
+新库从 `migrations/0001_initial_schema.sql` 开始按编号执行到当前版本，已有库依据 `public.schema_migrations` 中的编号与校验和只执行待应用的增量。应用和 ORM 使用增量执行后的表结构。下方归档和单基线结果属于 2026-11-05 的同库切换。 [迁移流程](standard-release.md#migration-与只读验收)
 
 ## 统一用户与关联模型
 
@@ -57,7 +53,7 @@ pnpm test:integration
 git diff --check
 ```
 
-集成测试使用独立临时PostgreSQL/Redis，不读取开发库配置。本次typecheck、lint、build、229项unit/contract和115项独立integration通过；额外6项隔离Schema归档安全检查通过。真实RDS切换与运行发布另按下述证据记录，不把Mock或隔离测试冒充真实环境验收。
+集成测试使用独立临时 PostgreSQL／Redis。2026-11-05 的验收包括 229 项单元及契约测试、115 项集成测试和 6 项独立归档实验。一次性归档实验的结果保留在本记录中，日常验证使用上面的回归用例。真实 RDS 切换另见下方记录。
 
 ## 真实同库切换验收（2026-11-05）
 

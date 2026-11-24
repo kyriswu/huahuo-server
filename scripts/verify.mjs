@@ -1,18 +1,37 @@
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { docker, localProject } from './docker-project.mjs';
-const {compose}=localProject();
-const steps=[];
-function run(name,fn){const started=Date.now();fn();steps.push({name,exitCode:0,durationMs:Date.now()-started});}
-for(const command of ['typecheck','lint','build','test:unit','test:contract'])run(`pnpm ${command}`,()=>docker(['run','--rm','-v',`${resolve('.')}:/app`,'huahuo-server-tooling:p01','pnpm',command],{stdio:'inherit'}));
-run('pnpm test:integration',()=>execFileSync(process.execPath,['scripts/integration.mjs'],{stdio:'inherit'}));
-run('local compose config',()=>compose(['config','--quiet']));
-run('cloud compose config',()=>{
- docker(['compose','--env-file','.env.compose.cloud.example','config','--quiet']);
- const model=JSON.parse(docker(['compose','--env-file','.env.compose.cloud.example','config','--format','json']));
- if(model.services.postgres)throw new Error('CLOUD_MODE_HAS_LOCAL_POSTGRES');
- for(const service of Object.values(model.services))if(service.depends_on?.postgres)throw new Error('CLOUD_MODE_DEPENDS_ON_POSTGRES');
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const steps = [];
+
+function run(name, check) {
+  const started = Date.now();
+  check();
+  steps.push({ name, exitCode: 0, durationMs: Date.now() - started });
+}
+
+function composeTemplate(file) {
+  // Check the tracked template without inheriting shell overrides or reading .env.
+  const env = Object.fromEntries(['HOME', 'PATH', 'DOCKER_CONFIG', 'SYSTEMROOT', 'USERPROFILE']
+    .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+  const rendered = execFileSync('docker', [
+    'compose', '-f', 'compose.yaml', '--env-file', file, 'config', '--format', 'json',
+  ], { cwd: root, env, encoding: 'utf8' });
+  return JSON.parse(rendered).services;
+}
+
+for (const command of ['typecheck', 'lint', 'build', 'test', 'test:integration']) {
+  run(`pnpm ${command}`, () => execFileSync('pnpm', [command], { cwd: root, stdio: 'inherit' }));
+}
+run('local compose config', () => {
+  if (!composeTemplate('.env.compose.local.example').postgres) throw new Error('LOCAL_MODE_POSTGRES_MISSING');
 });
-writeFileSync('docs/verification.local.json',JSON.stringify({recordedAt:new Date().toISOString(),steps},null,2)+'\n');
-console.log('Verification passed; real integration checks were executed.');
+run('cloud compose config', () => {
+  const services = composeTemplate('.env.compose.cloud.example');
+  if (services.postgres) throw new Error('CLOUD_MODE_HAS_LOCAL_POSTGRES');
+  if (Object.values(services).some(service => service.depends_on?.postgres)) throw new Error('CLOUD_MODE_DEPENDS_ON_POSTGRES');
+});
+writeFileSync(new URL('../docs/verification.local.json', import.meta.url),
+  JSON.stringify({ recordedAt: new Date().toISOString(), steps }, null, 2) + '\n');
+console.log('Verification passed with isolated PostgreSQL and Redis integration tests.');

@@ -26,16 +26,15 @@ curl --fail --retry 10 --retry-connrefused http://127.0.0.1:3001/health/ready
 
 Compose 经由一次性 `migrate` 执行迁移，再启动四个应用角色。用 `docker compose --env-file .env ps -a` 检查各角色和迁移退出状态。Admin 使用 `http://127.0.0.1:3001/admin`，首次账号可通过现有 CLI 创建。 [Admin bootstrap](p02-identity.md#管理员-cli-和会话)
 
-如需记录 App 参照，使用 `pnpm app:reference` 建立阶段基线，`pnpm app:reference:diff` 只读比较。隔离测试栈专用的旧 `pnpm verify`、容器隔离及 E2E 脚本继续使用该测试栈自己的 `.env.compose.local`。
+如需记录 App 参照，使用 `pnpm app:reference` 建立阶段基线，`pnpm app:reference:diff` 只读比较。
 
 ## 开发与验证
 
 - `bash scripts/tooling.sh typecheck` / `lint` / `build` / `test`；typecheck 覆盖 src/tests，lint 覆盖 src/tests/宿主 mjs。
-- `node scripts/verify.mjs`（`pnpm verify`）：仅供独立本地测试栈，容器内执行 typecheck、lint、build、unit、contract，随后宿主启动真实 PG/Redis 测试，验证 local/cloud Compose。检测到当前 API 连接云 PG 会失败关闭，不启动测试或重启业务角色；不要为运行旧测试而把当前业务栈切回本地。依赖缺失即失败，不跳过集成测试报全绿。
+- `pnpm verify` 在宿主机运行类型检查、Lint、构建、单元及契约测试，再用临时 PostgreSQL／Redis 运行集成测试，并校验两套 Compose 示例。准备本机 Docker 和下列镜像即可执行。各检查结果写到 `docs/verification.local.json`。
 - `node scripts/integration.mjs`（`pnpm test:integration`）：使用本机已有 `postgres:17.9-bookworm` / `redis:7.4.8-bookworm` 镜像（`--pull=never`），启动独立 tmpfs PostgreSQL 与不持久化 Redis，端口仅映射到回环随机端口；复用 `infra/postgres/init` 创建角色，测试库 `huahuo_test_*` 与每个角色的 32 字节随机凭据仅本次使用。不读取 `.env`、不继承模型或业务凭据，供应商默认 disabled，测试显式 Mock。finally 根据捕获的容器 ID 和本次归属 label 清理临时容器及 `0600` 凭据文件，不删卷、不连接开发/云库；不需要启用旧 `local-db` profile。
 - `pnpm test:integration --milvus` 追加独立 Milvus 验证。先拉取 `milvusdb/milvus:v2.6.26`，测试运行器只使用本机已有镜像。Milvus 的数据放在临时容器的 tmpfs，端口仅绑定回环随机端口，测试使用确定性 Embedding。
-- `node scripts/container-isolation.mjs`（`pnpm test:container-isolation`）：逐个停止/恢复四角色及 Redis，检查同伴不中断、退出0、503/200、自动恢复、共享卷和路由/镜像边界。它与 E2E 共用旧本地测试栈检查，不允许操作已连接云 PG 的运行角色；只在独立本地测试环境执行。
-- Volta 管理的 Node 26.11.0/pnpm 10.15.1 宿主可运行 `dev:api-server` / `dev:admin` / `dev:worker` / `dev:scheduler`（tsx）及对应 `start:*`（编译产物）。新机器先执行 `volta install node@26.11.0`，首次使用 pnpm 时启用 `VOLTA_FEATURE_PNPM=1` 并安装项目 pin 的 pnpm。必须自行提供角色环境；`.env.host.example` 是可选调试模板，默认 PG/Redis 不发布宿主端口。
+- `pnpm test:container-isolation` 逐个停止并恢复四个角色及 Redis，检查退出码、健康状态、共享卷和路由。它与旧 E2E 脚本只接受专用的 `huahuo-server-dev` 测试栈及其 `.env.compose.local`。日常开发使用下方的宿主调试入口或默认 Compose 项目。
 - P02 已实现 App 登录/管理员身份；P03 已实现持久任务、Outbox、BullMQ Worker/Scheduler 和 demo.digest 基础设施 fixture。真实 AI/ASR/支付/通知仍不可用，不要把 demo.digest 当供应商成功。
 
 ## 宿主 Node 调试

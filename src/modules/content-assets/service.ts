@@ -99,8 +99,8 @@ export class ContentAssetService {
   if (!result.rowCount) throw new DomainError(404, 'FOLDER_NOT_FOUND');
  }
  private async cursor(tx:pg.PoolClient, userId: string,kind:string,id:string,change:string,tombstone:boolean,revisionId:string|null,version:number|null,previousRevisionId:string|null,previousVersion:number|null){await tx.query('INSERT INTO account_content_state(user_id) VALUES($1) ON CONFLICT DO NOTHING',[userId]);const c=await tx.query<{next_cursor:string}>("UPDATE account_content_state SET next_cursor=next_cursor+1,updated_at=now() WHERE user_id=$1 RETURNING next_cursor",[userId]);const cursor=String(c.rows[0]!.next_cursor),eventId=randomUUID(),operationId=randomUUID();await tx.query('INSERT INTO content_events(event_id,user_id,cursor,operation_id,object_kind,object_id,change_type,tombstone,revision_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[eventId,userId,cursor,operationId,kind,id,change,tombstone,revisionId]);return {eventId,cursor,operationId,occurredAt:new Date().toISOString(),objectKind:kind,objectId:id,changeType:change,tombstone,resourcePinDelta:{added:[],released:[]},...(revisionId?{revisionId}:{}) ,...(previousRevisionId?{previousRevisionId}:{}),...(version!==null?{version}:{}) ,...(previousVersion!==null?{previousVersion}:{})};}
- private async contentAssetDto(tx: pg.PoolClient, scope: Scope, contentAssetId: string) {
-  const contentAsset = await this.findContentAsset(tx, scope, contentAssetId);
+ private async contentAssetDto(tx: pg.PoolClient, scope: Scope, contentAssetId: string, lockedAsset?: ContentAssetRow) {
+  const contentAsset = lockedAsset ?? await this.findContentAsset(tx, scope, contentAssetId);
   if (!contentAsset) throw new DomainError(404, 'CONTENT_ASSET_NOT_FOUND');
   const folder = contentAsset.folder_id === null ? undefined : (await tx.query<{ folder_id: string }>(
    "SELECT folder_id FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active'",
@@ -199,7 +199,7 @@ export class ContentAssetService {
     throw new DomainError(409, 'CONTENT_ASSET_REVISION_MISMATCH');
    }
    return {
-    ...await this.contentAssetDto(tx, scope, id),
+    ...await this.contentAssetDto(tx, scope, id, contentAsset),
     assetKind: contentAsset.asset_kind,
     contentStatus: contentAsset.processing_status,
    };

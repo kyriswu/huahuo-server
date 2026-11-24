@@ -38,13 +38,11 @@ Scheduler 使用独立的 `tasks/publisher.ts` 发布队列任务，不导入 Wo
 
 额度预留：本地任务确定失败或取消时，与任务终态同事务释放，重复恢复不重复归还。自动重试保留原预留；手动重试在重新预留成功后才排队。外部结果未知继续保留预留，不能仅按超时释放；解析服务确认取消后才结束预留。Admin保持财务只读，有预留任务的手动重试须经具备计费准入能力的用户API，详情见[验收与权限迁移](../acceptance/task-reservation-recovery.md)。
 
-以下验收命令仅用于独立本地测试栈，当前 API 使用云 PG 时会拒绝执行；不能用旧配置将业务栈切回本地：
+`pnpm verify` 使用独立临时依赖运行本地验收，`pnpm app:reference:diff` 只读比较 App 参照。需要验证专用 Compose 测试栈时可运行下面两个诊断。测试栈的 API 使用云 PG 时，诊断会拒绝执行。
 
 ```bash
-node scripts/verify.mjs
-node scripts/e2e-p03.mjs
-node scripts/container-isolation.mjs
-node scripts/app-reference.mjs --diff
+pnpm test:e2e
+pnpm test:container-isolation
 ```
 
 P03 未接入真实 AI、ASR、支付、通知或 Agent Run SSE；App 的 Agent Run 事件端点留 P08，定位 AI 结果留 P09。未运行 Flutter/Dart 或真机联调。

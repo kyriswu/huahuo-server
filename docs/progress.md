@@ -1,3 +1,11 @@
+## 本机验证与旧入口整理（2026-11-24，本地验收）
+
+宿主开发统一使用 `pnpm dev:local <角色>`。它检查本机 PostgreSQL 和 Redis 地址并隔离终端继承的应用配置。`pnpm verify` 使用宿主工具链和临时依赖，并渲染本地与云端 Compose 示例校验拓扑。容器隔离诊断和专用 E2E 继续提供额外验收。 [本地开发](runbooks/local-development.md)
+
+移除仅为 2026-11-05 同库切换编写的归档实验，保留当时的验收记录和现行迁移回归。资产详情复用加锁读取的资产行，回归确认只查询一次且保留完整正文。 [迁移记录](runbooks/rds-relations.md) · [详情回归](../tests/integration/content-asset-pagination.test.ts)
+
+`pnpm verify` 完整通过。1,149 项单元及契约测试通过，509 项隔离 PostgreSQL／Redis 集成测试通过、7 项跳过，`0025` → `0027` 升级及重放通过。App `fe6a02c` 仅作源码参照，公开 HTTP 契约沿用当前定义。
+
 ## 原始音频附件（2026-11-24，本地验收）
 
 音频资产复用 `content_asset_resource_refs`，创建接口的 Schema 明确上传完成后的 `resourceId` 和 `usage: "original"`。HTTP 回归验证资产创建、实际关联行、详情回读、转写后保留附件、签名播放和跨账号拒绝。类型检查、Lint、构建、1,149 项单元及契约测试通过，隔离 PostgreSQL／Redis 集成通过 509 项、跳过 7 项，OSS 上传使用本地替身。 [资产契约](content-assets.md#原始音频附件) · [集成测试](../tests/integration/content-asset-images.test.ts)
