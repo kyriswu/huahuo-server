@@ -2,7 +2,9 @@
 
 身份与会话使用当前 `users` / `user_sessions` 契约；历史初始化和迁移记录保留在验收文档中。当前目标版本与部署状态以实际成功记录为准。
 
-当前业务启动以根目录 `.env` 和 [本地开发手册](local-development.md) 为准，新环境从 `migrations/0001_initial_schema.sql` 顺序执行全部编号迁移，已有环境只执行新增迁移；已执行文件及 checksum 冻结。`node scripts/verify.mjs` 包括类型/lint/build、unit/contract、真实临时 PG/Redis 集成测试。`node scripts/e2e-p02.mjs` 启动两个临时 HTTP 容器和随机测试数据库，运行两用户与 Admin 会话流程，finally 仅删除这些测试资源。`node scripts/container-isolation.mjs` 验证四角色独立性和依赖恢复。上述 E2E 入口仅供独立本地测试栈；当前 API 连接云 PG 时会拒绝执行。
+当前业务启动以根目录 `.env` 和 [本地开发手册](local-development.md) 为准。新环境从 `migrations/0001_initial_schema.sql` 顺序执行编号迁移，已有环境只执行新增迁移，已执行文件及校验和冻结。`pnpm verify` 运行静态检查、构建、单元及契约测试、独立 PostgreSQL／Redis 集成测试和 Compose 模板检查。
+
+`pnpm test:e2e:p02` 在专用本地测试栈中启动两个临时 HTTP 容器和随机数据库，验证两用户与 Admin 会话。结束时清理本次测试资源。`pnpm test:container-isolation` 验证四角色独立性和依赖恢复。两条命令均在测试栈的 API 使用云 PG 时拒绝执行。
 
 ## 真实短信验证码
 
