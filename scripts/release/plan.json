@@ -15,7 +15,7 @@
       { "key": "SMS_FEISHU_SIGNING_SECRET", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": true },
       { "key": "PROCESSING_NODES_ENABLED", "operation": "add", "roles": ["api-server", "admin", "worker", "scheduler"], "required": false, "hasDefault": true }
     ],
-    "reviewedFiles": [".env.example", ".env.host.example", ".env.compose.cloud.example", ".env.compose.local.example", "compose.yaml", "src/config/config.ts", "src/config/processing-nodes.ts", "src/config/sms.ts"],
+    "reviewedFiles": [".env.example", ".env.host.example", ".env.host.migrate.example", ".env.compose.cloud.example", ".env.compose.local.example", "compose.yaml", "deploy/local/compose.deps.yaml", "deploy/k8s/config/api.env.example", "deploy/k8s/config/common.env.example", "src/config/config.ts", "src/config/processing-nodes.ts", "src/config/sms.ts"],
     "verifyFile": "scripts/release/changes/20261124-feishu-otp/verify-config.mjs"
   },
   "dependencies": [],

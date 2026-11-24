@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: huahuo-scheduler
+  namespace: ns-applications
+  labels:
+    app.kubernetes.io/name: huahuo-server
+    app.kubernetes.io/component: scheduler
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  minReadySeconds: 5
+  progressDeadlineSeconds: 4200
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: huahuo-server
+      app.kubernetes.io/component: scheduler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: huahuo-server
+        app.kubernetes.io/component: scheduler
+    spec:
+      serviceAccountName: sa-huahuo-server
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # Preserve the database-configured 10–60 minute app budget.
+      terminationGracePeriodSeconds: 3630
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scheduler
+          image: huahuo-server:replace-me
+          imagePullPolicy: IfNotPresent
+          command: ["node", "--enable-source-maps", "dist/entrypoints/scheduler.js"]
+          envFrom:
+            - configMapRef:
+                name: huahuo-config
+            - secretRef:
+                name: huahuo-redis
+            - secretRef:
+                name: huahuo-scheduler-env
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: huahuo-db-runtime
+                  key: DATABASE_URL
+            - name: APP_ENV
+              value: test
+            - name: NODE_ENV
+              value: production
+            - name: SERVICE_ROLE
+              value: scheduler
+            - name: HOST
+              value: "127.0.0.1"
+            - name: PORT
+              value: "3100"
+            - name: METRICS_ENABLED
+              value: "true"
+            - name: METRICS_HOST
+              value: "0.0.0.0"
+            - name: METRICS_PORT
+              value: "9464"
+            - name: HEALTHCHECK_URL
+              value: http://127.0.0.1:3100/health/ready
+          ports:
+            - name: http
+              containerPort: 3100
+            - name: metrics
+              containerPort: 9464
+          # Native HTTP probes target the Pod IP. Keep this role local and run
+          # the existing readiness script inside its own network namespace.
+          readinessProbe:
+            exec:
+              command: ["node", "scripts/healthcheck.mjs"]
+            periodSeconds: 10
+            timeoutSeconds: 8
+          livenessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - >-
+                  fetch('http://127.0.0.1:3100/health/live', { signal: AbortSignal.timeout(3000) })
+                    .then(response => process.exit(response.ok ? 0 : 1), () => process.exit(1))
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 4
+            failureThreshold: 4
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: db-ca
+              mountPath: /app/certs
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+        - name: db-ca
+          configMap:
+            name: huahuo-db-ca
+            optional: true

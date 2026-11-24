@@ -4,6 +4,12 @@
 
 类型检查、Lint、构建和 1,218 项单元及契约测试通过。隔离 PostgreSQL／Redis 的 500 项集成测试通过，跳过 7 项，飞书和阿里云均使用传输替身。本机开发配置已验证由 Compose 注入 API。Apifox 已回读确认 `providerMode` 枚举，Flutter `fe6a02c` 为只读参照。本次停在本地验收。
 
+## 文件夹列表查询合并（2026-11-21，本地验收）
+
+`GET /api/v1/folders` 按账号直接读取 `asset_folders`，在同一条业务查询中读取账号的 `contentCursor`。N 个文件夹的列表读取从 `1 + 2N` 条 SQL 降为 1 条，鉴权仍在原事务内执行。隔离 PostgreSQL 的 HTTP 回归覆盖查询次数、跨账号隔离、根目录和子目录排序、软删除状态、ETag 和大整数游标。账号游标缺失时返回字符串 `"0"`。 [实现](../src/modules/content-assets/service.ts) · [回归](../tests/integration/content-assets.test.ts)
+
+类型检查、Lint、构建和 1,199 项单元与契约测试通过。隔离 PostgreSQL／Redis 集成测试通过 500 项、跳过 7 项。本次以 App 提交 `fe6a02c` 为只读参照，未找到该列表入口的直接调用。
+
 ## AI 提示词自定义变量（2026-11-20，本地验收）
 
 Admin 编辑器自动识别 `{{变量名}}` 并行内高亮，同名变量同色。「变量用法与 API 传参」提供匹配规则和请求示例。资产纲要与编辑器润色的生成接口都接收可选的顶层 `variables` 对象。系统变量优先，未传值的占位符移除，模板未引用的字段忽略。 [使用说明](runbooks/ai-templates.md)

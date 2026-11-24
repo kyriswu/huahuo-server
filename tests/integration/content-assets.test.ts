@@ -5,7 +5,7 @@ import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.j
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 import type {TagExtractor} from '../../src/modules/content-assets/tag-extractor.js';
 import {loadTestConfig as loadConfig} from '../sms-fixture.js';
-import {poolFor} from '../../src/plugins/dependencies.js';
+import {createDependencies,poolFor} from '../../src/plugins/dependencies.js';
 import {migrate} from '../../src/db/migrate.js';
 import {ContentAssetService} from '../../src/modules/content-assets/service.js';
 import {DeterministicTagExtractor} from '../../src/modules/content-assets/tag-extractor.js';
@@ -91,6 +91,53 @@ it('soft deletion preserves revisions, labels and explicit relationships for res
  expect((await contentAssets.contentAssetTags(u.scope,source.contentAssetId)).tags).toHaveLength(1);
 });
 it('folders enforce scope, duplicate names, cycles and ETags',async()=>{const u=await fixture();const f=await contentAssets.createFolder(u.scope,{displayName:'资料'},randomUUID());await expect(contentAssets.createFolder(u.scope,{displayName:'资料'},randomUUID())).rejects.toMatchObject({code:'FOLDER_NAME_CONFLICT'});const child=await contentAssets.createFolder(u.scope,{displayName:'子',parentFolderId:f.folderId},randomUUID());await expect(contentAssets.moveFolder(u.scope,f.folderId,child.folderId,f.etag,randomUUID())).rejects.toMatchObject({code:'FOLDER_CYCLE'});await expect(contentAssets.updateFolder(u.scope,f.folderId,'x','bad-etag',randomUUID())).rejects.toMatchObject({statusCode:412});});
+it('lists account folders in order with one query for the folders and cursor',async()=>{
+ const owner=await fixture(),other=await fixture();
+ const lastRoot=await contentAssets.createFolder(owner.scope,{displayName:'Zulu root'},randomUUID());
+ const firstRoot=await contentAssets.createFolder(owner.scope,{displayName:'Alpha root'},randomUUID());
+ const lastChild=await contentAssets.createFolder(owner.scope,{displayName:'Delta child',parentFolderId:firstRoot.folderId},randomUUID());
+ const firstChild=await contentAssets.createFolder(owner.scope,{displayName:'Charlie child',parentFolderId:firstRoot.folderId},randomUUID());
+ await contentAssets.deleteFolder(owner.scope,lastChild.folderId,lastChild.etag,randomUUID());
+ const deletedChild=await contentAssets.getFolder(owner.scope,lastChild.folderId);
+ const foreign=await contentAssets.createFolder(other.scope,{displayName:'Foreign root'},randomUUID());
+ const cursor='9007199254740993';
+ await root.query('UPDATE account_content_state SET next_cursor=$2 WHERE user_id=$1',[owner.userId,cursor]);
+ await root.query('DELETE FROM account_content_state WHERE user_id=$1',[other.userId]);
+
+ const dependencies=createDependencies(cfg);
+ let app:Awaited<ReturnType<typeof buildApiServer>>|undefined;
+ try{
+  let folderReads=0;
+  dependencies.pool!.on('connect',client=>{
+   const query=client.query.bind(client);
+   vi.spyOn(client,'query').mockImplementation(((...args:unknown[])=>{
+    const input=args[0];
+    const sql=typeof input==='string'?input:(input as {text?:string}|undefined)?.text;
+    if(sql&&/\b(?:asset_folders|account_content_state)\b/i.test(sql))folderReads++;
+    return (query as (...args:unknown[])=>unknown)(...args);
+   }) as typeof client.query);
+  });
+  const api=await buildApiServer({config:cfg,dependencies});
+  app=api;
+  const list=async (bearer:string)=>{
+   folderReads=0;
+   const response=await api.inject({url:'/api/v1/folders',headers:fixtureScopeHeaders(bearer)});
+   expect(response.statusCode,response.body).toBe(200);
+   expect(folderReads).toBe(1);
+   return response.json().data.folders;
+  };
+  expect(await list(owner.bearer)).toEqual([
+   {...firstRoot,contentCursor:cursor},
+   {...lastRoot,contentCursor:cursor},
+   {...firstChild,contentCursor:cursor},
+   {...deletedChild,state:'deleted',contentCursor:cursor},
+  ]);
+  expect(await list(other.bearer)).toEqual([{...foreign,contentCursor:'0'}]);
+ }finally{
+  if(app)await app.close();
+  else await dependencies.close();
+ }
+});
 it('folder deletion and restoration only affect organization and leave contentAsset state and revisions intact',async()=>{
  const u=await fixture(),folder=await contentAssets.createFolder(u.scope,{displayName:'restore root'},randomUUID());
  const child=await contentAssets.createFolder(u.scope,{displayName:'independent child',parentFolderId:folder.folderId},randomUUID());
