@@ -71,3 +71,11 @@ pnpm test:integration --milvus 创建本项目独立临时 PostgreSQL/Redis/Milv
 3. 检查资产索引队列是否有积压或失败，抽查账号隔离、创建和编辑时间范围、资产类型以及分片原文。用 `rag:consistency` 对账新集合。旧集合只交由单独授权的维护处理。
 
 更新时间增量同步使用 Milvus 2.6.2 及以上版本的部分更新。 [Milvus 部分更新](https://milvus.io/docs/v2.6.x/upsert-entities.md)
+
+## 0026 链接资产分类同步
+
+在已审维护窗口内核对目标的 `content_assets` 表规模、待转换链接数及已发布分块数，确认迁移的表锁和更新可在配置的预算内完成。核对测试环境实际成功提交并排空旧写入和索引 Worker，再应用 `0026_asset_link_kind.sql`。迁移只转换原类型为 `creative` 且来源明确标记 `link` 的资产，保留正文、修订和时间戳。
+
+在入口恢复前，用同一套候选配置运行能消费 `content` 队列的 Worker 和 Scheduler。用部署的迁移环境变量执行 `node dist/entrypoints/refresh-link-asset-index.js` 查看当前页。核对目标后追加 `--apply`，每次最多为 100 个已发布链接构建登记现有的元数据刷新任务。若输出包含 `nextCursor`，用 `--apply --after <nextCursor>` 继续。从首页重查可核对 `pending`、`failed`、`unscheduled` 和 `succeeded`，任务按构建去重，失败按现有任务恢复流程处理。
+
+所有页的任务完成后，在同一目标的 API 环境执行 `node scripts/rag-consistency.mjs --asset-only`。检查资产集合的 `missing_in_milvus_count` 和 `asset_kind_mismatch_count` 都为零，再验收 `assetKinds: ["link"]` 的搜索。元数据通过现有 `chunk_id` 就地更新，沿用当前集合、索引和向量。新建索引直接读取 PostgreSQL 保存的分类。 [标准发布](standard-release.md)

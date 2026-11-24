@@ -10,7 +10,7 @@ import {digest} from '../../lib/crypto.js';
 import type {EmbeddingClient} from '../../integrations/embedding.js';
 import {HttpRerankAdapter,MockRerankAdapter,rerankWithinBudget,fuseRankedRecall,type RerankAdapter,type RagSearchCandidate} from './search.js';
 import {SearchQueryTiming} from './query-timing.js';
-import { assetKinds } from '../content-assets/asset-kind.js';
+import { assetKinds } from '../../contracts/asset-kind.js';
 import {kbImages,renderKbImages,type KbImage} from '../../lib/kb-images.js';
 export type RagQueryMode='keyword'|'dense'|'hybrid';
 export interface RagQueryInput extends KbBuildFilters {query:string;mode?:RagQueryMode;sourceType?:'content_asset'|'file';topK?:number;assetMode?:'ids'|'links';}

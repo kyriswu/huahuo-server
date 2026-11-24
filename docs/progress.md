@@ -1,3 +1,13 @@
+## 资产分类统一（2026-11-24，本地验收）
+
+创建、列表、详情和搜索共用五个 `assetKind` 值。新增迁移 `0026` 扩展 PostgreSQL 的 `asset_kind`，转换原分类为 `creative` 且来源标记为 `link` 的旧链接。Milvus 沿用 `asset_kind`，既有链接通过 Worker 部分更新同步分类和值，新建索引直接读取已保存的分类。共享目标的迁移和刷新留在单独维护窗口。 [资产契约](contract-compatibility.md#p06-个人资产文件夹检索与图谱) · [索引同步](runbooks/milvus.md#0026-链接资产分类同步)
+
+全局枚举由 `src/contracts/asset-kind.ts` 定义，API Schema、搜索和索引元数据共用。PostgreSQL 在 `content_assets.asset_kind` 上使用 `CHECK`，隔离测试核对最新约束的允许值和代码枚举。 [新增分类方式](content-assets.md#资产分类)
+
+类型检查、Lint、1,223 项单元与契约测试通过。隔离 PostgreSQL 和 Redis 的 506 项集成测试复跑通过、跳过 7 项，涵盖 `0025` 升级到 `0026` 并确认重跑无新增迁移。首次有一条文档恢复测试使用 Worker 数据库角色执行 Scheduler 操作时遇到权限错误。另用隔离 Milvus 2.6.26 验证历史链接刷新后能按 `link` 召回，期间沿用既有向量及分块 ID，任务重复提交只登记一次。模型使用确定性替身。App `fe6a02c` 为只读参照，当前资产页使用本地数据。 [列表和详情回归](../tests/integration/content-asset-pagination.test.ts) · [分类检索回归](../tests/integration/knowledge-base.test.ts)
+
+Apifox「花火AI」主分支的四个现有条目已同步并回读。`/api/v1/kb/content-assets/query`、`/api/v1/rag/query` 和 `/api/v1/kb/documents/query` 没有对应现有条目。 [资产列表](https://app.apifox.com/project/8965877/apis/api-539018656) · [资产详情](https://app.apifox.com/project/8965877/apis/api-539018659) · [创建](https://app.apifox.com/project/8965877/apis/api-539018651) · [搜索](https://app.apifox.com/project/8965877/apis/api-539018654)
+
 ## 飞书测试验证码（2026-11-24，本地验收）
 
 开发和测试 API 配置 `SMS_FEISHU_WEBHOOK_URL` 后，将验证码投递到飞书群。任意符合现有格式的手机号均可使用，群消息显示脱敏手机号。正式环境继续使用阿里云。复用现有验证码表、限流、有效期和幂等规则，飞书和短信票据分别校验。Webhook 工具支持五种消息。 [配置和用法](runbooks/sms.md#飞书测试验证码)

@@ -33,6 +33,7 @@ import {insertFixtureUser,insertFixtureSession,testJwtEnv} from './jwt-fixture.j
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 import {RuntimeSettings} from '../../src/modules/runtime-settings/service.js';
 import {configureTestMilvus} from '../support/milvus.js';
+import {refreshLinkAssetIndexPage} from '../../src/entrypoints/refresh-link-asset-index.js';
 import {DataType,type ConsistencyLevelEnum} from '@zilliz/milvus2-sdk-node';
 import * as markdownInput from '../../src/lib/markdown-images.js';
 const url=process.env.TEST_DATABASE_MIGRATION_URL;
@@ -307,6 +308,35 @@ describe('two-mode knowledge indexing with real dependencies and deterministic m
   const updated=(await root.query('SELECT updated_at FROM content_assets WHERE content_asset_id=$1',[audio.contentAssetId])).rows[0]!.updated_at.toISOString();
   expect((await query({assetKinds:['audio'],from:updated,to:updated})).results).toHaveLength(1);
   expect((await query({assetKinds:['audio'],from:day2,to:day2})).results).toEqual([]);
+ });
+ it('filters saved link kinds and refreshes migrated link metadata without re-embedding',async()=>{
+  const f=await fixture(false),raw='linkclassification fixture body';
+  const legacy=await assets.createContentAsset(f.scope,{title:'Older link',assetKind:'creative',sourceKind:'link',parts:{raw}},randomUUID());
+  const current=await assets.createContentAsset(f.scope,{title:'New link',assetKind:'link',parts:{raw}},randomUUID());
+  await runContentAsset(legacy.contentAssetId);await runContentAsset(current.contentAssetId);
+  const matches=async(assetKinds:('link'|'creative')[])=>{
+   const result=await queries.query(f.scope,{query:'linkclassification',mode:'keyword',filters:{assetKinds}});
+   return result.results.map(hit=>hit.documentKey).sort();
+  };
+  expect(await matches(['link'])).toEqual([current.contentAssetId]);
+  expect(await matches(['creative'])).toEqual([legacy.contentAssetId]);
+
+  await root.query("UPDATE content_assets SET asset_kind='link' WHERE content_asset_id=$1",[legacy.contentAssetId]);
+  expect(await matches(['creative'])).toEqual([]);
+  expect(await refreshLinkAssetIndexPage(root,config,{apply:false})).toMatchObject({mode:'read-only',enqueued:0});
+  const before=embeddings.mock.calls.length;
+  await Promise.all([refreshLinkAssetIndexPage(root,config,{apply:true}),refreshLinkAssetIndexPage(root,config,{apply:true})]);
+  const tasks=(await root.query<{id:string}>(`SELECT task.id FROM tasks task
+   JOIN task_inputs input ON input.id=task.input_id WHERE task.user_id=$1 AND input.body=ANY($2::text[])`,
+  [f.scope.userId,[legacy,current].map(asset=>JSON.stringify({refreshAssetId:asset.contentAssetId}))])).rows;
+  expect(tasks).toHaveLength(2);
+  for(const task of tasks){
+   const attempt=await engine.claim(task.id,randomUUID());expect(attempt).toBeTruthy();
+   const result=await jobs.execute(attempt!);expect(await engine.finish(attempt!,result.digest,result.bytes)).toBe(true);
+  }
+  expect((await refreshLinkAssetIndexPage(root,config,{apply:true})).enqueued).toBe(0);
+  expect(embeddings.mock.calls).toHaveLength(before);
+  expect(await matches(['link'])).toEqual([current.contentAssetId,legacy.contentAssetId].sort());
  });
  it('deletion filters in-flight and future hits and cleanup protects no deleted points',async()=>{
   const f=await create();await runContentAsset(f.contentAsset.contentAssetId);await assets.deleteContentAsset(f.scope,f.contentAsset.contentAssetId,f.contentAsset.etag,randomUUID());

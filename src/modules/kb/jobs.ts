@@ -135,7 +135,8 @@ export class KnowledgeIndexJobs {
      if(assetMetadata){
       const state=await transaction(this.pool,tx=>sourceState(tx,build));
       if(state.deleted||state.revision!==build.source_revision)throw new KbJobError('KB_SOURCE_SUPERSEDED',false);
-      if(state.assetMetadata&&(rows.length!==(drafts?.length??build.chunk_count)||build.planned||state.assetMetadata.updatedAt!==assetMetadata.updatedAt)){
+      if(state.assetMetadata&&(rows.length!==(drafts?.length??build.chunk_count)||build.planned
+       ||state.assetMetadata.updatedAt!==assetMetadata.updatedAt||state.assetMetadata.assetKind!==assetMetadata.assetKind)){
        await this.updateMetadata(requireIndexKind(index,'hybrid'),id,{...state.assetMetadata,buildId:id});
       }
      }

@@ -1,4 +1,5 @@
-import {inferAssetKind,type AssetKind} from './asset-kind.js';
+import {inferAssetKind} from './asset-kind.js';
+import type { AssetKind } from '../../contracts/asset-kind.js';
 import { idempotent } from '../../lib/idempotency.js';
 import {resolveTraceId} from '../../lib/trace.js';
 import {tagGraph,type GraphQuery} from './tag-graph.js';
@@ -28,6 +29,7 @@ interface ContentAssetStateRow {
 interface ContentAssetRow extends ContentAssetStateRow {
  folder_id: string | null;
  title: string;
+ asset_kind: AssetKind;
  source_kind: string;
  source_id: string | null;
  tag_set_version: string;
@@ -195,7 +197,10 @@ export class ContentAssetService {
    if (revisionId && (contentAsset.content_asset_revision_id !== revisionId || contentAsset.state !== 'active')) {
     throw new DomainError(409, 'CONTENT_ASSET_REVISION_MISMATCH');
    }
-   return this.contentAssetDto(tx, scope, id);
+   return {
+    ...await this.contentAssetDto(tx, scope, id),
+    assetKind: contentAsset.asset_kind,
+   };
   });
  }
  private async task(tx:pg.PoolClient,scope:Scope,contentAssetId:string,contentAssetRevisionId:string){

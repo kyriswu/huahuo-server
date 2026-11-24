@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import type { AssetKind } from '../../contracts/asset-kind.js';
 import type { AppConfig } from '../../config/config.js';
 import { DOCUMENT_CANONICAL_MAX_BYTES } from '../../config/document-extraction.js';
 import { transaction, DomainError } from '../identity/store.js';
@@ -6,6 +7,16 @@ import { tablesForSource, type KbBuild, type KbSnapshot, type KbSource } from '.
 import { digest } from '../../lib/crypto.js';
 import type { AssetIndexMetadata } from '../../lib/search-index/types.js';
 import { storageFor } from '../storage/port.js';
+
+interface ContentAssetIndexRow {
+ state: string;
+ processing_status: string;
+ asset_kind: AssetKind;
+ created_at: Date;
+ updated_at: Date;
+ revision: string | null;
+ content: string | null;
+}
 export const uuidFor=(value:string)=>{const h=digest(value);return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-a${h.slice(17,20)}-${h.slice(20,32)}`;};
 export async function createBuild(tx:pg.PoolClient,source:KbSource,taskId:string,snapshot:KbSnapshot):Promise<KbBuild>{
  const {builds,chunks}=tablesForSource(source.type);
@@ -26,7 +37,7 @@ export async function createBuild(tx:pg.PoolClient,source:KbSource,taskId:string
 export async function sourceState(tx:pg.PoolClient,build:Pick<KbBuild,'source_type'|'source_id'|'user_id'|'workspace_id'>,lock=false):Promise<{revision:string;content?:string;uri?:string;deleted:boolean;format:'text'|'markdown';assetMetadata?:Omit<AssetIndexMetadata,'buildId'>}>{
  const params=[build.source_id,build.user_id,build.workspace_id];
  if(build.source_type==='content_asset'){
-  const row=(await tx.query(`SELECT asset.state,asset.processing_status,asset.asset_kind,asset.created_at,asset.updated_at,p.part_revision_id::text AS revision,p.content_markdown AS content
+  const row=(await tx.query<ContentAssetIndexRow>(`SELECT asset.state,asset.processing_status,asset.asset_kind,asset.created_at,asset.updated_at,p.part_revision_id::text AS revision,p.content_markdown AS content
    FROM content_assets asset
    JOIN users u ON u.id=asset.user_id AND u.status='active' AND u.deleted_at IS NULL
    LEFT JOIN content_asset_parts p ON p.content_asset_id=asset.content_asset_id AND p.part='raw'

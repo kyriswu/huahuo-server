@@ -290,4 +290,38 @@ describe('current-only note content and retired settings migrations',()=>{
   expect((await tx.query('SELECT * FROM tasks')).rows).toEqual([]);
  }));
 
+ it('classifies legacy explicit link sources without changing other kinds, metadata or tasks',async()=>fixture(async(tx,schema)=>{
+  await tx.query(`SET LOCAL search_path TO ${schema}, pg_catalog;
+   CREATE TABLE content_assets(content_asset_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),title text,source_kind text,source_id text,
+    created_at timestamptz DEFAULT '2026-01-01T00:00:00.123456Z',updated_at timestamptz DEFAULT '2026-02-01T00:00:00.654321Z');
+   CREATE TABLE kb_content_asset_hybrid_builds(id uuid);
+   CREATE TABLE kb_content_asset_hybrid_chunks(point_id text);
+   CREATE TABLE tasks(kind text,state text);`);
+  await tx.query(sql(25,schema));
+  await tx.query(`INSERT INTO content_assets(title,source_kind,source_id,asset_kind) VALUES
+   ('legacy link',' LiNk ','https://example.invalid/article','creative'),
+   ('link-sourced image','link','https://example.invalid/image.png','image'),
+   ('link-sourced file','link','https://example.invalid/report.pdf','file'),
+   ('imported file','import','https://example.invalid/document','file'),
+   ('creative with URL','manual','https://example.invalid/reference','creative'),
+   ('recording','recording',NULL,'audio');
+   INSERT INTO tasks VALUES('unrelated.job','queued');`);
+  const read = async()=> (await tx.query(`SELECT content_asset_id,title,source_kind,source_id,asset_kind,
+   created_at::text AS created_at,updated_at::text AS updated_at FROM content_assets ORDER BY title`)).rows;
+  const before = await read();
+
+  await tx.query(sql(26,schema));
+
+  expect(await read()).toEqual(before.map(row=>row.title==='legacy link'?{...row,asset_kind:'link'}:row));
+  expect((await tx.query('SELECT * FROM tasks')).rows).toEqual([{kind:'unrelated.job',state:'queued'}]);
+  expect((await tx.query(`INSERT INTO content_assets(title,source_kind) VALUES('new default','manual')
+   RETURNING asset_kind`)).rows).toEqual([{asset_kind:'creative'}]);
+  expect((await tx.query(`INSERT INTO content_assets(title,source_kind,asset_kind) VALUES('new link','manual','link')
+   RETURNING asset_kind`)).rows).toEqual([{asset_kind:'link'}]);
+  await tx.query('SAVEPOINT invalid_kind');
+  await expect(tx.query(`INSERT INTO content_assets(title,source_kind,asset_kind) VALUES('invalid','manual','other')`))
+   .rejects.toMatchObject({code:'23514'});
+  await tx.query('ROLLBACK TO SAVEPOINT invalid_kind');
+ }));
+
 });

@@ -1,4 +1,6 @@
-/** Storage/search capabilities, independent of business entities and engines. */
+import type { AssetKind } from '../../contracts/asset-kind.js';
+
+/** Engine-independent storage and search capabilities. */
 export type IndexKind = 'keyword' | 'vector' | 'hybrid';
 
 /** Opaque connection identity and logical index. Adapters map these to their
@@ -29,7 +31,7 @@ export type RecallScope = {readonly userId: string} & (
   | {readonly workspaceId?: never; readonly pointIds?: never; readonly accountWide: true}
 );
 export interface AssetIndexMetadata {
-  readonly assetKind: string;
+  readonly assetKind: AssetKind;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly buildId: string;
@@ -38,7 +40,7 @@ export interface AssetIndexMetadata {
 export interface RecallFilter {
   readonly sourceIds?: readonly string[];
   readonly sourceTypes?: readonly string[];
-  readonly assetKinds?: readonly string[];
+  readonly assetKinds?: readonly AssetKind[];
   readonly time?: {readonly field: 'created_at' | 'updated_at'; readonly from?: number; readonly to?: number};
 }
 export interface OperationOptions { readonly signal?: AbortSignal; }

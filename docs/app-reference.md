@@ -6,6 +6,8 @@
 
 只读核对 Flutter 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`。自由创作通过 `lib/features/inspiration/data/inspiration_store.dart` 本地保存。`lib/core/uploads/upload_service.dart` 调用 `/api/v1/media/upload-token` 与 `/api/v1/media/uploads/{uploadId}/complete`，使用 `resourceId` 标识原文件。Server 的资产路由和两个独立导入入口尚无对应的 Dart 调用。 [现行资产契约](contract-compatibility.md)
 
+2026-11-24 复核同一 App 提交。`lib/features/home/presentation/home_asset_cards.dart` 和 `home_page.dart` 根据本地记录的正文、链接、图片、音频及文件选择列表和详情展示。Server 的资产列表和详情现提供 `assetKind` 供后续接线。 [资产读取契约](contract-compatibility.md#p06-个人资产文件夹检索与图谱)
+
 ## 历史记录 · 0019 内容归属和文件夹关系（2026-11-19）
 
 只读核对 Flutter 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`。自由创作通过 `lib/features/inspiration/data/inspiration_store.dart` 保存到本地，共享上传走 `lib/core/uploads/`。当前共享 Dart 源码没有笔记工作区或文件夹路由的调用。Server 本期把账号归属和组织关联分开，原路由从关系表读取工作区和文件夹信息，App 接线按后续产品契约确认。

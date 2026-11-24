@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import type { AssetKind } from '../content-assets/asset-kind.js';
+import type { AssetKind } from '../../contracts/asset-kind.js';
 import { assertScope, transaction, type Scope } from '../identity/store.js';
 import { tablesForSource, type KbBuild, type KbSnapshot, type KbSourceType } from './types.js';
 
