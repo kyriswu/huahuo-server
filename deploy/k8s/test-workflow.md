@@ -14,9 +14,9 @@
 | `TEST_ACK_RELEASE_COMMAND_ID` | 该 ECS 的固定发布命令 ID |
 | `TEST_ACK_AUTO_RELEASE` | 仓库级变量。手动验收通过后设为 `true`。未设置时只接受手动触发 |
 
-专用 RAM 角色 `huahuo-server-test-release` 使用固定 Node01 和保存命令所需的 `InvokeCommand` 与 `DescribeInvocationResults` 权限。保存命令接收唯一参数 `sha`，从受保护的宿主控制目录执行 `verify-from-ecs.sh "$sha" --rollout`。保存命令上限 85 分钟，Actions 轮询上限 87 分钟，STS 会话上限 90 分钟。构建或预检耗时过长、剩余时间不足时，执行器在更新 Deployment 前停止。提交结果不确定或轮询失败时，先查云助手调用和构建机日志。
+Server 测试发布使用共享 RAM 角色 `github-actions-release` 调用固定 Node01 上的保存命令并读取结果，对应权限为 `InvokeCommand` 与 `DescribeInvocationResults`。保存命令接收唯一参数 `sha`，从受保护的宿主控制目录执行 `verify-from-ecs.sh "$sha" --rollout`。保存命令上限 85 分钟，Actions 轮询上限 87 分钟，STS 会话上限 90 分钟。构建或预检耗时过长、剩余时间不足时，执行器在更新 Deployment 前停止。提交结果不确定或轮询失败时，先查云助手调用和构建机日志。
 
-工作流固定使用 Node01 云账号 `1472289886746775` 的共享 Provider `github-actions`。Provider 使用签发方 `https://token.actions.githubusercontent.com` 和受众 `sts.aliyuncs.com`。同一云账号的仓库共用 Provider，各自的 RAM 角色按仓库 OIDC subject 授权。
+工作流固定使用 Node01 云账号 `1472289886746775` 的共享 Provider `github-actions`。Provider 使用签发方 `https://token.actions.githubusercontent.com` 和受众 `sts.aliyuncs.com`。已接入的仓库共用 Provider 和 RAM 角色。角色信任策略按仓库限定 `environment:test` 的 OIDC subject。
 
 ## 内网构建 ECS
 

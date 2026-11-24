@@ -92,7 +92,7 @@ jobs:
         uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
         with:
           oidc-provider-arn: ${{ env.GITHUB_OIDC_PROVIDER_ARN }}
-          role-to-assume: acs:ram::1472289886746775:role/huahuo-server-test-release
+          role-to-assume: acs:ram::1472289886746775:role/github-actions-release
           audience: sts.aliyuncs.com
           role-session-expiration: 5400
           role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
