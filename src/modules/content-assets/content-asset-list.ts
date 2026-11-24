@@ -2,6 +2,7 @@ import type pg from 'pg';
 import MarkdownIt from 'markdown-it';
 import { DomainError } from '../identity/store.js';
 import type { AssetKind } from '../../contracts/asset-kind.js';
+import type { ContentStatus } from '../../contracts/content-status.js';
 
 export const CONTENT_ASSET_PAGE_SIZE = 20;
 export const CONTENT_ASSET_PREVIEW_LENGTH = 200;
@@ -45,7 +46,7 @@ function preview(source: string): string {
 
 interface ContentAssetListRow {
   content_asset_id: string; active_folder_id: string | null; title: string; state: string; content_asset_revision_id: string;
-  etag: string; asset_kind: AssetKind; source_kind: string; source_id: string | null; created_at: Date; updated_at: Date;
+  etag: string; asset_kind: AssetKind; processing_status: ContentStatus; source_kind: string; source_id: string | null; created_at: Date; updated_at: Date;
   cursor_updated_at: string; content_cursor: string; preview_markdown: string | null;
 }
 
@@ -60,7 +61,7 @@ export async function listContentAssetPage(tx: pg.PoolClient, userId: string, cu
     folder.folder_id AS active_folder_id,
     part.preview_markdown
     FROM (
-      SELECT asset.content_asset_id,asset.folder_id,asset.title,asset.state,asset.content_asset_revision_id,asset.etag,asset.asset_kind,asset.source_kind,asset.source_id,asset.created_at,asset.updated_at,
+      SELECT asset.content_asset_id,asset.folder_id,asset.title,asset.state,asset.content_asset_revision_id,asset.etag,asset.asset_kind,asset.processing_status,asset.source_kind,asset.source_id,asset.created_at,asset.updated_at,
         to_char(asset.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_updated_at
       FROM content_assets asset
       WHERE asset.user_id=$1 AND asset.state='active' ${boundary}
@@ -78,7 +79,7 @@ export async function listContentAssetPage(tx: pg.PoolClient, userId: string, cu
     items: rows.map(asset => ({
       contentAssetId: asset.content_asset_id, folderId: asset.active_folder_id, title: asset.title, state: asset.state,
       contentAssetRevisionId: asset.content_asset_revision_id, etag: asset.etag, contentCursor: asset.content_cursor,
-      assetKind: asset.asset_kind,
+      assetKind: asset.asset_kind, contentStatus: asset.processing_status,
       sourceKind: asset.source_kind, sourceRef: asset.source_id ? { kind: asset.source_kind, id: asset.source_id } : null,
       createdAt: asset.created_at.toISOString(), updatedAt: asset.updated_at.toISOString(), preview: preview(asset.preview_markdown ?? ''),
     })),

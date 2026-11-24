@@ -1,4 +1,5 @@
 import {AssetKindSchema,AssetKindsSchema} from '../../contracts/asset-kind.js';
+import {ContentStatusSchema} from '../../contracts/content-status.js';
 import { readTrustedScope } from '../identity/trusted-scope.js';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { Type } from '@sinclair/typebox';
@@ -17,8 +18,8 @@ const auth=async(req:FastifyRequest,reply:FastifyReply)=>{reply.header('Cache-Co
 const scope=(req:FastifyRequest)=>{if(!req.authScope)throw new DomainError(401,'UNAUTHORIZED');return req.authScope;};
 const folder=Type.Object({folderId:Id,parentFolderId:Type.Union([Id,Type.Null()]),displayName:Type.String(),normalizedName:Type.String(),state:Type.String(),currentRevisionId:Id,etag:Type.String(),contentCursor:Type.String()});
 const contentAsset=Type.Any();
-const contentAssetDetail=Type.Object({assetKind:AssetKindSchema},{additionalProperties:true});
-const contentAssetListItem=Type.Object({contentAssetId:Id,folderId:Type.Union([Id,Type.Null()]),title:Type.String(),state:Type.Literal('active'),contentAssetRevisionId:Id,etag:Type.String(),contentCursor:Type.String(),assetKind:AssetKindSchema,sourceKind:Type.String(),sourceRef:Type.Union([Type.Object({kind:Type.String(),id:Type.String()},Strict),Type.Null()]),createdAt:Type.String({format:'date-time'}),updatedAt:Type.String({format:'date-time'}),preview:Type.String({maxLength:CONTENT_ASSET_PREVIEW_LENGTH})},Strict);
+const contentAssetDetail=Type.Object({assetKind:AssetKindSchema,contentStatus:ContentStatusSchema},{additionalProperties:true});
+const contentAssetListItem=Type.Object({contentAssetId:Id,folderId:Type.Union([Id,Type.Null()]),title:Type.String(),state:Type.Literal('active'),contentAssetRevisionId:Id,etag:Type.String(),contentCursor:Type.String(),assetKind:AssetKindSchema,contentStatus:ContentStatusSchema,sourceKind:Type.String(),sourceRef:Type.Union([Type.Object({kind:Type.String(),id:Type.String()},Strict),Type.Null()]),createdAt:Type.String({format:'date-time'}),updatedAt:Type.String({format:'date-time'}),preview:Type.String({maxLength:CONTENT_ASSET_PREVIEW_LENGTH})},Strict);
 const tag=Type.Object({tagId:Id,displayName:Type.String(),normalizedName:Type.String(),source:Type.Union([Type.Literal('manual'),Type.Literal('extracted')])},Strict);
 const tagView=Type.Object({contentAssetId:Id,tags:Type.Array(tag),tagSetVersion:Type.Integer(),tagEtag:Type.String(),manualOverride:Type.Boolean(),suggestions:Type.Array(Type.Object({suggestionId:Id,contentAssetRevisionId:Id,labels:Type.Array(Type.String()),provider:Type.String(),status:Type.String(),createdAt:Type.String()},Strict)),contentAssetEtag:Type.String(),processingStatus:Type.String(),extraction:Type.Union([Type.Null(),Type.Object({taskId:Id,status:Type.String(),outcome:Type.Union([Type.String(),Type.Null()]),provider:Type.Union([Type.String(),Type.Null()]),errorCode:Type.Union([Type.String(),Type.Null()])},Strict)])},Strict);
 export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:ContentAssetService,storage:StorageService){const guard=auth;

@@ -176,20 +176,20 @@ it('keeps full Markdown in the separate contentAsset detail response', async () 
   expect(contentAsset.parts.raw!.contentMarkdown).toBe(content);
 });
 
-it('returns the persisted asset kind in both the list and detail responses', async () => {
+it('returns the persisted asset kind and content status in both list and detail responses', async () => {
   const f = await fixture();
   const cases = [
-    { assetKind: 'creative', sourceKind: 'manual', sourceId: null },
-    { assetKind: 'image', sourceKind: 'link', sourceId: 'https://example.invalid/image.png' },
-    { assetKind: 'audio', sourceKind: 'recording', sourceId: null },
-    { assetKind: 'link', sourceKind: 'manual', sourceId: 'https://example.invalid/article' },
-    { assetKind: 'file', sourceKind: 'link', sourceId: 'https://example.invalid/report.pdf' },
-    { assetKind: 'file', sourceKind: 'import', sourceId: 'https://example.invalid/document' },
+    { assetKind: 'creative', sourceKind: 'manual', sourceId: null, contentStatus: 'draft' },
+    { assetKind: 'image', sourceKind: 'link', sourceId: 'https://example.invalid/image.png', contentStatus: 'ready' },
+    { assetKind: 'audio', sourceKind: 'recording', sourceId: null, contentStatus: 'processing' },
+    { assetKind: 'link', sourceKind: 'manual', sourceId: 'https://example.invalid/article', contentStatus: 'failed' },
+    { assetKind: 'file', sourceKind: 'link', sourceId: 'https://example.invalid/report.pdf', contentStatus: 'processing' },
+    { assetKind: 'file', sourceKind: 'import', sourceId: 'https://example.invalid/document', contentStatus: 'ready' },
   ];
   const ids = await seed(f, cases.length);
   for (const [index, item] of cases.entries()) {
-    await root.query('UPDATE content_assets SET asset_kind=$2, source_kind=$3, source_id=$4 WHERE content_asset_id=$1',
-      [ids[index], item.assetKind, item.sourceKind, item.sourceId]);
+    await root.query('UPDATE content_assets SET asset_kind=$2, source_kind=$3, source_id=$4, processing_status=$5 WHERE content_asset_id=$1',
+      [ids[index], item.assetKind, item.sourceKind, item.sourceId, item.contentStatus]);
   }
   const app = await buildApiServer({ config });
   const url = '/api/v1/content-assets', headers = fixtureScopeHeaders(f.bearer);
@@ -197,17 +197,22 @@ it('returns the persisted asset kind in both the list and detail responses', asy
     const list = await app.inject({ url, headers });
     expect(list.statusCode, list.body).toBe(200);
     expect(list.json().data.items).toEqual(cases.map((item, index) => expect.objectContaining({
-      contentAssetId: ids[index], assetKind: item.assetKind, sourceKind: item.sourceKind,
+      contentAssetId: ids[index], assetKind: item.assetKind, sourceKind: item.sourceKind, contentStatus: item.contentStatus,
     })));
     for (const [index, item] of cases.entries()) {
       const detail = await app.inject({ url: `${url}/${ids[index]}`, headers });
       expect(detail.statusCode, detail.body).toBe(200);
-      expect(detail.json().data).toMatchObject({ contentAssetId: ids[index], assetKind: item.assetKind, sourceKind: item.sourceKind });
+      expect(detail.json().data).toMatchObject({
+        contentAssetId: ids[index], assetKind: item.assetKind, sourceKind: item.sourceKind, contentStatus: item.contentStatus,
+      });
+      const tags = await app.inject({ url: `${url}/${ids[index]}/tags`, headers });
+      expect(tags.statusCode, tags.body).toBe(200);
+      expect(tags.json().data.processingStatus).toBe(item.contentStatus === 'ready' ? 'ready' : 'needs-processing');
     }
   } finally { await app.close(); }
 });
 
-it('persists link creation and keeps link-sourced images and imported documents distinct', async () => {
+it('persists link creation and returns ready content status for saved text and imported documents', async () => {
   const f = await fixture(), app = await buildApiServer({ config });
   const url = '/api/v1/content-assets', headers = fixtureScopeHeaders(f.bearer);
   const writes = [
@@ -221,7 +226,7 @@ it('persists link creation and keeps link-sourced images and imported documents 
       .toEqual([{ asset_kind: assetKind }]);
     const detail = await app.inject({ url: `${url}/${id}`, headers });
     expect(detail.statusCode, detail.body).toBe(200);
-    expect(detail.json().data).toMatchObject({ contentAssetId: id, assetKind });
+    expect(detail.json().data).toMatchObject({ contentAssetId: id, assetKind, contentStatus: 'ready' });
   };
   try {
     for (const { expectedKind, ...input } of writes) {
@@ -238,6 +243,62 @@ it('persists link creation and keeps link-sourced images and imported documents 
     const imported = result.json().data;
     await assertSaved(imported.contentAsset.contentAssetId, 'file');
     expect(imported).toMatchObject({ status: 'ready', contentAsset: { sourceRef: { kind: 'import', id: sourceUrl } } });
+  } finally { await app.close(); }
+});
+
+it('keeps content status server-owned and updates it when ordinary writes change the raw body', async () => {
+  const f = await fixture(), app = await buildApiServer({ config });
+  const url = '/api/v1/content-assets', headers = fixtureScopeHeaders(f.bearer);
+  const writeHeaders = () => ({ ...headers, 'x-idempotency-key': randomUUID() });
+  const draft = { title: 'Editable asset', parts: { raw: '' } };
+  const assertDetailStatus = async (id: string, contentStatus: string) => {
+    const detail = await app.inject({ url: `${url}/${id}`, headers });
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.json().data).toMatchObject({ contentAssetId: id, contentStatus });
+  };
+  try {
+    const rejected = await app.inject({ method: 'POST', url, headers: writeHeaders(), payload: { ...draft, contentStatus: 'ready' } });
+    expect(rejected.statusCode, rejected.body).toBe(400);
+    const whitespace = await app.inject({ method: 'POST', url, headers: writeHeaders(),
+      payload: { title: 'Whitespace only', parts: { raw: ' \n\t ' } } });
+    expect(whitespace.statusCode, whitespace.body).toBe(200);
+    const whitespaceId = whitespace.json().data.contentAssetId as string;
+    contentAssetIds.push(whitespaceId);
+    await assertDetailStatus(whitespaceId, 'draft');
+
+    const createRequest = { method: 'POST' as const, url, headers: writeHeaders(), payload: draft };
+    const created = await app.inject(createRequest);
+    expect(created.statusCode, created.body).toBe(200);
+    const saved = created.json().data as { contentAssetId: string; etag: string };
+    const { contentAssetId: id } = saved;
+    contentAssetIds.push(id);
+    expect(saved).not.toHaveProperty('contentStatus');
+    await assertDetailStatus(id, 'draft');
+
+    const editUrl = `${url}/${id}`;
+    let etag = saved.etag;
+    const editHeaders = () => ({ ...writeHeaders(), 'if-match': etag });
+    const rejectedEdit = await app.inject({ method: 'PATCH', url: editUrl, headers: editHeaders(), payload: { contentStatus: 'failed' } });
+    expect(rejectedEdit.statusCode, rejectedEdit.body).toBe(400);
+    const body = await app.inject({ method: 'PATCH', url: editUrl, headers: editHeaders(), payload: { parts: { raw: '# Text' } } });
+    expect(body.statusCode, body.body).toBe(200);
+    expect(body.json().data).not.toHaveProperty('contentStatus');
+    etag = body.json().data.etag;
+    await assertDetailStatus(id, 'ready');
+    const replay = await app.inject(createRequest);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json().data).toEqual(saved);
+
+    for (const contentStatus of ['processing', 'failed']) {
+      await root.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1', [id, contentStatus]);
+      const renamed = await app.inject({ method: 'PATCH', url: editUrl, headers: editHeaders(), payload: { title: `Renamed ${contentStatus}` } });
+      expect(renamed.statusCode, renamed.body).toBe(200);
+      etag = renamed.json().data.etag;
+      await assertDetailStatus(id, contentStatus);
+    }
+    const cleared = await app.inject({ method: 'PUT', url: `${editUrl}/parts/raw`, headers: editHeaders(), payload: { contentMarkdown: '' } });
+    expect(cleared.statusCode, cleared.body).toBe(200);
+    await assertDetailStatus(id, 'draft');
   } finally { await app.close(); }
 });
 

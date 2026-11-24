@@ -1,3 +1,13 @@
+## 资产内容状态（2026-11-24，本地验收）
+
+资产列表和详情返回服务端维护的 `contentStatus`，取值为 `draft`、`processing`、`ready` 和 `failed`。空白原文为草稿，保存非空原文或导入文本后内容就绪，元数据编辑保留当前状态。音频转写和链接读取尚未接入资产状态写回。标签接口保留已有的内容可读性值，索引仍读取已就绪的原文。 [状态定义](content-assets.md#资产内容状态) · [App 源码参照](app-reference.md)
+
+`0027` 复用 `content_assets.processing_status`，把旧 `needs-processing` 转换为 `draft`，保留 `ready` 及原默认值。共享环境迁移前需要暂停并排空旧资产写入方。累计清单保留 `0026` 的 Milvus 元数据刷新。 [迁移](../migrations/0027_content_asset_status.sql) · [发布清单](../scripts/release/plan.json)
+
+类型检查、Lint、构建和 1,149 项单元及契约测试通过。隔离 PostgreSQL／Redis 通过 508 项集成测试，跳过 7 项。HTTP 回归覆盖四种状态的列表及详情序列化、手动正文编辑、文本导入、幂等重放和标签接口兼容。真实 PostgreSQL 的 `0025` → `0027` 演练应用了 `0026`、`0027`，重跑没有待执行迁移，业务表物理外键为零。 [HTTP 回归](../tests/integration/content-asset-pagination.test.ts) · [带数据迁移回归](../tests/integration/current-note-migration.test.ts)
+
+Apifox「花火AI」主分支已同步并回读两个现有查询条目的响应字段、四个状态的中文说明和成功示例。代码停在独立工作区的本地验收点。 [资产列表](https://app.apifox.com/project/8965877/apis/api-539018656) · [资产详情](https://app.apifox.com/project/8965877/apis/api-539018659)
+
 ## 资产分类统一（2026-11-24，本地验收）
 
 创建、列表、详情和搜索共用五个 `assetKind` 值。新增迁移 `0026` 扩展 PostgreSQL 的 `asset_kind`，转换原分类为 `creative` 且来源标记为 `link` 的旧链接。Milvus 沿用 `asset_kind`，既有链接通过 Worker 部分更新同步分类和值，新建索引直接读取已保存的分类。共享目标的迁移和刷新留在单独维护窗口。 [资产契约](contract-compatibility.md#p06-个人资产文件夹检索与图谱) · [索引同步](runbooks/milvus.md#0026-链接资产分类同步)

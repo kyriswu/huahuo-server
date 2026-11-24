@@ -1,5 +1,6 @@
 import {inferAssetKind} from './asset-kind.js';
 import type { AssetKind } from '../../contracts/asset-kind.js';
+import type { ContentStatus } from '../../contracts/content-status.js';
 import { idempotent } from '../../lib/idempotency.js';
 import {resolveTraceId} from '../../lib/trace.js';
 import {tagGraph,type GraphQuery} from './tag-graph.js';
@@ -34,7 +35,7 @@ interface ContentAssetRow extends ContentAssetStateRow {
  source_id: string | null;
  tag_set_version: string;
  tag_manual_override: boolean;
- processing_status: string;
+ processing_status: ContentStatus;
  created_at: Date;
  updated_at: Date;
 }
@@ -200,6 +201,7 @@ export class ContentAssetService {
    return {
     ...await this.contentAssetDto(tx, scope, id),
     assetKind: contentAsset.asset_kind,
+    contentStatus: contentAsset.processing_status,
    };
   });
  }
@@ -236,7 +238,8 @@ export class ContentAssetService {
   const tags=await tx.query(`SELECT t.tag_id,t.display_name,t.normalized_name,membership.source FROM content_asset_tags membership JOIN asset_tags t ON t.tag_id=membership.tag_id AND t.user_id=$2 WHERE membership.content_asset_id=$1 ORDER BY t.normalized_name,t.tag_id`,[contentAssetId,scope.userId]);
   const suggestions=await tx.query(`SELECT suggestion_id,content_asset_revision_id,labels,provider,status,created_at FROM content_asset_tag_suggestions WHERE content_asset_id=$1 AND user_id=$2 AND status='pending' AND content_asset_revision_id=$3 AND expected_tag_set_version=$4 ORDER BY created_at DESC LIMIT 10`,[contentAssetId,scope.userId,asset.content_asset_revision_id,asset.tag_set_version]);
   const job=(await tx.query(`SELECT c.task_id,c.outcome,c.provider,t.state,t.error_code FROM content_jobs c JOIN tasks t ON t.id=c.task_id WHERE c.content_asset_id=$1 AND t.user_id=$2 AND t.workspace_id IS NULL ORDER BY t.created_at DESC,t.id DESC LIMIT 1`,[contentAssetId,scope.userId])).rows[0];
-  return {contentAssetId,tags:tags.rows.map(x=>({tagId:x.tag_id,displayName:x.display_name,normalizedName:x.normalized_name,source:x.source})),tagSetVersion:Number(asset.tag_set_version),tagEtag:`"tags-${contentAssetId}-${asset.tag_set_version}"`,manualOverride:asset.tag_manual_override,suggestions:suggestions.rows.map(x=>({suggestionId:x.suggestion_id,contentAssetRevisionId:x.content_asset_revision_id,labels:x.labels as string[],provider:x.provider,status:x.status,createdAt:x.created_at.toISOString()})),contentAssetEtag:asset.etag,processingStatus:asset.processing_status as string,extraction:job?{taskId:job.task_id as string,status:job.state as string,outcome:job.outcome as string|null,provider:job.provider as string|null,errorCode:job.error_code as string|null}:null};
+  const processingStatus=asset.processing_status==='ready'?'ready':'needs-processing';
+  return {contentAssetId,tags:tags.rows.map(x=>({tagId:x.tag_id,displayName:x.display_name,normalizedName:x.normalized_name,source:x.source})),tagSetVersion:Number(asset.tag_set_version),tagEtag:`"tags-${contentAssetId}-${asset.tag_set_version}"`,manualOverride:asset.tag_manual_override,suggestions:suggestions.rows.map(x=>({suggestionId:x.suggestion_id,contentAssetRevisionId:x.content_asset_revision_id,labels:x.labels as string[],provider:x.provider,status:x.status,createdAt:x.created_at.toISOString()})),contentAssetEtag:asset.etag,processingStatus,extraction:job?{taskId:job.task_id as string,status:job.state as string,outcome:job.outcome as string|null,provider:job.provider as string|null,errorCode:job.error_code as string|null}:null};
  }
  private async applyTagSetTx(tx:pg.PoolClient,userId:string,contentAssetId:string,names:string[]){
   const normalized=this.normalizeTagNames(names);
@@ -300,10 +303,11 @@ export class ContentAssetService {
   if(!['text/plain','text/markdown'].includes(input.mimeType))throw new DomainError(400,'IMPORT_CONTENT_TYPE_UNSUPPORTED');
   if(typeof input.content!=='string'||!input.content.trim())throw new DomainError(400,'IMPORT_CONTENT_INVALID');
   checkContentAssetParts({raw:input.content},'input');
+  // Retain the original processingStatus input in existing import idempotency digests.
   const contentAsset=await this.createContentAsset(scope,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:'ready',parts:{raw:input.content,outline:'',germination:''}},key);
   return {status:'ready' as const,contentAsset};
  }
- async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];assetKind?:AssetKind;sourceKind?:string;sourceId?:string;processingStatus?:'ready'|'needs-processing'},key:string){return transaction(this.pool,async tx=>{
+ async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];assetKind?:AssetKind;sourceKind?:string;sourceId?:string;processingStatus?:'ready'},key:string){return transaction(this.pool,async tx=>{
   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
   await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
@@ -314,11 +318,11 @@ export class ContentAssetService {
    checkContentAssetParts(canonicalParts,'create');
    await this.assertActiveFolder(tx, scope.userId, input.folderId ?? null);
    const id=randomUUID(),rid=randomUUID();
+   const contentStatus:ContentStatus=input.processingStatus??(canonicalParts.raw?.trim()?'ready':'draft');
    await tx.query(
-    'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag,folder_id,asset_kind) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1),input.folderId??null,input.assetKind??inferAssetKind(input.sourceKind)],
+    'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag,folder_id,asset_kind,processing_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1),input.folderId??null,input.assetKind??inferAssetKind(input.sourceKind),contentStatus],
    );
-   await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,input.processingStatus??(input.parts.raw?.trim()?'ready':'needs-processing')]);
    await syncContentAssetRefs(tx,scope,id,canonicalParts,input.resourceRefs);
    for(const part of parts){
     const text=canonicalParts[part]??'',partRevisionId=randomUUID();
@@ -369,7 +373,10 @@ export class ContentAssetService {
      await tx.query('INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(content_asset_id,part) DO UPDATE SET part_revision_id=EXCLUDED.part_revision_id,revision=EXCLUDED.revision,content_markdown=EXCLUDED.content_markdown,content_sha256=EXCLUDED.content_sha256,updated_at=now()',[partRevisionId,id,part,revision,text,sha(text)]);
      }
     const rawChanged=changed.some(([part])=>part==='raw');
-    if(rawChanged)await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,complete.raw?.trim()?'ready':'needs-processing']);
+    if(rawChanged){
+     const contentStatus:ContentStatus=complete.raw?.trim()?'ready':'draft';
+     await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,contentStatus]);
+    }
     await this.cursor(tx,scope.userId,'content_asset',id,'updated',false,rid,v,asset.content_asset_revision_id,Number(asset.content_asset_revision));
     if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
     if(rawChanged)await this.indexContentAsset(tx,scope,id);

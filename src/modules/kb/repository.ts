@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { AssetKind } from '../../contracts/asset-kind.js';
+import type { ContentStatus } from '../../contracts/content-status.js';
 import type { AppConfig } from '../../config/config.js';
 import { DOCUMENT_CANONICAL_MAX_BYTES } from '../../config/document-extraction.js';
 import { transaction, DomainError } from '../identity/store.js';
@@ -10,7 +11,7 @@ import { storageFor } from '../storage/port.js';
 
 interface ContentAssetIndexRow {
  state: string;
- processing_status: string;
+ processing_status: ContentStatus;
  asset_kind: AssetKind;
  created_at: Date;
  updated_at: Date;
