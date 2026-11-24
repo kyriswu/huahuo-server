@@ -20,6 +20,7 @@ export function nodeDocumentConfig(node:ProcessingNode){
  return createDocumentExtractionConfig(api.mode,api.parameters,api.pollMs,api.maxResponseBytes,api.timeoutSeconds*1000);
 }
 export function nodeConfig(node:ProcessingNode,bootstrap:ProcessingNodesConfig,requireApiToken=true):EnabledDocumentParserMachineConfig{
+ if(!bootstrap.enabled)throw new DomainError(503,'PROCESSING_NODE_UNAVAILABLE');
  try{
   if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(node.id)||!node.name?.trim()||node.name.length>80||!['cpu','gpu'].includes(node.resourceClass)
    ||!Array.isArray(node.capabilities)||!node.capabilities.length||new Set(node.capabilities).size!==node.capabilities.length

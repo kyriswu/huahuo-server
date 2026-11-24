@@ -17,8 +17,16 @@ export class ProcessingNodes {
  private timer?:NodeJS.Timeout;private refresh?:Promise<void>;private closed=false;
  private readonly observations=new Map<string,{key:string;until:number;pending:Promise<NodeObservation>}>();
  constructor(private readonly pool:pg.Pool,private readonly config:AppConfig,private readonly factory:Factory=cfg=>createDocumentParserMachine(cfg,config.redisQueueUrl,config.queuePrefix)){ }
- async list():Promise<ProcessingNode[]>{return (await this.pool.query('SELECT * FROM processing_nodes ORDER BY created_at,id')).rows.map(nodeFromRow);}
- private async node(id:string){const row=(await this.pool.query('SELECT * FROM processing_nodes WHERE id=$1',[id])).rows[0];if(!row)throw new DomainError(404,'PROCESSING_NODE_NOT_FOUND');return nodeFromRow(row);}
+ async list():Promise<ProcessingNode[]>{
+  if(!this.config.processingNodes.enabled)return [];
+  return (await this.pool.query('SELECT * FROM processing_nodes ORDER BY created_at,id')).rows.map(nodeFromRow);
+ }
+ private async node(id:string){
+  if(!this.config.processingNodes.enabled)throw new DomainError(404,'PROCESSING_NODE_NOT_FOUND');
+  const row=(await this.pool.query('SELECT * FROM processing_nodes WHERE id=$1',[id])).rows[0];
+  if(!row)throw new DomainError(404,'PROCESSING_NODE_NOT_FOUND');
+  return nodeFromRow(row);
+ }
  async observe(id:string):Promise<NodeObservation>{
   const node=await this.node(id),key=routing(node),cached=this.observations.get(id);
   if(cached?.key===key&&cached.until>Date.now())return cached.pending;
@@ -42,6 +50,7 @@ export class ProcessingNodes {
   try{await entry.connected;return entry.runtime;}catch(error){if(this.runtimes.get(node.id)===entry)this.runtimes.delete(node.id);await entry.runtime.close().catch(()=>undefined);throw error;}
  }
  async bind(requestId:string,capability:Capability,recoverAdmission=false,retryFrom?:string,nodeId?:string,powerOnly=false):Promise<ProcessingNode>{
+  if(!this.config.processingNodes.enabled)throw new DomainError(503,'PROCESSING_NODE_UNAVAILABLE');
   if(powerOnly&&!this.config.processingNodes.cloudControlEnabled)throw new DomainError(503,'PROCESSING_NODE_CLOUD_CONTROL_DISABLED');
   if(!requestId||requestId.length>256||!['document','audio'].includes(capability))throw new DomainError(400,'PROCESSING_ASSIGNMENT_INVALID');
   return transaction(this.pool,async tx=>{
