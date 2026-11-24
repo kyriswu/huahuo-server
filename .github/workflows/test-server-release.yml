@@ -19,6 +19,7 @@ permissions:
 env:
   TEST_ACK_BUILDER_INSTANCE_ID: ${{ vars.TEST_ACK_BUILDER_INSTANCE_ID }}
   TEST_ACK_RELEASE_COMMAND_ID: ${{ vars.TEST_ACK_RELEASE_COMMAND_ID }}
+  GITHUB_OIDC_PROVIDER_ARN: acs:ram::1472289886746775:oidc-provider/github-actions
 
 concurrency:
   group: huahuo-test-server-release
@@ -90,7 +91,7 @@ jobs:
         if: steps.candidate.outputs.deploy == 'true'
         uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
         with:
-          oidc-provider-arn: acs:ram::1472289886746775:oidc-provider/github-actions-huahuo-server
+          oidc-provider-arn: ${{ env.GITHUB_OIDC_PROVIDER_ARN }}
           role-to-assume: acs:ram::1472289886746775:role/huahuo-server-test-release
           audience: sts.aliyuncs.com
           role-session-expiration: 5400
