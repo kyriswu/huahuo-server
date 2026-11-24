@@ -18,6 +18,27 @@ const auth=async(req:FastifyRequest,reply:FastifyReply)=>{reply.header('Cache-Co
 const scope=(req:FastifyRequest)=>{if(!req.authScope)throw new DomainError(401,'UNAUTHORIZED');return req.authScope;};
 const folder=Type.Object({folderId:Id,parentFolderId:Type.Union([Id,Type.Null()]),displayName:Type.String(),normalizedName:Type.String(),state:Type.String(),currentRevisionId:Id,etag:Type.String(),contentCursor:Type.String()});
 const contentAsset=Type.Any();
+const createContentAssetBody = Type.Object({
+ title: Text(240),
+ sourceKind: Type.Optional(Text(32)),
+ assetKind: Type.Optional(AssetKindSchema),
+ sourceId: Type.Optional(Text(255)),
+ folderId: Type.Optional(Type.Union([Id, Type.Null()])),
+ parts: Type.Object({
+  raw: Type.String({ maxLength: EDITABLE_MARKDOWN_MAX_CHARS, description: '正文或转写 Markdown。暂无正文时可传空字符串。' }),
+  outline: Type.Optional(Type.String({ maxLength: EDITABLE_MARKDOWN_MAX_CHARS })),
+  germination: Type.Optional(Type.String({ maxLength: EDITABLE_MARKDOWN_MAX_CHARS })),
+ }, Strict),
+ resourceRefs: Type.Optional(Type.Array(Type.Object({
+  resourceId: Id,
+  usage: Text(64),
+  anchor: Type.Optional(Type.String({ maxLength: 200 })),
+  alt: Type.Optional(Type.String({ maxLength: 500 })),
+ }, Strict), {
+  maxItems: 100,
+  description: '随资产创建关联的附件。使用上传完成响应中的 resourceId，原始音频的 usage 填 original。',
+ })),
+}, Strict);
 const contentAssetDetail=Type.Object({assetKind:AssetKindSchema,contentStatus:ContentStatusSchema},{additionalProperties:true});
 const contentAssetListItem=Type.Object({contentAssetId:Id,folderId:Type.Union([Id,Type.Null()]),title:Type.String(),state:Type.Literal('active'),contentAssetRevisionId:Id,etag:Type.String(),contentCursor:Type.String(),assetKind:AssetKindSchema,contentStatus:ContentStatusSchema,sourceKind:Type.String(),sourceRef:Type.Union([Type.Object({kind:Type.String(),id:Type.String()},Strict),Type.Null()]),createdAt:Type.String({format:'date-time'}),updatedAt:Type.String({format:'date-time'}),preview:Type.String({maxLength:CONTENT_ASSET_PREVIEW_LENGTH})},Strict);
 const tag=Type.Object({tagId:Id,displayName:Type.String(),normalizedName:Type.String(),source:Type.Union([Type.Literal('manual'),Type.Literal('extracted')])},Strict);
@@ -31,7 +52,7 @@ export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:Con
  for(const action of ['delete','restore'] as const)app[action==='delete'?'delete':'post'](`/api/v1/folders/:folderId${action==='restore'?'/restore':''}`,{preHandler:guard,schema:{params:fp,body:empty,querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const p=req.params as {folderId:string};return success(await contentAssets.deleteFolder(scope(req),p.folderId,String(req.headers['if-match']??''),idempotencyKey(req,'required')!,action==='restore'),req.id);});
  app.get('/api/v1/content-assets',{preHandler:guard,schema:{querystring:Type.Object({cursor:Type.Optional(Type.String({minLength:1,maxLength:512}))},Strict),response:{200:Envelope(Type.Object({items:Type.Array(contentAssetListItem,{maxItems:CONTENT_ASSET_PAGE_SIZE}),nextCursor:Type.Union([Type.String(),Type.Null()])},Strict)),...errors}}},async req=>{return success(await contentAssets.listContentAssets(scope(req),(req.query as {cursor?:string}).cursor),req.id);});
  app.post('/api/v1/content-asset-imports',{bodyLimit:EDITABLE_MARKDOWN_BODY_LIMIT,preHandler:guard,schema:{body:Type.Object({title:Text(240),mimeType:Type.Union([Type.Literal('text/plain'),Type.Literal('text/markdown')]),content:Type.String({minLength:1,maxLength:EDITABLE_MARKDOWN_MAX_CHARS}),folderId:Type.Optional(Type.Union([Id,Type.Null()])),sourceUrl:Type.Optional(Type.String({maxLength:2048})),resourceRefs:Type.Optional(Type.Array(Type.Object({resourceId:Id,usage:Text(64)},Strict),{maxItems:100}))},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const result=await contentAssets.importContentAsset(scope(req),req.body as Parameters<ContentAssetService['importContentAsset']>[1],idempotencyKey(req,'required')!);return success({...result,contentAsset:await contentAssetView(req,result.contentAsset)},req.id);});
- app.post('/api/v1/content-assets',{bodyLimit:EDITABLE_MARKDOWN_BODY_LIMIT,preHandler:guard,schema:{body:Type.Object({title:Text(240),sourceKind:Type.Optional(Text(32)),assetKind:Type.Optional(AssetKindSchema),sourceId:Type.Optional(Text(255)),folderId:Type.Optional(Type.Union([Id,Type.Null()])),parts:Type.Object({raw:Type.String({maxLength:EDITABLE_MARKDOWN_MAX_CHARS}),outline:Type.Optional(Type.String({maxLength:EDITABLE_MARKDOWN_MAX_CHARS})),germination:Type.Optional(Type.String({maxLength:EDITABLE_MARKDOWN_MAX_CHARS}))},Strict),resourceRefs:Type.Optional(Type.Array(Type.Object({resourceId:Id,usage:Text(64),anchor:Type.Optional(Type.String({maxLength:200})),alt:Type.Optional(Type.String({maxLength:500}))},{additionalProperties:false}),{maxItems:100}))},Strict),querystring:empty,response:{200:Envelope(contentAsset),...errors}}},async req=>{return success(await contentAssetView(req,await contentAssets.createContentAsset(scope(req),req.body as Parameters<ContentAssetService['createContentAsset']>[1],idempotencyKey(req,'required')!)),req.id);});
+ app.post('/api/v1/content-assets',{bodyLimit:EDITABLE_MARKDOWN_BODY_LIMIT,preHandler:guard,schema:{body:createContentAssetBody,querystring:empty,response:{200:Envelope(contentAsset),...errors}}},async req=>{return success(await contentAssetView(req,await contentAssets.createContentAsset(scope(req),req.body as Parameters<ContentAssetService['createContentAsset']>[1],idempotencyKey(req,'required')!)),req.id);});
  app.get('/api/v1/content-assets/:contentAssetId',{preHandler:guard,schema:{params:contentAssetParams,querystring:Type.Object({revisionId:Type.Optional(Type.String())},Strict),response:{200:Envelope(contentAssetDetail),...errors}}},async req=>{const p=req.params as {contentAssetId:string};return success(await contentAssetView(req,await contentAssets.getContentAsset(scope(req),p.contentAssetId,(req.query as {revisionId?:string}).revisionId)),req.id);});
  app.patch('/api/v1/content-assets/:contentAssetId',{bodyLimit:EDITABLE_MARKDOWN_BODY_LIMIT,preHandler:guard,schema:{params:contentAssetParams,body:Type.Object({title:Type.Optional(Text(240)),folderId:Type.Optional(Type.Union([Id,Type.Null()])),parts:Type.Optional(Type.Record(Type.String(),Type.String({maxLength:EDITABLE_MARKDOWN_MAX_CHARS}))),resourceRefs:Type.Optional(Type.Array(Type.Object({resourceId:Id,usage:Text(64),anchor:Type.Optional(Type.String()),alt:Type.Optional(Type.String())},{additionalProperties:false})) )},Strict),querystring:empty,response:{200:Envelope(contentAsset),...errors}}},async req=>{const p=req.params as {contentAssetId:string};return success(await contentAssetView(req,await contentAssets.updateContentAsset(scope(req),p.contentAssetId,req.body as Record<string, unknown>,String(req.headers['if-match']??''),idempotencyKey(req,'required')!)),req.id);});
  app.delete('/api/v1/content-assets/:contentAssetId',{preHandler:guard,schema:{params:contentAssetParams,body:Type.Object({},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const p=req.params as {contentAssetId:string};return success(await contentAssets.deleteContentAsset(scope(req),p.contentAssetId,String(req.headers['if-match']??''),idempotencyKey(req,'required')!),req.id);});

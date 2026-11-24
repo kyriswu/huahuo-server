@@ -17,6 +17,12 @@
 - 通用上传完成后交付可供业务认领的 `resourceId`。资产可引用录音、PDF 或其他原文件。 [上传与资源](runbooks/user-storage-layout.md)
 - `/api/v1/rag/ingestions` 和 `/api/v1/text-ingestions` 当前分别保存独立的文件解析记录和文本导入记录，用于各自的状态与检索。形成可管理的资产时，由业务调用资产写入入口。 [文件入库](runbooks/rag-url-ingestion.md) · [文本入库](runbooks/text-ingestion.md)
 
+## 原始音频附件
+
+音视频导入或录音上传完成后，取完成响应中的 `data.resource.resourceId`。创建音频资产时传 `assetKind: "audio"` 和 `resourceRefs: [{ resourceId, usage: "original" }]`。服务端在创建事务中认领文件，把附件及用途写入已有的 `content_asset_resource_refs`，并登记资源引用。资源元数据保存在 `resources`。 [资产路由](../src/modules/content-assets/routes.ts) · [引用写入](../src/modules/content-assets/content-asset-images.ts)
+
+`parts.raw` 存正文或转写。没有正文时可传空字符串，之后仅更新正文会保留原附件。播放器从资产详情的 `data.resourceRefs` 取 `usage` 为 `original` 的音频资源 ID，再调用 `GET /api/v1/media/resources/{resourceId}/playback` 读取 `data.url`。 [播放接口](../src/modules/storage/routes.ts)
+
 ## 资产分类
 
 `AssetKind` 是代码中定义的全局资产分类，创建、列表、详情、搜索 Schema 和索引元数据共用同一个枚举。资产行直接保存 `content_assets.asset_kind`，PostgreSQL 通过 `CHECK` 约束校验，Milvus 使用同名字符串字段。类型的来源是公共契约中的 `assetKinds`。 [公共契约](../src/contracts/asset-kind.ts)

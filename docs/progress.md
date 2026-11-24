@@ -1,3 +1,9 @@
+## 原始音频附件（2026-11-24，本地验收）
+
+音频资产复用 `content_asset_resource_refs`，创建接口的 Schema 明确上传完成后的 `resourceId` 和 `usage: "original"`。HTTP 回归验证资产创建、实际关联行、详情回读、转写后保留附件、签名播放和跨账号拒绝。类型检查、Lint、构建、1,149 项单元及契约测试通过，隔离 PostgreSQL／Redis 集成通过 509 项、跳过 7 项，OSS 上传使用本地替身。 [资产契约](content-assets.md#原始音频附件) · [集成测试](../tests/integration/content-asset-images.test.ts)
+
+Apifox 已回读确认创建和详情的 M4A 示例使用同一个 `resourceId`，播放文档说明该 ID 的来源，并补齐响应中的 `sizeBytes`。 [创建](https://app.apifox.com/project/8965877/apis/api-539018651) · [详情](https://app.apifox.com/project/8965877/apis/api-539018659) · [播放](https://app.apifox.com/project/8965877/apis/api-539018520)
+
 ## 资产内容状态（2026-11-24，本地验收）
 
 资产列表和详情返回服务端维护的 `contentStatus`，取值为 `draft`、`processing`、`ready` 和 `failed`。空白原文为草稿，保存非空原文或导入文本后内容就绪，元数据编辑保留当前状态。音频转写和链接读取尚未接入资产状态写回。标签接口保留已有的内容可读性值，索引仍读取已就绪的原文。 [状态定义](content-assets.md#资产内容状态) · [App 源码参照](app-reference.md)
