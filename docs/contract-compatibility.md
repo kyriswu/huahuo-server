@@ -243,6 +243,8 @@ USER：单 ECS 按需启动、在线复用、默认空闲 1 分钟节省停机�
 
 当前消费者为 `../huahuo-ai/lib/features/auth/data/http_auth_repository.dart`，已核实 `sendCode` 发送 `{phone,purpose:sign_in}`、`verifyCode` 发送 `clientType:app` 与持久 clientId，HTTP 使用 `x-idempotency-key` 和既有 success/data/error envelope。其短信票据解析需要 smsRequestId/cooldownSeconds，登录需要 user.userId 及令牌字段，均沿用现行后端契约，无旧参数兼容分支。
 
+2026-11-24 只读复核 Flutter `fe6a02c`。验证码响应的 `providerMode` 增加飞书测试投递的 `mock`，现有 Flutter 客户端仅读取票据 ID 和冷却时间，登录继续提交同一手机号与验证码。 [飞书测试验证码](runbooks/sms.md#飞书测试验证码)
+
 `tests/unit/identity-api-schema.test.ts` 和真实 PG identity 集成覆盖后端 Schema、OTP、登录及失败/重放；适配器只改变供应商实现，不增加 App 字段。当前这两项认证契约为 CODE（源码核对），未运行 Flutter 或真机 App 全链路。用户确认收信和运营商 delivered 是短信供应商证据，不等于 App 登录已做实机验收。
 
 旧目录 `huahuo-app` 以及其 Flutter/packages 路径、旧 scene/deviceId 描述仅属于下方历史记录。当前参照由 [App 证据](app-reference.md) 和 `config/app-reference-files.json` 指定；其他业务的新 App 兼容性尚未复核。

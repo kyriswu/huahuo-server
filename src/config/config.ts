@@ -5,7 +5,7 @@ import { packageVersion } from '../observability/identity.js';
 import { loadAgentBaseUrl, loadApiServiceBaseUrl } from './service-addresses.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { loadAliyunOtpConfig, type AliyunOtpConfig } from './sms.js';
+import { loadAliyunOtpConfig, loadFeishuOtpConfig, type AliyunOtpConfig, type FeishuOtpConfig } from './sms.js';
 import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
 import { scopedConfig } from '../modules/runtime-settings/service.js';
 import { CONTENT_ASSET_EMBEDDING_MODEL, CONTENT_ASSET_EMBEDDING_PROFILE, CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_RERANK_MODEL } from '../lib/search-index/model-profile.js';
@@ -31,6 +31,7 @@ export interface AppConfig {
   jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string };
   gatewayStudio: { enabled: boolean; origin: string; publicPath: string };
   smsAliyun?: AliyunOtpConfig;
+  smsFeishu?: FeishuOtpConfig;
   appEnv: string; agreementVersion: string; privacyVersion: string; adminOrigin: string;
   billingMode: 'disabled' | 'development' | 'live'; billingPolicyVersion: string;
   storageDriver: 'local' | 's3' | 'aliyun-oss'; storageLocalRoot: string; maxUploadBytes: number;
@@ -133,7 +134,8 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     studioOrigin = parsed.origin;
   } catch { fail('HUAHUO_STUDIO_ORIGIN'); }
   const gatewayStudio = { enabled: studioEnabled === 'true', origin: studioOrigin, publicPath: studioPath };
-  const smsAliyun = role === 'api-server' ? loadAliyunOtpConfig(env) : undefined;
+  const smsFeishu = role === 'api-server' ? loadFeishuOtpConfig(env, appEnv) : undefined;
+  const smsAliyun = role === 'api-server' && !smsFeishu ? loadAliyunOtpConfig(env) : undefined;
   const billingMode = (env.BILLING_MODE ?? (appEnv === 'development' ? 'development' : 'disabled')) as AppConfig['billingMode'];
   if (!['disabled', 'development', 'live'].includes(billingMode)) fail('BILLING_MODE');
   if (appEnv === 'production' && billingMode === 'development') fail('BILLING_MODE');
@@ -246,7 +248,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
       ...(jwtPublicKey ? { publicKeyPem: jwtPublicKey } : {}),
     },
     gatewayStudio,
-    smsAliyun, appEnv,
+    smsAliyun, smsFeishu, appEnv,
     agreementVersion: env.USER_AGREEMENT_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     privacyVersion: env.PRIVACY_POLICY_VERSION ?? (appEnv === 'production' ? '' : '2026-08-20'),
     adminOrigin: env.ADMIN_PUBLIC_BASE_URL ? new URL(env.ADMIN_PUBLIC_BASE_URL).origin : '',

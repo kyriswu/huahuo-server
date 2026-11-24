@@ -1,6 +1,6 @@
 # 阿里云短信服务与命令行工具
 
-服务使用官方 `@alicloud/dysmsapi20170525@4.6.0` SDK，通过 HTTPS 调用中国站 `dysmsapi.aliyuncs.com`。通用发送和回执查询位于 `src/integrations/aliyun-sms.ts`；登录验证码适配器位于 `src/integrations/sms.ts`，`POST /api/v1/auth/sms-code` 在开发、测试和正式环境一律使用真实阿里云适配器。业务层不执行阿里云 CLI，也不依赖宿主用户级 Skill 或 `~/.aliyun/config.json`。
+阿里云通用发送和回执查询位于 `src/integrations/aliyun-sms.ts`，使用官方 `@alicloud/dysmsapi20170525@4.6.0` SDK。登录验证码渠道由 `src/integrations/sms.ts` 选择。正式环境使用阿里云，开发和测试环境配置飞书地址后使用群机器人。
 
 官方依据：[API 接入说明](https://help.aliyun.com/zh/sms/getting-started/use-sms-api)、[SendSms](https://help.aliyun.com/zh/sms/developer-reference/api-dysmsapi-2017-05-25-sendsms)、[QuerySendDetails](https://help.aliyun.com/zh/sms/developer-reference/api-dysmsapi-2017-05-25-querysenddetails)。
 
@@ -17,9 +17,19 @@ SMS_ALIYUN_CONNECT_TIMEOUT_MS=3000
 SMS_ALIYUN_READ_TIMEOUT_MS=3000
 ```
 
-API 启动必须提供 RAM 凭据、已审核签名和验证码模板，缺项立即失败。不存在短信模拟、禁用模式或验证码回显开关；验证码只发送到手机，不通过接口返回。
+使用阿里云时，API 启动需要 RAM 凭据、已审核签名和验证码模板。验证码通过所选渠道投递，接口响应只返回票据。
 
 Compose 只向 API 注入短信参数；Admin/Scheduler/Migrate 不新增短信凭据要求。登录验证码由服务端随机生成，使用配置的单一变量名写入模板；模板若包含其他变量，应使用通用工具显式提供，不能直接用于当前登录适配器。
+
+### 飞书测试验证码
+
+同事可从 `test` 拉取代码，沿用本机依赖，在私密 `.env` 配置团队提供的 webhook ，再启动 API。已有本机 Compose 依赖时，可运行 `docker compose --env-file .env up -d --no-deps --build api-server`。之后通过 App 调试包或本机 API 申请验证码，从飞书群取码。
+
+在 `APP_ENV=development` 或 `APP_ENV=test` 的 API 私密环境配置中填写 `SMS_FEISHU_WEBHOOK_URL`。Compose 从 `.env` 读取，本机直接运行从所选的 `.env.host` 读取。机器人开启了签名时同时填写 `SMS_FEISHU_SIGNING_SECRET`。留空 webhook URL 时使用阿里云。
+
+飞书群收到环境、脱敏手机号、六位验证码和有效期。所有符合现有手机号格式的号码均可用于测试。飞书票据只能在启用飞书的 API 实例登录或重放，正式环境仅接受真实短信票据。测试环境使用独立于正式环境的身份库和 JWT 密钥。
+
+其他通知场景可复用 `src/integrations/feishu-webhook.ts` 的 `FeishuWebhook`。`send` 接收飞书原生结构，支持文本、富文本、图片、群名片和卡片。它单次提交并按飞书业务码确认受理。 [飞书自定义机器人文档](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot?lang=zh-CN)
 
 ## 登录验证码
 
@@ -31,7 +41,7 @@ X-Idempotency-Key: <本次请求的稳定唯一键>
 {"phone":"<接收手机号>","purpose":"sign_in"}
 ```
 
-成功响应仍为既有 envelope，包含 `smsRequestId`、`cooldownSeconds:60`、`providerMode:live`；真实模式不返回 `testCode`。后续 `/api/v1/auth/login` 使用该票据、手机收到的验证码、`clientType:app` 和稳定 `clientId`。
+成功响应包含 `smsRequestId`、`cooldownSeconds` 和 `providerMode`。阿里云为 `live`，飞书为 `mock`。后续 `/api/v1/auth/login` 使用该票据、收到的验证码、`clientType:app` 和稳定 `clientId`。
 
 沿用真实 PostgreSQL 的每手机号 60 秒冷却、每天 10 次、每 IP 每小时 20 次和请求键幂等，不另开绕过限流的公开发短信接口。手机号存储与验证码哈希规则不变。
 

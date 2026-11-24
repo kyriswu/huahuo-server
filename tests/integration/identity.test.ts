@@ -13,7 +13,8 @@ import { IdentityService } from '../../src/modules/identity/service.js';
 import { insertFixtureSession, insertFixtureUser } from './jwt-fixture.js';
 import { SendSmsResponse, SendSmsResponseBody } from '@alicloud/dysmsapi20170525';
 import { AliyunSmsService, type AliyunSmsSdk } from '../../src/integrations/aliyun-sms.js';
-import { AliyunSmsProvider } from '../../src/integrations/sms.js';
+import { FeishuWebhook } from '../../src/integrations/feishu-webhook.js';
+import { AliyunSmsProvider, FeishuSmsProvider } from '../../src/integrations/sms.js';
 import { recordingSms } from '../sms-fixture.js';
 const migrationUrl=process.env.TEST_DATABASE_MIGRATION_URL;
 if(!migrationUrl||!/^huahuo_test_[a-z0-9_]+$/.test(new URL(migrationUrl).pathname.slice(1)))throw new Error('ISOLATED_TEST_DATABASE_REQUIRED');
@@ -328,6 +329,57 @@ describe('P02 real PG identity and scope',()=>{
   const login=await send(api,'/api/v1/auth/login',loginBody({phone,smsRequestId:ticket.smsRequestId,code}));
   expect(login.statusCode).toBe(401);expect(login.json().error.code).toBe('SMS_CODE_EXPIRED');
   expect(transport.messages.size).toBe(count);
+ });
+ it('sends Feishu OTP to a valid phone and isolates login and replays from live mode',async()=>{
+  const phone='13999990006';
+  const webhookUrl='https://open.feishu.cn/open-apis/bot/v2/hook/00000000-0000-4000-8000-000000000001';
+  const config=loadConfig('api-server',{
+   ...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,
+   SMS_FEISHU_WEBHOOK_URL:webhookUrl,
+  });
+  const fetchWebhook=vi.fn<typeof fetch>().mockImplementation(async()=>Response.json({code:0,msg:'success'}));
+  const feishu=config.smsFeishu!;
+  const sms=new FeishuSmsProvider(feishu,new FeishuWebhook(feishu.webhookUrl,undefined,fetchWebhook));
+  const testApi=await buildApiServer({config,sms});
+  const sendPath='/api/v1/auth/sms-code',loginPath='/api/v1/auth/login';
+  const sendHeaders={'x-idempotency-key':randomUUID()},loginHeaders={'x-idempotency-key':randomUUID()};
+  const payload={phone,purpose:'sign_in'};
+  try{
+   const sent=await send(testApi,sendPath,payload,sendHeaders);
+   expect(sent.statusCode).toBe(200);
+   const ticket=sent.json().data;
+   expect(ticket).toEqual({smsRequestId:expect.any(String),cooldownSeconds:60,providerMode:'mock'});
+   const webhookPayload=JSON.parse(String(fetchWebhook.mock.calls[0]?.[1]?.body));
+   expect(webhookPayload).toMatchObject({msg_type:'text',content:{text:expect.stringContaining('环境：test')}});
+   expect(webhookPayload.content.text).toContain('手机号：139****0006');
+   expect(webhookPayload.content.text).not.toContain(phone);
+   const code=(webhookPayload.content.text as string).match(/^验证码：(\d{6})$/mu)?.[1];
+   if (!code) throw new Error('Missing OTP in the Feishu fixture payload');
+   const {rows:[otp]}=await root.query("SELECT delivery_status,provider_mode,code_hash FROM otp_requests WHERE id=$1",[ticket.smsRequestId]);
+   expect(otp).toEqual({delivery_status:'sent',provider_mode:'mock',code_hash:mac(secret,`${ticket.smsRequestId}:${code}`)});
+
+   const replay=await send(testApi,sendPath,payload,sendHeaders);
+   expect(replay.statusCode).toBe(200);
+   expect(replay.json().data).toEqual(ticket);
+   const liveReceipt=await send(api,sendPath,payload,sendHeaders);
+   expect(liveReceipt.statusCode).toBe(409);
+   expect(liveReceipt.json().error.code).toBe('SMS_DELIVERY_NOT_CONFIRMED');
+
+   const loginPayload=loginBody({phone,smsRequestId:ticket.smsRequestId,code});
+   const liveLogin=await send(api,loginPath,loginPayload,loginHeaders);
+   expect(liveLogin.statusCode).toBe(401);
+   expect(liveLogin.json().error.code).toBe('SMS_CODE_EXPIRED');
+   const signedIn=await send(testApi,loginPath,loginPayload,loginHeaders);
+   expect(signedIn.statusCode).toBe(200);
+   expect(signedIn.json().data.user.userId).toEqual(expect.any(String));
+   const loginReplay=await send(testApi,loginPath,loginPayload,loginHeaders);
+   expect(loginReplay.statusCode).toBe(200);
+   expect(loginReplay.json().data.accessToken).toBe(signedIn.json().data.accessToken);
+   const liveLoginReplay=await send(api,loginPath,loginPayload,loginHeaders);
+   expect(liveLoginReplay.statusCode).toBe(401);
+   expect(liveLoginReplay.json().error.code).toBe('SMS_CODE_EXPIRED');
+   expect(fetchWebhook).toHaveBeenCalledTimes(1);
+  }finally{await testApi.close();}
  });
  it('live OTP acceptance is durable and same-key replay never resends (mock SDK, real PG)',async()=>{
   const config=loadConfig('api-server',{...common,DATABASE_URL:process.env.TEST_DATABASE_API_URL,

@@ -29,6 +29,15 @@ describe('canonical identity request schemas',()=>{
    expect(sendCode).toHaveBeenCalledTimes(1);
   }finally{await app.close();}
  });
+ it('serializes a Feishu receipt without exposing the code',async()=>{
+  const {app,sendCode}=fixture();
+  sendCode.mockResolvedValueOnce({smsRequestId:uuid,cooldownSeconds:60,providerMode:'mock',testCode:'123456'});
+  try{
+   const result=await app.inject({method:'POST',url:'/api/v1/auth/sms-code',payload:{phone:body.phone,purpose:'sign_in'}});
+   expect(result.statusCode).toBe(200);
+   expect(result.json().data).toEqual({smsRequestId:uuid,cooldownSeconds:60,providerMode:'mock'});
+  }finally{await app.close();}
+ });
  it('requires clientType and clientId, and rejects deviceId aliases',async()=>{
   const {app,login}=fixture();
   try{

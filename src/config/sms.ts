@@ -1,3 +1,5 @@
+import { validateFeishuWebhookUrl } from '../integrations/feishu-webhook.js';
+
 type SmsEnv = Readonly<Record<string, string | undefined>>;
 
 export interface AliyunSmsConnection {
@@ -12,6 +14,12 @@ export interface AliyunOtpConfig extends AliyunSmsConnection {
   signName: string;
   templateCode: string;
   codeParam: string;
+}
+
+export interface FeishuOtpConfig {
+  webhookUrl: string;
+  signingSecret?: string;
+  environment: 'development' | 'test';
 }
 
 function required(env: SmsEnv, key: string): string {
@@ -46,4 +54,16 @@ export function loadAliyunOtpConfig(env: SmsEnv): AliyunOtpConfig {
   if (!/^SMS_\d+$/.test(templateCode)) throw new Error('INVALID_CONFIG:SMS_ALIYUN_TEMPLATE_CODE');
   if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(codeParam)) throw new Error('INVALID_CONFIG:SMS_ALIYUN_CODE_PARAM');
   return { ...connection, signName, templateCode, codeParam };
+}
+
+export function loadFeishuOtpConfig(env: SmsEnv, environment: string): FeishuOtpConfig | undefined {
+  if (environment !== 'development' && environment !== 'test') return;
+  const url = env.SMS_FEISHU_WEBHOOK_URL?.trim();
+  if (!url) return;
+  try {
+    const webhookUrl = validateFeishuWebhookUrl(url);
+    return { webhookUrl, environment, signingSecret: env.SMS_FEISHU_SIGNING_SECRET?.trim() || undefined };
+  } catch {
+    throw new Error('INVALID_CONFIG:SMS_FEISHU_WEBHOOK_URL');
+  }
 }
