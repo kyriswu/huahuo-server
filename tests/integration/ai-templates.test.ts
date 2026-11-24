@@ -109,6 +109,7 @@ afterAll(async () => {
 });
 
 const editor = '/api/v1/ai-template-scenes/editor_polish/items';
+const outline = '/api/v1/ai-template-scenes/content_asset_outline/items';
 const adminEditor = '/admin/api/v1/ai-template-scenes/editor_polish';
 const adminOutline = '/admin/api/v1/ai-template-scenes/content_asset_outline';
 const runPath = () => `/api/v1/ai-template-runs`;
@@ -239,23 +240,45 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     expect(audit.rows.map(row => row.action)).toEqual(['ai_template.save', 'ai_template.publish', 'ai_template.restore']);
   });
 
-  it('deduplicates generation, scopes results and invalidates outline status when raw content changes', async () => {
+  it('generates outlines from the published list, deduplicates requests and scopes results to the current raw revision', async () => {
+    const listOperation = api.swagger().paths?.['/api/v1/ai-template-scenes/{sceneKey}/items']?.get;
+    expect(listOperation).toMatchObject({
+      summary: '读取 AI 模板列表',
+      description: expect.stringContaining('content_asset_outline'),
+    });
     const view = (await admin.inject({ url: adminOutline, headers: auth })).json().data as SceneView;
     const catalog = structuredClone(view.draft);
     const meeting = catalog.items.find(item => item.itemKey === 'work_meeting');
     if (!meeting || meeting.kind !== 'template') throw new Error('Missing meeting template');
     meeting.prompt = '使用{{templateTitle}}整理《{{sourceTitle}}》。受众为{{会议/受众}}。';
+    const customTemplate = { ...meeting, itemKey: 'project_retrospective', title: '项目复盘' };
+    catalog.items.push(customTemplate);
     const published = await admin.inject({
       method: 'POST', url: adminOutline + '/publish', headers: auth, payload: { draftRevision: view.draftRevision, catalog },
     });
     expect(published.statusCode).toBe(200);
+
+    const list = await api.inject({ url: outline, headers: fixture.headers });
+    expect(list.statusCode).toBe(200);
+    const { data: options } = list.json<{ data: { items: { itemKey: string }[] } }>();
+    expect(options).toMatchObject({
+      sceneKey: 'content_asset_outline', parentKey: null,
+      revision: published.json().data.publishedRevision,
+      totalCount: options.items.length,
+      items: expect.arrayContaining([
+        expect.objectContaining({ itemKey: meeting.itemKey, kind: 'template', title: meeting.title }),
+        expect.objectContaining({ itemKey: customTemplate.itemKey, kind: 'template', title: customTemplate.title }),
+      ]),
+    });
+    const selected = options.items.find(item => item.itemKey === meeting.itemKey)!;
+    const alternative = options.items.find(item => item.itemKey === customTemplate.itemKey)!;
 
     const contentAsset = await contentAssets.createContentAsset(fixture.scope, {
       title: '会议笔记', parts: { raw: '会议需要确认三项决定。' },
     }, randomUUID());
     const input = { contentAssetId: contentAsset.contentAssetId, sourceRevision: contentAsset.parts.raw!.partRevisionId };
     const payload = {
-      sceneKey: 'content_asset_outline', itemKey: 'work_meeting', input,
+      sceneKey: 'content_asset_outline', itemKey: selected.itemKey, input,
       variables: { '会议/受众': '业务组', templateTitle: '错误的模板标题', sourceTitle: '错误的资产标题' },
     };
     const statePath = `/api/v1/content-assets/${contentAsset.contentAssetId}/ai-outline-results`;
@@ -271,7 +294,7 @@ describe('AI template configuration against isolated PostgreSQL', () => {
       expect(pending.statusCode).toBe(202);
       expect(pending.json().data.state).toBe('running');
       expect(fakeCalls).toHaveLength(before + 1);
-      expect((await generate({ ...payload, itemKey: 'smart_outline' }, idempotency)).statusCode).toBe(409);
+      expect((await generate({ ...payload, itemKey: alternative.itemKey }, idempotency)).statusCode).toBe(409);
     } finally {
       arrived = undefined;
       finish();
@@ -287,6 +310,11 @@ describe('AI template configuration against isolated PostgreSQL', () => {
     expect((await api.inject({ url: statePath, headers: fixture.headers })).json().data.items).toEqual([
       expect.objectContaining({ runId: success.runId, itemKey: 'work_meeting' }),
     ]);
+    const switched = await generate({ ...payload, itemKey: alternative.itemKey });
+    expect(switched.statusCode).toBe(200);
+    expect(switched.json().data).toMatchObject({
+      itemKey: alternative.itemKey, state: 'succeeded', result: { ...input, outlineMarkdown: '花火生成结果' },
+    });
 
     const foreign = await account();
     const detailPath = runPath() + '/' + success.runId;

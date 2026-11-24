@@ -1,7 +1,7 @@
 # AI 模板配置与 App 契约
 
 Server 的 Admin 和 API 按各自的数据库账号使用同一个业务 PostgreSQL。
-现有模板覆盖资产纲要、编辑器润色和社会关系转变子项。场景键在增量迁移 `0020` 统一为 `content_asset_outline` 和 `editor_polish`。
+现有模板覆盖 `content_asset_outline`（资产纲要）和 `editor_polish`（编辑器润色）。社会关系转变是编辑器润色的分组。
 Admin 在「AI 模板配置」编辑展示内容、首屏数量、顺序、分组、启停和提示词。
 草稿和发布版本有各自的版本号。每次发布或回滚在同一事务写入一个新版本和发布审计。
 已开始的请求记录开始时读取的版本。模板项键可长期用于关联资产结果。
@@ -17,10 +17,12 @@ App 通过现有鉴权入口访问 Server，模板运行按登录账号校验会
 
 | 方法和路径 | 请求与结果 |
 | --- | --- |
-| `GET /api/v1/ai-template-scenes/:sceneKey/items` | 场景为 `content_asset_outline` 或 `editor_polish`。可传 `parentKey=relation_shift` 读取二级目录。返回 `revision`、`title`、`displayLimit`、`totalCount` 和排序后的 `items`。每项包含 `itemKey`、`kind`、标题、副标题、图标和子项数。 |
+| `GET /api/v1/ai-template-scenes/:sceneKey/items` | 场景为 `content_asset_outline` 或 `editor_polish`。省略 `parentKey` 读取顶层目录。点击 `kind: "group"` 项时传其 `itemKey` 作为 `parentKey`。返回已发布目录的 `revision`、`title`、首屏建议展示数 `displayLimit`、当前目录项数 `totalCount` 和按配置排序的 `items`。每项包含 `itemKey`、`kind`、`title`、`description`、`icon` 和 `childCount`。 |
 | `POST /api/v1/ai-template-runs` | 传 `sceneKey`、`itemKey`、`input` 与 `X-Idempotency-Key`。可选的顶层 `variables` 为提示词提供变量值。纲要输入为 `{contentAssetId, sourceRevision}`，其中 `sourceRevision` 是资产 `parts.raw.partRevisionId`。润色输入为 `{text}`。 |
 | `GET /api/v1/ai-template-runs/:runId` | 读取同一用户的运行状态或结果。进行中返回 202，成功返回 200，失败使用 Server 错误信封。 |
 | `GET /api/v1/content-assets/:contentAssetId/ai-outline-results` | 返回当前原文版本下每个已生成模板的最新成功记录，用于「已整理」。记录含 `itemKey`、`runId`、`templateVersion` 和生成时间。 |
+
+App 切换纲要模板时，先读 `GET /api/v1/ai-template-scenes/content_asset_outline/items`，按 `data.items` 动态展示后台已发布的模板。选中 `kind: "template"` 的条目后，将它的 `itemKey` 和资产的原文版本传给生成接口，并为这次生成使用新的幂等键。若读取目录后所选模板已停用，生成接口返回 `404 AI_TEMPLATE_UNAVAILABLE`，App 可重新读取目录。
 
 成功的 `data` 包含 `runId`、`sceneKey`、`itemKey`、`templateVersion`、
 `state: "succeeded"` 和 `result`。润色结果为 `{text}`，纲要为
