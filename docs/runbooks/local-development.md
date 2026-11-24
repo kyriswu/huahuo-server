@@ -38,6 +38,38 @@ Compose 经由一次性 `migrate` 执行迁移，再启动四个应用角色。�
 - Volta 管理的 Node 26.11.0/pnpm 10.15.1 宿主可运行 `dev:api-server` / `dev:admin` / `dev:worker` / `dev:scheduler`（tsx）及对应 `start:*`（编译产物）。新机器先执行 `volta install node@26.11.0`，首次使用 pnpm 时启用 `VOLTA_FEATURE_PNPM=1` 并安装项目 pin 的 pnpm。必须自行提供角色环境；`.env.host.example` 是可选调试模板，默认 PG/Redis 不发布宿主端口。
 - P02 已实现 App 登录/管理员身份；P03 已实现持久任务、Outbox、BullMQ Worker/Scheduler 和 demo.digest 基础设施 fixture。真实 AI/ASR/支付/通知仍不可用，不要把 demo.digest 当供应商成功。
 
+## 宿主 Node 调试
+
+需要热重载或断点时，可以通过宿主 Node 运行一个或多个角色。准备独立的本机 PostgreSQL 和 Redis，从 `.env.host.example` 创建私密的 `.env.host`，填写各角色的数据库账号和回环连接地址。默认使用所选文件中的应用配置，处理节点和云控制缺省关闭。需要通过 App 调试登录时，填入本地 Ed25519 JWT 密钥，以及团队提供的飞书测试群配置。
+
+已有独立的本机数据库和 Redis 可以直接使用。需要另起依赖时，从 `.env.compose.local.example` 准备私密的 `.env.host.deps`，替换数据库连接和密码占位符。在 `.env.host` 使用相同的数据库角色密码和宿主回环端口。下面的命令为宿主调试启动独立项目，默认发布 PG 15432 和 Redis 16379。
+
+```bash
+docker compose -p huahuo-host-dev --env-file .env.host.deps \
+  -f compose.yaml -f deploy/local/compose.deps.yaml --profile local-db \
+  up -d --wait postgres redis
+```
+
+从 `.env.host.migrate.example` 新建私密的 `.env.host.migrate`。迁移连接和 API 连接须指定同一个回环主机、端口和数据库，迁移使用 `huahuo_migrator` 账号。`--check` 查看迁移状态，应用时沿用项目的版本和 checksum 校验。
+
+```bash
+pnpm db:sync:local --check
+pnpm db:sync:local
+```
+
+在不同终端启动需要的角色。API 和 Admin 默认监听回环的 3000 和 3001，Worker 和 Scheduler 使用 3100 和 3101。启动 Admin 页面前可运行 `pnpm build:admin-ui`。
+
+```bash
+pnpm dev:local api
+pnpm dev:local admin
+pnpm dev:local worker
+pnpm dev:local scheduler
+```
+
+命令接受可选的第二个参数指定环境文件，例如 `pnpm dev:local api .env.host.isolated`。与 Compose 同时运行时，可修改对应的 `API_HOST_PORT`、`ADMIN_HOST_PORT` 和公开 URL，并为宿主配置单独的 `METRICS_PORT` 或设置 `METRICS_ENABLED=false`。
+
+需要 IDE 断点时，可以运行 `node --watch --inspect=127.0.0.1:9229 --enable-source-maps --import tsx deploy/local/run.mjs api`，再附加到 9229。
+
 ## 迁移与数据
 
 `pnpm db:generate descriptive_name` 生成待审查 SQL 文件；不是未经审核的 schema push。`pnpm db:migrate` 运行新的一次性 migrate。迁移锁有等待上限；每个文件事务执行，已应用文件的 checksum 不可变。

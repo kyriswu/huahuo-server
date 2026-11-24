@@ -186,7 +186,7 @@ pnpm test:integration
 
 CI 的 APP_ENV 也使用 test，但隔离运行器会显式关闭云控制及真实供应商，不继承业务凭据；它与测试服务器的部署授权分开。
 
-宿主直接运行不会自动加载 `.env`，应明确选择宿主环境文件，在不同终端运行需要的角色，例如：
+默认使用 Compose 开发。需要宿主热重载或断点时，可用 [宿主 Node 调试](docs/runbooks/local-development.md#宿主-node-调试)。现有 Node 入口也支持明确选择各角色的宿主环境文件，例如：
 
 ```bash
 node --env-file=.env.host --import tsx src/entrypoints/api-server.ts
