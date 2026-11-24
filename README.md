@@ -30,7 +30,7 @@ Server 进程本身不要求本机安装 CUDA 或 GPU；解析和模型服务按
 | 文件存储 | `StoragePort` 支持本地卷、阿里云 OSS、S3；同机 API/Worker 可共用本地卷，跨主机不能各用一份不共享的目录 |
 | 知识库 | 通过 Milvus 实现资产入库与资产查询，支持资产向量化和可选重排；搜索产品细节待定，现有技术参数不作为需求 |
 | PDF / Office | 文档解析服务；按后台节点配置调用常驻 API 或按需唤醒 ECS，内网地址须在实际运行环境可达 |
-| 短信登录 | 阿里云 SMS 的 RAM 凭据、已审核签名和模板；默认不因启动服务就发送短信 |
+| 手机号验证码登录 | 本地可使用飞书测试群。阿里云 SMS 需要 RAM 凭据、已审核签名和模板 |
 | Agent 等服务 | 内部地址直连，传递可信用户/会话身份；不携带 JWT 或 ServiceKey |
 
 未配置某项外部能力，不代表启动检查验证了它；也不要把 Mock、demo 任务或健康检查当作真实模型/解析验收。外部服务手册见文末。
@@ -102,69 +102,53 @@ pnpm install --frozen-lockfile
 
 只做构建或运行 Server 不依赖 Flutter/App 仓库。需要核对 App 契约时，将已有 App 放在同级 `../huahuo-ai`，仅使用 `pnpm app:reference` / `pnpm app:reference:diff` 只读核对；不在本项目安装 Flutter 或修改 App。
 
-### 2. 准备环境文件
+### 2. 初始化本地环境
 
-`.env` 是日常 Compose 的默认配置，真实凭据不提交到 Git。已有文件、密钥和数据库账号保持不变；新环境从相应模板复制后填写，模板中的占位符不是可用凭据。
-
-| 模板 | 场景 |
-| --- | --- |
-| [.env.example](.env.example) | 主配置说明，准备已有共享数据库/云服务的连接 |
-| [.env.compose.local.example](.env.compose.local.example) | 全新的独立本地 PG/Redis，显式启用 `local-db` profile |
-| [.env.compose.cloud.example](.env.compose.cloud.example) | 测试/云端 Compose，数据库与服务使用实际可达地址 |
-| [.env.host.example](.env.host.example) | Node 在宿主调试；数据库/Redis 地址须能从宿主访问 |
+首次在仓库根目录创建 `.env`，使用已启动的本地 Docker。
 
 ```bash
-# 仅首次且没有 .env 时复制；随后编辑真实配置。
-if [ ! -f .env ]; then cp .env.example .env; fi
+node scripts/init-local.mjs
 ```
 
-至少确认以下项目：
+初始化使用 `huahuo-server-local` 项目、`local-db` profile、独立 PostgreSQL 和 Redis、本地文件存储以及各角色的随机凭据。处理节点默认停用（`PROCESSING_NODES_ENABLED=false`）。初始化会保留已有配置和卷。从旧版切换时先按[本地开发手册](docs/runbooks/local-development.md)核对原数据库、项目和端口。
 
-- `APP_ENV`：本地 `development`，测试 `test`，生产 `production`。Docker 的 `NODE_ENV=production` 不代表业务环境是生产。
-- 数据库：为 API/Admin/Worker/Scheduler/migrate 分别填写 `DATABASE_*_URL` 和所需 TLS/CA；不要把所有角色改成数据库管理员。RDS 账号、库、网络和权限须已准备。
-- Redis：容器通过 `redis:6379` 或实际共享私网地址连接，宿主调试使用宿主可达地址；逻辑 DB 和前缀保持一致，`127.0.0.1` 在容器中指向容器自身。
-- 鉴权：准备 `APP_TOKEN_SECRET`、`ADMIN_SESSION_SECRET`、Ed25519 JWT 密钥（仅签发与网关统一认证使用）。服务间 ServiceKey 已移除。JWT 的 PEM 按模板要求进行 Base64 编码；不要为重新部署轮换已有密钥。
-- 地址：`APP_PUBLIC_BASE_URL` 给客户端使用，`ADMIN_PUBLIC_BASE_URL` 对应管理页面 Origin，`API_SERVICE_BASE_URL` 给其他服务/解析回调使用。地址必须从调用方可达，不能把容器名或 localhost 当作跨机地址。
-- 存储和可选外部服务：选择实际存储驱动，配置 Bucket/前缀、Milvus、模型等；不要为了健康检查随意启用短信、模型或云资源操作。
+在本机 `.env` 私下填入 `SMS_FEISHU_WEBHOOK_URL`。测试群机器人启用签名时，同时填写 `SMS_FEISHU_SIGNING_SECRET`。验证码由测试群接收。阿里云发送所需设置见 [短信配置](docs/runbooks/sms.md)。
 
-**本地开发与当前测试服共用数据库及云资源。** 本地迁移、改配置或开停节点可能直接影响测试服，不能把它当作可随意清空的本地数据。需要完全独立环境时使用新的 Compose project、独立凭据/卷和 `local-db` 模板；自动化集成测试已有独立依赖，不必改业务 `.env`。
+登录时 API 会校验 App 提交的用户协议和隐私政策版本。初始化写入的两个版本与当前 App 一致。
 
 ### 3. 构建、迁移并启动
 
-以下用于准备好的开发配置或全新隔离环境；现有测试/生产更新使用后文发布流程。连接共享库时先核对已审迁移与仍在运行的测试版本，确认兼容后才执行迁移，不能把它当作每次启动前的数据库重置。
-
 ```bash
-pnpm compose --env-file .env config --quiet
-pnpm compose --env-file .env build
-
-# 常规共享/RDS 模式只需本地 Redis：
-pnpm compose --env-file .env up -d redis
-# 仅全新 local-db 环境，改用：
-# docker compose --env-file .env --profile local-db up -d postgres redis
-
-# 迁移单独执行；成功后才继续启动。
-pnpm compose --env-file .env run --rm --no-deps migrate
-
-# 四个应用角色及独立 HTTP 网关。
-pnpm compose --env-file .env up -d --no-build api-server admin worker scheduler
-pnpm compose --env-file .env ps -a
-curl --fail http://127.0.0.1:3000/health/ready
-curl --fail http://127.0.0.1:3001/health/ready
+docker compose --env-file .env up -d --wait postgres redis
+pnpm compose:up
+curl --fail --retry 10 --retry-connrefused http://127.0.0.1:3000/health/ready
+curl --fail --retry 10 --retry-connrefused http://127.0.0.1:3001/health/ready
 ```
 
-`run --rm migrate` 成功后容器会移除；由 Compose 创建的 migrate 显示 `Exited (0)` 也是正常状态。应用启动不自动迁移；首次依赖尚未 ready 时查看日志并确认其健康，不靠清库或重新生成密码解决连接失败。
+Compose 先运行一次性 `migrate`，成功退出后启动 API、Admin、Worker 和 Scheduler。用 `docker compose --env-file .env ps -a` 查看状态，`migrate` 显示 `Exited (0)` 表示迁移成功。
 
-Admin 页面为 `http://127.0.0.1:3001/admin`，没有默认管理员或公开注册。首次账号使用 [Admin bootstrap](docs/runbooks/p02-identity.md) 的 stdin JSON 方式创建；已有账号时不重复初始化。
+App 调试使用 `HUAHUO_SERVER=http://127.0.0.1:3000`，受保护的业务接口仍需通过现有可信鉴权入口。Admin 页面为 `http://127.0.0.1:3001/admin`。首次账号通过 stdin JSON 创建。 [Admin bootstrap](docs/runbooks/p02-identity.md#管理员-cli-和会话)
+
+### 其他环境与调试方式
+
+| 模板 | 场景 |
+| --- | --- |
+| [.env.example](.env.example) | 主配置示例，按需准备已有服务连接 |
+| [.env.compose.local.example](.env.compose.local.example) | 手动准备独立 PostgreSQL 和 Redis，使用 `local-db` profile |
+| [.env.compose.cloud.example](.env.compose.cloud.example) | 使用可达数据库地址的云端 Compose 联调 |
+| [.env.host.example](.env.host.example) | 在宿主运行 Node，通过宿主可达的地址连接依赖 |
+
+不同目标各自保管配置、数据库角色凭据和 TLS 设置。宿主调试和已有 Compose 环境见 [本地开发手册](docs/runbooks/local-development.md)。
 
 ## 配置放在哪里
 
 - **ENV / 部署配置**：连接、凭据、监听、公开/内部服务地址、云控制开关、固定模型规格和集合绑定。
 - **Admin → 运行配置 / PostgreSQL**：业务功能、任务并发/重试、文件额度、正文索引预算及发布排空预算。修改业务参数不要再添加一条重复 ENV 覆盖路径。
-- **处理节点**：已有节点的运行参数在后台修改，新增节点通过受审查的代码清单/迁移发布；登记后默认接收匹配任务，无单独启用开关。凭据保留在运行环境，不写进节点 JSON。
+- **处理节点**：启用处理节点的环境可在后台修改已有节点，新增节点通过受审查的代码清单或迁移发布。凭据保留在运行环境。
 
 环境按部署用途区分：`development` 是本地开发，`test` 是线上测试，`production` 是线上生产。分支名、Docker 的 NODE_ENV 和服务器是否能访问内网都不能代替 APP_ENV。
 
-处理节点配置好后直接调用，不再设置部署级解析开关；未配置或连接失败按节点状态报告。`PROCESSING_NODES_CLOUD_CONTROL_ENABLED`独立控制云端启停，测试/生产默认允许，本地开发在完整RAM凭据存在时默认允许，显式false优先。非本地部署使用各自配置，不能沿用开发环境的 APP_ENV：
+本地初始化通过 `PROCESSING_NODES_ENABLED=false` 跳过处理节点。需要联调解析时，在对应环境开启并配置节点。`PROCESSING_NODES_CLOUD_CONTROL_ENABLED` 独立控制云端启停，测试和生产默认允许。非本地部署使用各自的 `APP_ENV` 和凭据。
 
 ```dotenv
 # 线上测试使用 test；线上生产使用 production。

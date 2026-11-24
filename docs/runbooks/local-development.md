@@ -4,13 +4,29 @@
 
 ## 初始化与启动
 
-日常开发与测试服务器当前共用数据库及云资源。应用镜像和队列配置以目标成功记录与现行 `.env` 为准；历史初始化镜像不作为当前启动依据。新环境从 `0001` 按编号顺序建立，已有环境只追加待执行迁移；已执行 SQL 与 checksum 冻结。
+默认在本机使用 `huahuo-server-local` Compose 项目。PostgreSQL、Redis、文件存储和各角色凭据归属此项目。新环境从 `0001` 按编号顺序建立，已有环境只追加待执行迁移，已执行 SQL 与 checksum 冻结。
 
-1. `node scripts/preflight-local.mjs` 检查目录与本地 daemon；`bash scripts/ensure-docker-local.sh` 默认不启动、不切 context。Desktop 未运行时可显式 `--start`；现有 Colima 不可达时脚本拒绝启动另一运行时。
-2. `docker build --target tooling -t huahuo-server-tooling:p01 .` 创建工具镜像；仅 Server 挂载的 `bash scripts/tooling.sh install --frozen-lockfile` 安装依赖（工具标签沿用 P01，不代表业务镜像版本）。
-3. 日常运行统一使用根目录 `.env` 中的阿里云 PostgreSQL 配置，`COMPOSE_PROFILES` 不启用 `local-db`。现有凭据保持不变；新环境参考 `.env.example` 填写配置，示例值不能用作真实密码。需要不同端口时修改本项目 API_HOST_PORT / ADMIN_HOST_PORT 和对应 PUBLIC_BASE_URL，不停止其他服务。`init-local.mjs` 仅用于全新隔离本地测试环境，不能用于当前业务栈。
-4. `node scripts/app-reference.mjs`（即 `pnpm app:reference`）建立阶段基线。默认读取 config/app-reference.local.json，不存在时读取 example；相对路径基于 Server。`node scripts/app-reference.mjs --diff` 不更新基线，发现变化返回 1。
-5. `pnpm compose:validate`；每阶段先构建镜像并显式执行 `pnpm db:migrate`，再 `docker compose --env-file .env up -d --no-build`；`docker compose --env-file .env ps -a`。正常运行是四个业务角色和 Redis healthy；一次性 migrate 成功退出 0。本地 postgres 不参与业务运行，其旧数据卷保留。
+已有克隆可在保留工作区改动后更新到包含本地初始化的 `test` 提交。已有 `huahuo-server-local` 项目时沿用该项目的 `.env`、各角色账号和数据卷。旧 `.env` 指向共享库或其他 Compose 项目时，先将它移到 Git 忽略的 `.local/` 私密目录中归档，再为新的本机项目生成 `.env`。已有服务占用 3000 或 3001 时，可在新 `.env` 调整 `API_HOST_PORT`、`ADMIN_HOST_PORT` 和对应公开 URL。
+
+启动本地 Docker 后安装依赖并初始化新项目。
+
+```bash
+pnpm install --frozen-lockfile
+node scripts/init-local.mjs
+```
+
+初始化生成根目录的 `.env`。其中 `PROCESSING_NODES_ENABLED=false`，处理节点调用与云控制停用。在 `.env` 私下填写 `SMS_FEISHU_WEBHOOK_URL`，测试群机器人启用签名时再填写 `SMS_FEISHU_SIGNING_SECRET`。 [首次准备](../../README.md#首次准备) · [短信配置](sms.md)
+
+```bash
+docker compose --env-file .env up -d --wait postgres redis
+pnpm compose:up
+curl --fail --retry 10 --retry-connrefused http://127.0.0.1:3000/health/ready
+curl --fail --retry 10 --retry-connrefused http://127.0.0.1:3001/health/ready
+```
+
+Compose 经由一次性 `migrate` 执行迁移，再启动四个应用角色。用 `docker compose --env-file .env ps -a` 检查各角色和迁移退出状态。Admin 使用 `http://127.0.0.1:3001/admin`，首次账号可通过现有 CLI 创建。 [Admin bootstrap](p02-identity.md#管理员-cli-和会话)
+
+如需记录 App 参照，使用 `pnpm app:reference` 建立阶段基线，`pnpm app:reference:diff` 只读比较。隔离测试栈专用的旧 `pnpm verify`、容器隔离及 E2E 脚本继续使用该测试栈自己的 `.env.compose.local`。
 
 ## 开发与验证
 
@@ -26,12 +42,11 @@
 
 `pnpm db:generate descriptive_name` 生成待审查 SQL 文件；不是未经审核的 schema push。`pnpm db:migrate` 运行新的一次性 migrate。迁移锁有等待上限；每个文件事务执行，已应用文件的 checksum 不可变。
 
-后续阶段明确执行：
+本机项目更新代码后通过 Compose 构建新镜像并执行待应用迁移。
 
 ```bash
-docker compose --env-file .env build migrate
-docker compose --env-file .env run --rm migrate
-docker compose --env-file .env up -d --no-build
+pnpm compose:up
+docker compose --env-file .env ps -a
 ```
 
 确认新迁移成功后才启动新代码。四常驻入口从不自动迁移。测试数据由隔离测试自身创建和清理，不提供空操作的开发 seed 命令。
@@ -40,8 +55,8 @@ docker compose --env-file .env up -d --no-build
 
 ## 云 PG 与地址
 
-根目录 `.env` 是当前业务运行的唯一默认配置；`pnpm compose:validate` 只校验拓扑，不连接云。禁用 local-db profile 后没有 postgres 服务/强制依赖，但不会自动停止以前启动的本地 PG；完成数据迁移和校验后应显式停止旧容器并保留卷。角色 `DATABASE_*_URL` 优先于 `DATABASE_URL`，不能残留指向 `postgres` 的覆盖值。实际云连接需准备账号、库、schema 权限、可信 CA 和真实 URL；生产使用 DATABASE_SSL_MODE=verify-full，拒绝连接串 ssl 参数冲突。迁移账号无需 superuser；云管理员应参照 infra/postgres/init 准备角色权限。仅切地址不会迁移数据。
+既有云端联调使用独立配置文件，例如 `docker compose --env-file .env.cloud config --quiet`。云端配置应提供各角色的数据库地址、账号与可信 CA，`DATABASE_*_URL` 优先于 `DATABASE_URL`。生产使用 `DATABASE_SSL_MODE=verify-full`，连接串应省去 `ssl` 参数。账号权限可参照 `infra/postgres/init`。使用共享测试库时，由测试发布流程处理迁移。
 
 宿主 API=127.0.0.1:3000，Admin=127.0.0.1:3001；业务 PG 地址来自 `.env`，容器内部 Redis=redis:6379（不能使用宿主 127.0.0.1）。池预算 API10 + Admin5 + Worker10 + Scheduler3 = 28，迁移1；每扩 Worker 都增加10。Redis AOF/everysec/noeviction/maxmemory256MB，容器512MB；逻辑DB不是安全隔离。
 
-App 的 HUAHUO_API_BASE_URL 应使用不附加 `/api/v1` 的根地址（endpoint 已含此前缀）；Debug 允许 HTTP，非 Debug 要求 HTTPS。本轮未修改参数或启动 Flutter。默认回环不可用于手机真机/云供应商回调；这些联调按 P15 授权后进行，Admin 保持回环。
+App 使用 `HUAHUO_SERVER` 指定服务根地址，例如 `http://127.0.0.1:3000`。App 自己添加 `/api/v1` 前缀，Debug 支持回环 HTTP，其他地址使用 HTTPS。受保护接口仍由现有可信鉴权入口代理。Admin 使用本机回环地址。

@@ -1,13 +1,26 @@
 import {describe,it,expect,vi} from 'vitest';
+import type pg from 'pg';
 import {config} from '../helpers.js';
 import {defaults,validateValues,applyValues,rejectSecrets} from '../../src/modules/runtime-settings/registry.js';
 import {extractionConfig} from '../support/extraction-config.js';
 import {nodeConfig,nodeDocumentConfig,nodeFromRow,type ProcessingNode} from '../../src/modules/processing-nodes/model.js';
+import {ProcessingNodes} from '../../src/modules/processing-nodes/service.js';
 import {loadProcessingNodesConfig} from '../../src/config/processing-nodes.js';
 import {snapshotForSource,kbEmbedding} from '../../src/modules/kb/profile.js';
 
 const node:ProcessingNode={id:'11111111-1111-4111-8111-111111111111',name:'GPU node',capabilities:['document'],resourceClass:'gpu',mode:'ecs',regionId:'cn-beijing',instanceId:'i-unit12345678',privateIp:'172.18.102.103',baseUrl:'http://172.18.102.103:8000',healthPath:'/health',tokenEnv:null,concurrency:1,idleSeconds:60,startupSeconds:600,queueSeconds:3600,revision:1};
 describe('typed runtime registry (no database/cloud)',()=>{
+ it('keeps seeded nodes unavailable when local processing is disabled',async()=>{
+  const bootstrap=loadProcessingNodesConfig({PROCESSING_NODES_ENABLED:'false',PROCESSING_NODES_CLOUD_CONTROL_ENABLED:'true'});
+  expect(bootstrap).toMatchObject({enabled:false,cloudControlEnabled:false});
+  const query=vi.fn();
+  const nodes=new ProcessingNodes({query} as unknown as pg.Pool,{...config(),processingNodes:bootstrap});
+  await expect(nodes.list()).resolves.toEqual([]);
+  await expect(nodes.observe(node.id)).rejects.toMatchObject({code:'PROCESSING_NODE_NOT_FOUND'});
+  await expect(nodes.bind('local-document','document')).rejects.toMatchObject({code:'PROCESSING_NODE_UNAVAILABLE'});
+  await expect(nodes.runtime(node)).rejects.toMatchObject({code:'PROCESSING_NODE_UNAVAILABLE'});
+  expect(query).not.toHaveBeenCalled();
+ });
  it('reads the canonical node configuration without mutating its fields',()=>{
   const {id,revision,...config}=node;const before=structuredClone(config);
   expect(nodeFromRow({id,revision,config})).toMatchObject(node);expect(config).toEqual(before);
