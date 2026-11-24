@@ -1,0 +1,46 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: huahuo-server-ingress
+  namespace: ns-applications
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: huahuo-server
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [api, worker, scheduler, admin]
+  policyTypes: [Ingress]
+  ingress:
+    # A cluster-local metrics scraper may be admitted with this label.
+    # Traffic from the Pod's node is allowed per NetworkPolicy semantics.
+    - from:
+        - podSelector:
+            matchLabels:
+              huahuo.io/metrics-trusted: "true"
+      ports:
+        - protocol: TCP
+          port: 9464
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: huahuo-api-trusted-callers
+  namespace: ns-applications
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: huahuo-server
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    # Match explicitly trusted callers in this namespace that already enforce the
+    # application's gateway contract. Same-node host Nginx can use the ClusterIP.
+    - from:
+        - podSelector:
+            matchLabels:
+              huahuo.io/api-trusted: "true"
+      ports:
+        - protocol: TCP
+          port: 3000
