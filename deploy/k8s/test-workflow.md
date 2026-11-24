@@ -8,7 +8,7 @@
 
 既有 **Server CI** 跑类型检查、Lint、应用编译、单元和契约测试，以及独立的 PostgreSQL、Redis 集成测试。集成任务会从发布清单的基准演练迁移。[Server CI](../../.github/workflows/release-smoke-check.yml) · [集成测试入口](../../scripts/integration.mjs)
 
-[Test server release](../../.github/workflows/test-server-release.yml) 使用受保护的 `main` 上的控制代码，部署通过 CI 的 `test` 提交到测试 ACK。它先检查发布意图和兼容清单，取得 OIDC 临时身份后重新核对提交，再调用一次固定云助手命令并等待部署回执。先完成 Node01 发布权限、固定命令和公网入口验收，再合入工作流。合入后从 `main` 手动运行并核对部署回执，通过后再开启 `test` push CI 后的自动发布。
+[Test server release 候选工作流](https://github.com/kyriswu/huahuo-server/pull/57/files) 等待合入受保护的 `main`，用于部署通过 CI 的 `test` 提交到测试 ACK。它先检查发布意图和兼容清单，取得 OIDC 临时身份后重新核对提交，再调用一次固定云助手命令并等待部署回执。先完成 Node01 发布权限、固定命令和公网入口验收，再合入工作流。合入后从 `main` 手动运行并核对部署回执，通过后再开启 `test` push CI 后的自动发布。
 
 | 变量 | 对应值 |
 | --- | --- |
