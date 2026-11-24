@@ -1,4 +1,4 @@
-import {AssetKindSchema} from '../content-assets/asset-kind.js';
+import {AssetKindsSchema} from '../../contracts/asset-kind.js';
 import { Type } from '@sinclair/typebox';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ErrorSchema, success } from '../../contracts/envelope.js';
@@ -8,7 +8,7 @@ import { Envelope, Strict, Text } from '../identity/schemas.js';
 import type { RagQueryService } from './query-service.js';
 import { SearchQueryTiming } from './query-timing.js';
 import { currentTelemetryFields, tracedOperation } from '../../observability/telemetry.js';
-const queryBody=Type.Object({query:Text(2000),sourceType:Type.Optional(Type.Union([Type.Literal('file'),Type.Literal('content_asset')])),assetMode:Type.Optional(Type.Union([Type.Literal('ids'),Type.Literal('links')])),mode:Type.Optional(Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')])),topK:Type.Optional(Type.Integer({minimum:1,maximum:50})),documentKey:Type.Optional(Text(128)),filters:Type.Optional(Type.Object({assetKinds:Type.Optional(Type.Array(AssetKindSchema,{maxItems:4})),from:Type.Optional(Type.String({format:'date-time'})),to:Type.Optional(Type.String({format:'date-time'})),timeField:Type.Optional(Type.Union([Type.Literal('created_at'),Type.Literal('updated_at')]))},Strict)),},Strict);
+const queryBody=Type.Object({query:Text(2000),sourceType:Type.Optional(Type.Union([Type.Literal('file'),Type.Literal('content_asset')])),assetMode:Type.Optional(Type.Union([Type.Literal('ids'),Type.Literal('links')])),mode:Type.Optional(Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')])),topK:Type.Optional(Type.Integer({minimum:1,maximum:50})),documentKey:Type.Optional(Text(128)),filters:Type.Optional(Type.Object({assetKinds:Type.Optional(AssetKindsSchema),from:Type.Optional(Type.String({format:'date-time'})),to:Type.Optional(Type.String({format:'date-time'})),timeField:Type.Optional(Type.Union([Type.Literal('created_at'),Type.Literal('updated_at')]))},Strict)),},Strict);
 const queryResult=Type.Object({mode:Type.Union([Type.Literal('dense'),Type.Literal('keyword'),Type.Literal('hybrid')]),query:Type.String(),results:Type.Array(Type.Any())},Strict);
 
 /** Public and service callers use identical query validation, execution and timing. */

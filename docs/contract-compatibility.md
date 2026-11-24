@@ -390,6 +390,8 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 | `GET/POST /content-assets/{contentAssetId}/relations` | 读取或创建资产间的显式关系，创建使用 `targetContentAssetId`。 |
 | `DELETE /content-asset-relations/{relationId}` | 按关系 ETag 删除显式关系。 |
 
+创建、列表、详情和搜索统一使用 `assetKind` 的五个值 `creative`（自由创作）、`image`（图片）、`audio`（音频）、`file`（文件）、`link`（链接）。列表在 `data.items[]` 的每一项返回，详情在 `data` 返回。创建时优先使用显式 `assetKind`，缺省时从 `sourceKind` 推断。带来源网址的导入文件仍为 `file`。搜索可通过 `assetKinds` 按一个或多个类型筛选，最多五项。 [资产路由](../src/modules/content-assets/routes.ts)
+
 有效标签由 `content_asset_tags` 维护，自动提取由 `content-asset.tag-extract` 执行。标签写入使用标签自己的 ETag。 [标签与图谱](runbooks/p06-tags.md)
 
 App 只读依据见 [App 源码参照](app-reference.md)。Server 中的搜索路由是当前技术实现。 [搜索业务边界](runbooks/search-status.md)

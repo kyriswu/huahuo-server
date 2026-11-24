@@ -17,6 +17,12 @@
 - 通用上传完成后交付可供业务认领的 `resourceId`。资产可引用录音、PDF 或其他原文件。 [上传与资源](runbooks/user-storage-layout.md)
 - `/api/v1/rag/ingestions` 和 `/api/v1/text-ingestions` 当前分别保存独立的文件解析记录和文本导入记录，用于各自的状态与检索。形成可管理的资产时，由业务调用资产写入入口。 [文件入库](runbooks/rag-url-ingestion.md) · [文本入库](runbooks/text-ingestion.md)
 
+## 资产分类
+
+`AssetKind` 是代码中定义的全局资产分类，创建、列表、详情、搜索 Schema 和索引元数据共用同一个枚举。资产行直接保存 `content_assets.asset_kind`，PostgreSQL 通过 `CHECK` 约束校验，Milvus 使用同名字符串字段。类型的来源是公共契约中的 `assetKinds`。 [公共契约](../src/contracts/asset-kind.ts)
+
+新增分类时，在公共枚举追加稳定的值，确保可存入 Milvus 现有 32 字节字段，并追加一条 PostgreSQL 迁移扩展 `CHECK`。更新已有客户端接口文档。需要给存量资产重新分类时，再评估对应的数据迁移与索引元数据刷新。隔离集成测试核对最新 PostgreSQL 约束与代码枚举。 [约束回归](../tests/integration/content-asset-pagination.test.ts) · [迁移和索引刷新](runbooks/milvus.md#0026-链接资产分类同步)
+
 ## 搜索与观测
 
 *Hybrid search* 对应 `hybrid`，支持关键词和向量召回。*Keyword search* 对应 `keyword`，使用关键词召回。业务来源决定表与集合，搜索模式决定索引能力。当前资产原文使用 `hybrid` 索引，独立文件和文本记录使用 `keyword` 索引。 [索引与查询](runbooks/milvus.md)
@@ -37,6 +43,6 @@ Server 的 `sparse-v1` 集合保存向量、稳定分块 ID 和筛选字段。�
 
 资产使用 `<KB_CONTENT_ASSET_HYBRID_COLLECTION>_asset_v2`，保留 `chunk_id` 主键、`source_id`、`user_id`、`asset_kind`、`created_at`、`updated_at`、`build_id`、`sparse_vector` 和 FP16/1024 的 `dense_vector`。`build_id` 记录写入批次。正文由 PostgreSQL 按命中的 `chunk_id` 回读。Milvus 先按账号、可选资产类型和时间筛选，PostgreSQL 再校验账号、当前正文和其余条件。时间以资产的 UTC 毫秒时间戳存储。
 
-创建资产可指定 `assetKind` 为 `audio`、`image`、`file` 或 `creative`。搜索可传 `assetKinds`、`from`、`to` 和 `timeField`。时间范围含端点，`timeField` 默认是 `updated_at`，也可指定 `created_at`。RAG 查询通过 `filters` 传递这些字段。类型或时间有变化时，由索引 worker 同步到 Milvus。独立文件和文本的关键词索引继续使用 `KB_INDEX_LAYOUT`。
+创建资产、读取列表和详情、搜索筛选共用 `audio`、`image`、`file`、`creative`、`link` 五个分类值。服务端把 `assetKind` 存为 PostgreSQL 的 `asset_kind`，索引 Worker 将该值同步到 Milvus 同名字段。搜索可传 `assetKinds`、`from`、`to` 和 `timeField`。时间范围含端点，`timeField` 默认是 `updated_at`，也可指定 `created_at`。RAG 查询通过 `filters` 传递这些字段。独立文件和文本的关键词索引继续使用 `KB_INDEX_LAYOUT`。
 
 切换前需在目标 Milvus 预建和加载新集合，并核实支持部分更新。0025 遇到遗留资产索引或未结束索引任务会停止。测试／开发共享库已核对无旧资产，维护时排空旧写入方后再次确认。

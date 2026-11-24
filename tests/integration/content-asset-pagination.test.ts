@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { createHash, randomUUID } from 'node:crypto';
 import { buildApiServer } from '../../src/apps/api-server.js';
+import { assetKinds } from '../../src/contracts/asset-kind.js';
 import { migrate } from '../../src/db/migrate.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { ContentAssetService } from '../../src/modules/content-assets/service.js';
@@ -35,6 +36,9 @@ afterAll(async () => {
   try {
     await root.query('DELETE FROM content_asset_parts WHERE content_asset_id=ANY($1::uuid[])', [contentAssetIds]);
     await root.query('DELETE FROM content_assets WHERE content_asset_id=ANY($1::uuid[])', [contentAssetIds]);
+    await root.query('DELETE FROM content_events WHERE user_id=ANY($1::uuid[])', [userIds]);
+    await root.query('DELETE FROM account_content_state WHERE user_id=ANY($1::uuid[])', [userIds]);
+    await root.query('DELETE FROM api_idempotency WHERE scope=ANY($1::text[])', [userIds]);
     await root.query('DELETE FROM user_sessions WHERE user_id=ANY($1::uuid[])', [userIds]);
     await root.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [userIds]);
   } finally {
@@ -75,6 +79,15 @@ async function pages(f: Fixture) {
   return result;
 }
 const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+
+it('keeps the migrated asset kind constraint in sync with the shared enum', async () => {
+  const { rows: [constraint] } = await root.query<{ definition: string }>(`SELECT pg_get_constraintdef(oid) AS definition
+    FROM pg_constraint WHERE conrelid='public.content_assets'::regclass
+      AND conname='content_assets_asset_kind_check' AND contype='c' AND convalidated`);
+  expect(constraint).toBeDefined();
+  const allowedKinds = Array.from(constraint!.definition.matchAll(/'([^']+)'::text/g), match => match[1]);
+  expect(allowedKinds.sort()).toEqual([...assetKinds].sort());
+});
 
 it('returns 45 active contentAssets as 20, 20 and 5 without duplicates or missing items', async () => {
   const f = await fixture(), expected = await seed(f, 45);
@@ -161,6 +174,71 @@ it('keeps full Markdown in the separate contentAsset detail response', async () 
     VALUES($1,$2,'raw',1,$3,$4)`, [randomUUID(), ids[0], content, createHash('sha256').update(content).digest('hex')]);
   const contentAsset = await contentAssets.getContentAsset(f.scope, ids[0]!);
   expect(contentAsset.parts.raw!.contentMarkdown).toBe(content);
+});
+
+it('returns the persisted asset kind in both the list and detail responses', async () => {
+  const f = await fixture();
+  const cases = [
+    { assetKind: 'creative', sourceKind: 'manual', sourceId: null },
+    { assetKind: 'image', sourceKind: 'link', sourceId: 'https://example.invalid/image.png' },
+    { assetKind: 'audio', sourceKind: 'recording', sourceId: null },
+    { assetKind: 'link', sourceKind: 'manual', sourceId: 'https://example.invalid/article' },
+    { assetKind: 'file', sourceKind: 'link', sourceId: 'https://example.invalid/report.pdf' },
+    { assetKind: 'file', sourceKind: 'import', sourceId: 'https://example.invalid/document' },
+  ];
+  const ids = await seed(f, cases.length);
+  for (const [index, item] of cases.entries()) {
+    await root.query('UPDATE content_assets SET asset_kind=$2, source_kind=$3, source_id=$4 WHERE content_asset_id=$1',
+      [ids[index], item.assetKind, item.sourceKind, item.sourceId]);
+  }
+  const app = await buildApiServer({ config });
+  const url = '/api/v1/content-assets', headers = fixtureScopeHeaders(f.bearer);
+  try {
+    const list = await app.inject({ url, headers });
+    expect(list.statusCode, list.body).toBe(200);
+    expect(list.json().data.items).toEqual(cases.map((item, index) => expect.objectContaining({
+      contentAssetId: ids[index], assetKind: item.assetKind, sourceKind: item.sourceKind,
+    })));
+    for (const [index, item] of cases.entries()) {
+      const detail = await app.inject({ url: `${url}/${ids[index]}`, headers });
+      expect(detail.statusCode, detail.body).toBe(200);
+      expect(detail.json().data).toMatchObject({ contentAssetId: ids[index], assetKind: item.assetKind, sourceKind: item.sourceKind });
+    }
+  } finally { await app.close(); }
+});
+
+it('persists link creation and keeps link-sourced images and imported documents distinct', async () => {
+  const f = await fixture(), app = await buildApiServer({ config });
+  const url = '/api/v1/content-assets', headers = fixtureScopeHeaders(f.bearer);
+  const writes = [
+    { title: 'Explicit link', assetKind: 'link', sourceKind: 'manual', expectedKind: 'link' },
+    { title: 'Legacy link', sourceKind: 'link', expectedKind: 'link' },
+    { title: 'Link-sourced image', assetKind: 'image', sourceKind: 'link', expectedKind: 'image' },
+  ];
+  const assertSaved = async (id: string, assetKind: string) => {
+    contentAssetIds.push(id);
+    expect((await root.query('SELECT asset_kind FROM content_assets WHERE content_asset_id=$1', [id])).rows)
+      .toEqual([{ asset_kind: assetKind }]);
+    const detail = await app.inject({ url: `${url}/${id}`, headers });
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.json().data).toMatchObject({ contentAssetId: id, assetKind });
+  };
+  try {
+    for (const { expectedKind, ...input } of writes) {
+      const result = await app.inject({ method: 'POST', url, headers: { ...headers, 'x-idempotency-key': randomUUID() },
+        payload: { ...input, sourceId: 'https://example.invalid/source', parts: { raw: 'Asset body' } } });
+      expect(result.statusCode, result.body).toBe(200);
+      await assertSaved(result.json().data.contentAssetId, expectedKind);
+    }
+    const sourceUrl = 'https://example.invalid/original.pdf';
+    const result = await app.inject({ method: 'POST', url: '/api/v1/content-asset-imports',
+      headers: { ...headers, 'x-idempotency-key': randomUUID() },
+      payload: { title: 'Imported document', mimeType: 'text/markdown', content: '# Document', sourceUrl } });
+    expect(result.statusCode, result.body).toBe(200);
+    const imported = result.json().data;
+    await assertSaved(imported.contentAsset.contentAssetId, 'file');
+    expect(imported).toMatchObject({ status: 'ready', contentAsset: { sourceRef: { kind: 'import', id: sourceUrl } } });
+  } finally { await app.close(); }
 });
 
 it('serves 20 metadata summaries over HTTP while detail retains the complete latest Markdown', async () => {
