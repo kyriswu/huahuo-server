@@ -36,7 +36,31 @@ interface ContentAssetRow extends ContentAssetStateRow {
  created_at: Date;
  updated_at: Date;
 }
-interface FolderStateRow {folder_id:string;parent_folder_id:string|null;revision:number;current_revision_id:string;state:'active'|'deleted';deleted_by_folder_id:string|null;}
+interface FolderRow {
+ folder_id: string;
+ user_id: string;
+ parent_folder_id: string | null;
+ display_name: string;
+ normalized_name: string;
+ state: 'active' | 'deleted';
+ current_revision_id: string;
+ revision: string;
+}
+interface FolderStateRow extends FolderRow {
+ deleted_by_folder_id: string | null;
+}
+function toFolderDto(folder: FolderRow, contentCursor: string) {
+ return {
+  folderId: folder.folder_id,
+  parentFolderId: folder.parent_folder_id,
+  displayName: folder.display_name,
+  normalizedName: folder.normalized_name,
+  state: folder.state,
+  currentRevisionId: folder.current_revision_id,
+  etag: folderEtag(folder.folder_id, Number(folder.revision)),
+  contentCursor,
+ };
+}
 const parts=['raw','outline','germination'] as const; type Part=typeof parts[number];
 function checkPart(part:string):asserts part is Part{if(!parts.includes(part as Part))throw new DomainError(400,'CONTENT_ASSET_PART_INVALID');}
 function checkContentAssetParts(values:Record<string,string>,mode:'create'|'update'|'input'='update'):void{
@@ -109,9 +133,29 @@ export class ContentAssetService {
    createdAt: contentAsset.created_at.toISOString(), updatedAt: contentAsset.updated_at.toISOString(),
   };
  }
- private async folderDto(tx:pg.PoolClient,id:string){const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1',[id])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');return {folderId:f.folder_id,parentFolderId:f.parent_folder_id,displayName:f.display_name,normalizedName:f.normalized_name,state:f.state,currentRevisionId:f.current_revision_id,etag:folderEtag(f.folder_id,Number(f.revision)),contentCursor:String((await tx.query('SELECT coalesce(next_cursor,0) c FROM account_content_state WHERE user_id=$1',[f.user_id])).rows[0]?.c??0)};}
+ private async folderDto(tx: pg.PoolClient, id: string) {
+  const { rows: [folder] } = await tx.query<FolderRow>('SELECT * FROM asset_folders WHERE folder_id=$1', [id]);
+  if (!folder) throw new DomainError(404, 'FOLDER_NOT_FOUND');
+  const { rows: [cursor] } = await tx.query<{ next_cursor: string }>(
+   'SELECT next_cursor FROM account_content_state WHERE user_id=$1', [folder.user_id],
+  );
+  return toFolderDto(folder, String(cursor?.next_cursor ?? 0));
+ }
  async getFolder(scope:Scope,id:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const f=await tx.query('SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2',[id,scope.userId]);if(!f.rowCount)throw new DomainError(404,'FOLDER_NOT_FOUND');return this.folderDto(tx,id);});}
- async listFolders(scope:Scope){return transaction(this.pool,async tx=>{await assertScope(tx,scope);const r=await tx.query('SELECT * FROM asset_folders WHERE user_id=$1 ORDER BY parent_folder_id NULLS FIRST,normalized_name,folder_id',[scope.userId]);return {folders:await Promise.all(r.rows.map(x=>this.folderDto(tx,x.folder_id)))};});}
+ async listFolders(scope: Scope) {
+  return transaction(this.pool, async tx => {
+   await assertScope(tx, scope);
+   const { rows } = await tx.query<FolderRow & { content_cursor: string }>(
+    `SELECT folder.*, coalesce(account.next_cursor, 0)::text AS content_cursor
+     FROM asset_folders folder
+     LEFT JOIN account_content_state account ON account.user_id=folder.user_id
+     WHERE folder.user_id=$1
+     ORDER BY folder.parent_folder_id NULLS FIRST, folder.normalized_name, folder.folder_id`,
+    [scope.userId],
+   );
+   return { folders: rows.map(folder => toFolderDto(folder, folder.content_cursor)) };
+  });
+ }
  async createFolder(scope:Scope,input:{displayName:string;parentFolderId?:string|null},key:string){if(!input.displayName.trim())throw new DomainError(400,'FOLDER_NAME_INVALID');return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.lockTree(tx,scope.userId);return idempotent(tx,this.secret,scope.userId,'folder.create',key,input,async()=>{if(input.parentFolderId){const p=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active'",[input.parentFolderId,scope.userId]);if(!p.rowCount)throw new DomainError(404,'PARENT_FOLDER_NOT_FOUND');}const id=randomUUID(),rev=randomUUID();try{await tx.query('INSERT INTO asset_folders(folder_id,user_id,parent_folder_id,display_name,normalized_name,current_revision_id) VALUES($1,$2,$3,$4,$5,$6)',[id,scope.userId,input.parentFolderId??null,input.displayName.trim(),normalize(input.displayName),rev]);}catch(e){if((e as {code?:string}).code==='23505')throw new DomainError(409,'FOLDER_NAME_CONFLICT');throw e;}await this.cursor(tx,scope.userId,'folder',id,'created',false,rev,1,null,null);return this.folderDto(tx,id);});});}
  async updateFolder(scope:Scope,id:string,displayName:string,ifMatch:string,key:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);await this.lockTree(tx,scope.userId);return idempotent(tx,this.secret,scope.userId,'folder.update',key,{id,displayName,ifMatch},async()=>{const f=(await tx.query('SELECT * FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state=\'active\' FOR UPDATE',[id,scope.userId])).rows[0];if(!f)throw new DomainError(404,'FOLDER_NOT_FOUND');if(folderEtag(id,Number(f.revision))!==ifMatch)throw new DomainError(412,'FOLDER_REVISION_MISMATCH');const rev=randomUUID(),v=Number(f.revision)+1;await tx.query('UPDATE asset_folders SET display_name=$2,normalized_name=$3,current_revision_id=$4,revision=$5,updated_at=now() WHERE folder_id=$1',[id,displayName.trim(),normalize(displayName),rev,v]);await this.cursor(tx,scope.userId,'folder',id,'updated',false,rev,v,f.current_revision_id,Number(f.revision));return this.folderDto(tx,id);});});}
  private async assertNoCycle(tx:pg.PoolClient,userId:string,id:string,parent:string|null){if(!parent)return;const r=await tx.query(`WITH RECURSIVE chain(id) AS (SELECT $1::uuid UNION ALL SELECT parent_folder_id FROM asset_folders f JOIN chain c ON f.folder_id=c.id WHERE f.parent_folder_id IS NOT NULL) SELECT 1 FROM chain WHERE id=$2 LIMIT 1`,[parent,id]);if(r.rowCount)throw new DomainError(409,'FOLDER_CYCLE');const p=await tx.query("SELECT 1 FROM asset_folders WHERE folder_id=$1 AND user_id=$2 AND state='active'",[parent,userId]);if(!p.rowCount)throw new DomainError(404,'PARENT_FOLDER_NOT_FOUND');}
