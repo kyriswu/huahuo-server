@@ -245,6 +245,61 @@ describe('canonical ContentAsset images with real isolated PostgreSQL and mocked
     expect((await root.query('SELECT reference_count FROM resources WHERE resource_id=$1',[picture])).rows[0].reference_count).toBe('1');
     expect((await root.query("SELECT resource_id FROM resource_refs WHERE user_id=$1 AND ref_kind='avatar'",[f.scope.userId])).rows).toEqual([{resource_id:picture}]);
   });
+  it('links the original audio attachment separately from the transcript and plays it by resource ID', async () => {
+    const owner = await fixture(false), other = await fixture(false);
+    const bytes = Buffer.from('original audio fixture');
+    const fileName = 'recording.m4a', mimeType = 'audio/mp4';
+    const upload = await storage.createUpload(owner.scope, { fileName, mimeType, sizeBytes: BigInt(bytes.length) }, randomUUID());
+    await adapter.uploadPart(upload.uploadUrl, bytes, upload.headers);
+    const completed = await storage.complete(owner.scope, upload.uploadId, randomUUID());
+    const { resourceId } = completed.resource;
+    const api = await buildApiServer({ config });
+    const headers = fixtureScopeHeaders(owner.bearer);
+    const attachment = { resourceId, usage: 'original', mimeType, order: 0 };
+    try {
+      const response = await api.inject({
+        method: 'POST', url: '/api/v1/content-assets',
+        headers: { ...headers, 'idempotency-key': randomUUID() },
+        payload: {
+          title: '会议录音', assetKind: 'audio', sourceKind: 'recording', parts: { raw: '' },
+          resourceRefs: [{ resourceId, usage: 'original' }],
+        },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      const created = response.json().data;
+      expect(created.resourceRefs).toMatchObject([attachment]);
+      expect(created.parts.raw.contentMarkdown).toBe('');
+      expect((await root.query(
+        'SELECT resource_id, usage, ref_order FROM content_asset_resource_refs WHERE content_asset_id=$1',
+        [created.contentAssetId],
+      )).rows).toEqual([{ resource_id: resourceId, usage: 'original', ref_order: 0 }]);
+
+      const path = `/api/v1/content-assets/${created.contentAssetId}`;
+      const draft = await api.inject({ method: 'GET', url: path, headers });
+      expect(draft.statusCode, draft.body).toBe(200);
+      expect(draft.json().data).toMatchObject({ assetKind: 'audio', contentStatus: 'draft', resourceRefs: [attachment] });
+
+      const transcript = '会议转写';
+      const saved = await api.inject({
+        method: 'PATCH', url: path, headers: { ...headers, 'if-match': created.etag, 'idempotency-key': randomUUID() },
+        payload: { parts: { raw: transcript } },
+      });
+      expect(saved.statusCode, saved.body).toBe(200);
+      const ready = await api.inject({ method: 'GET', url: path, headers });
+      expect(ready.statusCode, ready.body).toBe(200);
+      expect(ready.json().data).toMatchObject({
+        contentStatus: 'ready', parts: { raw: { contentMarkdown: transcript } }, resourceRefs: [attachment],
+      });
+
+      const playbackPath = `/api/v1/media/resources/${resourceId}/playback`;
+      const playback = await api.inject({ method: 'GET', url: playbackPath, headers });
+      expect(playback.statusCode, playback.body).toBe(200);
+      expect(playback.json().data).toMatchObject({ resourceId, fileName, mimeType, sizeBytes: bytes.length });
+      expect(new URL(playback.json().data.url).searchParams.has('x-oss-signature')).toBe(true);
+      const denied = await api.inject({ method: 'GET', url: playbackPath, headers: fixtureScopeHeaders(other.bearer) });
+      expect(denied.statusCode).toBe(404);
+    } finally { await api.close(); }
+  });
   it('renders fresh URLs outside stored receipts and never reads image bytes to create a view', async () => {
     const f = await fixture(), id = await image(f), original = `![图](asset://${id})`, api = await buildApiServer({ config });
     try {

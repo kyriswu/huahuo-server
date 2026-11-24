@@ -10,6 +10,8 @@
 
 同一提交中，`lib/features/inspiration/presentation/free_writing_page.dart` 维护未保存的编辑状态，`lib/features/inspiration/data/inspiration_store.dart` 将已保存内容写入本地 SQLite。App 还未消费 Server 资产列表、详情或标签接口。本轮的 `contentStatus` 按 Server 已保存的资产原文计算，暂未接入 App。 [资产内容状态](content-assets.md#资产内容状态)
 
+原始音频附件核对沿用同一提交。`lib/core/uploads/upload_service.dart` 的 `_finish` 从完成响应的 `data.resource` 解析 `UploadedResource.resourceId`。该 ID 可直接用于 Server 的 `resourceRefs[].resourceId`。 [原始音频附件](content-assets.md#原始音频附件)
+
 ## 历史记录 · 0019 内容归属和文件夹关系（2026-11-19）
 
 只读核对 Flutter 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`。自由创作通过 `lib/features/inspiration/data/inspiration_store.dart` 保存到本地，共享上传走 `lib/core/uploads/`。当前共享 Dart 源码没有笔记工作区或文件夹路由的调用。Server 本期把账号归属和组织关联分开，原路由从关系表读取工作区和文件夹信息，App 接线按后续产品契约确认。
