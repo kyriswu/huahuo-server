@@ -5,7 +5,7 @@ import { QuerySendDetailsResponse, QuerySendDetailsResponseBody, QuerySendDetail
 import { loadConfig } from '../../src/config/config.js';
 import { loadAliyunOtpConfig, loadAliyunSmsConnection } from '../../src/config/sms.js';
 import { AliyunSmsService, prepareSmsDeliveryQuery, prepareTemplateSms, type AliyunSmsSdk } from '../../src/integrations/aliyun-sms.js';
-import { AliyunSmsProvider, createSmsProvider } from '../../src/integrations/sms.js';
+import { AliyunSmsProvider, FeishuSmsProvider, createSmsProvider } from '../../src/integrations/sms.js';
 import { executeSmsCommand, readSmsToolInput, smsToolError } from '../../src/tools/sms.js';
 import { env } from '../helpers.js';
 
@@ -59,6 +59,22 @@ describe('Aliyun SMS configuration', () => {
     }
     expect(createSmsProvider(loadConfig('api-server', configured))).toBeInstanceOf(AliyunSmsProvider);
     expect(loadAliyunSmsConnection(credentials)).toMatchObject({ accessKeyId: credentials.ALIYUN_RAM_ACCESS_KEY_ID, readTimeoutMs: 3000 });
+  });
+
+  it('uses a configured Feishu webhook only for non-production API roles', () => {
+    const webhook = 'https://open.feishu.cn/open-apis/bot/v2/hook/fixture';
+    for (const appEnv of ['development', 'test']) {
+      const config = loadConfig('api-server', { ...env, APP_ENV: appEnv, SMS_ALIYUN_SIGN_NAME: '', SMS_FEISHU_WEBHOOK_URL: webhook });
+      expect(config.smsAliyun).toBeUndefined();
+      expect(createSmsProvider(config)).toBeInstanceOf(FeishuSmsProvider);
+    }
+    expect(() => loadConfig('api-server', { ...configured, SMS_FEISHU_WEBHOOK_URL: 'https://example.test/hook' }))
+      .toThrow('INVALID_CONFIG:SMS_FEISHU_WEBHOOK_URL');
+    const production = loadConfig('api-server', { ...configured, APP_ENV: 'production', DATABASE_SSL_MODE: 'verify-full',
+      APP_PUBLIC_BASE_URL: 'https://api.example.test', APP_JWT_PRIVATE_KEY: 'cA==', APP_JWT_PUBLIC_KEY: 'cA==', SMS_FEISHU_WEBHOOK_URL: webhook });
+    expect(production.smsFeishu).toBeUndefined();
+    expect(createSmsProvider(production)).toBeInstanceOf(AliyunSmsProvider);
+    expect(loadConfig('admin', { ...env, SMS_FEISHU_WEBHOOK_URL: webhook }).smsFeishu).toBeUndefined();
   });
 
   it.each([

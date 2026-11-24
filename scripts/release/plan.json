@@ -1,34 +1,24 @@
 {
   "version": 1,
-  "id": "20261120-ai-template-variables",
-  "baseRevision": "943437edbd3a8dc4f03518086d42cba2321ad977",
-  "services": [
-    "api-server",
-    "admin"
-  ],
+  "id": "20261124-feishu-otp",
+  "baseRevision": "4589d94f3b256df972f868f7c67fd17ec74c5070",
+  "services": ["api-server"],
   "database": {
     "migrations": [],
     "verifySql": null,
-    "dataChange": {
-      "mode": "none",
-      "reason": ""
-    }
+    "dataChange": { "mode": "none", "reason": "" }
   },
   "configuration": {
-    "mode": "reuse",
-    "changes": [],
-    "reviewedFiles": []
+    "mode": "candidate",
+    "changes": [
+      { "key": "SMS_FEISHU_WEBHOOK_URL", "operation": "add", "roles": ["api-server"], "required": true, "hasDefault": false },
+      { "key": "SMS_FEISHU_SIGNING_SECRET", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": true }
+    ],
+    "reviewedFiles": [".env.example", ".env.host.example", ".env.compose.cloud.example", ".env.compose.local.example", "compose.yaml", "src/config/config.ts", "src/config/sms.ts"],
+    "verifyFile": "scripts/release/changes/20261124-feishu-otp/verify-config.mjs"
   },
   "dependencies": [],
-  "backfill": {
-    "required": false,
-    "reference": null
-  },
-  "compatibility": {
-    "database": true,
-    "api": true,
-    "tasks": true,
-    "configuration": true
-  },
+  "backfill": { "required": false, "reference": null },
+  "compatibility": { "database": true, "api": true, "tasks": true, "configuration": true },
   "smoke": "health"
 }
