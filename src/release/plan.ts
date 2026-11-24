@@ -5,6 +5,9 @@ import { promisify } from 'node:util';
 
 const execute = promisify(execFile);
 const runtimeRoles = ['api-server', 'admin', 'worker', 'scheduler'] as const;
+const baselineMigration = '0001_initial_schema.sql';
+// This is the sole predecessor authorized for the local-only baseline consolidation.
+const freshBaselinePredecessor = '65e03b27afcbd97876db4c08ef01df754b9426dc';
 type RuntimeRole = typeof runtimeRoles[number];
 type Role = RuntimeRole | 'migrate';
 export interface ReleasePlan {
@@ -12,7 +15,12 @@ export interface ReleasePlan {
   id: string;
   baseRevision: string;
   services: RuntimeRole[];
-  database: { migrations: string[]; verifySql: string | null; dataChange: { mode: 'none' | 'inline' | 'separate'; reason: string } };
+  database: {
+    migrations: string[];
+    verifySql: string | null;
+    dataChange: { mode: 'none' | 'inline' | 'separate'; reason: string };
+    bootstrap?: 'fresh-only';
+  };
   configuration: {
     mode: 'reuse' | 'candidate';
     changes: { key: string; operation: 'add' | 'change' | 'remove'; roles: Role[]; required: boolean; hasDefault: boolean }[];
@@ -62,7 +70,9 @@ function parsePlan(input: unknown): ReleasePlan {
     || typeof plan.baseRevision !== 'string' || !/^[a-f0-9]{40}$/.test(plan.baseRevision)) fail();
   const roles = uniqueStrings(plan.services, 4);
   if (!roles.length || roles.some(role => !runtimeRoles.includes(role as RuntimeRole))) fail();
-  const database = object(plan.database, ['migrations', 'verifySql', 'dataChange']);
+  const database = object(plan.database, ['migrations', 'verifySql', 'dataChange',
+    ...(plan.database && typeof plan.database === 'object' && Object.hasOwn(plan.database, 'bootstrap') ? ['bootstrap'] : [])]);
+  if (Object.hasOwn(database, 'bootstrap') && database.bootstrap !== 'fresh-only') fail();
   const migrations = uniqueStrings(database.migrations, 9999);
   if (migrations.some(name => !/^[0-9]{4}_[a-z0-9_]+\.sql$/.test(name))
     || new Set(migrations.map(name => name.slice(0, 4))).size !== migrations.length) fail();
@@ -108,6 +118,9 @@ function parsePlan(input: unknown): ReleasePlan {
   if (backfill.required !== (dataChange.mode === 'separate')) fail();
   const compatibility = object(plan.compatibility, ['database', 'api', 'tasks', 'configuration']);
   if (Object.values(compatibility).some(value => typeof value !== 'boolean')) fail();
+  if (database.bootstrap === 'fresh-only' && (plan.baseRevision !== freshBaselinePredecessor
+    || migrations.length !== 1 || migrations[0] !== baselineMigration || database.verifySql === null
+    || dataChange.mode !== 'inline' || compatibility.database !== false)) fail();
   if (plan.smoke !== 'health' && plan.smoke !== 'authenticated') fail();
   return plan as unknown as ReleasePlan;
 }
@@ -156,11 +169,27 @@ export async function reviewReleasePlan(input: ReleasePlan, root = process.cwd()
   catch { fail('RELEASE_PLAN_BASE_INVALID'); }
   const changed = (await git(root, ['diff', '--no-renames', '--name-only', '-z', plan.baseRevision, revision, '--'])).split('\0').filter(Boolean);
   const [before, after] = await Promise.all([migrationsAt(root, plan.baseRevision), migrationsAt(root, revision)]);
-  for (const [name, checksum] of before) if (after.get(name) !== checksum) fail('RELEASE_PLAN_MIGRATION_HISTORY_CHANGED');
-  const added = [...after.keys()].filter(name => !before.has(name)).sort();
-  const highest = Math.max(0, ...[...before.keys()].map(name => Number(name.slice(0, 4))));
-  if (added.some(name => Number(name.slice(0, 4)) <= highest)
-    || JSON.stringify(added) !== JSON.stringify([...plan.database.migrations].sort())) fail('RELEASE_PLAN_MIGRATIONS_MISMATCH');
+  let added: string[];
+  if (plan.database.bootstrap === 'fresh-only') {
+    const replacement = after.get(baselineMigration);
+    if (before.size < 2 || after.size !== 1 || !replacement || replacement === before.get(baselineMigration)) {
+      fail('RELEASE_PLAN_MIGRATIONS_MISMATCH');
+    }
+    // Limit the exception to the single consolidation even while the manifest still describes it.
+    const resetRevision = (await git(root, ['rev-list', '--no-merges', '--full-history', `${plan.baseRevision}..${revision}`,
+      '--', `migrations/${baselineMigration}`])).trim();
+    if (!/^[a-f0-9]{40}$/.test(resetRevision)
+      || (await migrationsAt(root, resetRevision)).get(baselineMigration) !== replacement) {
+      fail('RELEASE_PLAN_MIGRATION_HISTORY_CHANGED');
+    }
+    added = [baselineMigration];
+  } else {
+    for (const [name, checksum] of before) if (after.get(name) !== checksum) fail('RELEASE_PLAN_MIGRATION_HISTORY_CHANGED');
+    added = [...after.keys()].filter(name => !before.has(name)).sort();
+    const highest = Math.max(0, ...[...before.keys()].map(name => Number(name.slice(0, 4))));
+    if (added.some(name => Number(name.slice(0, 4)) <= highest)
+      || JSON.stringify(added) !== JSON.stringify([...plan.database.migrations].sort())) fail('RELEASE_PLAN_MIGRATIONS_MISMATCH');
+  }
   const databaseChanged = added.length > 0 || changed.some(path => path.startsWith('src/db/')
     || (path.startsWith('src/') && /(?:repository|repositories)/.test(path)));
   if (databaseChanged && plan.database.verifySql === null) fail('RELEASE_PLAN_DB_VERIFICATION_REQUIRED');

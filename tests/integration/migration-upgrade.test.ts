@@ -9,7 +9,8 @@ import { migrate, preflightMigrations } from '../../src/db/migrate.js';
 import { createDependencies, poolFor } from '../../src/plugins/dependencies.js';
 
 const migrationUrl = process.env.TEST_DATABASE_MIGRATION_URL;
-if (!migrationUrl || !/^huahuo_test_[a-z0-9_]+$/.test(new URL(migrationUrl).pathname.slice(1))) throw new Error('REAL_ISOLATED_TEST_DATABASE_REQUIRED');
+if (!migrationUrl || new URL(migrationUrl).hostname !== '127.0.0.1'
+  || !/^\/huahuo_test_[a-z0-9_]+$/.test(new URL(migrationUrl).pathname)) throw new Error('REAL_ISOLATED_TEST_DATABASE_REQUIRED');
 const config = loadConfig('migrate', { DATABASE_URL: migrationUrl });
 const pool = poolFor(config);
 const packaged = loadMigrationFiles();
@@ -36,24 +37,20 @@ beforeAll(() => migrate(config), 20000);
 afterAll(() => pool.end());
 
 describe('append-only upgrades with real isolated PostgreSQL', () => {
-  it('initializes the required task trace once and rejects missing or invalid traces on new rows',async()=>{
-    const table=probe(),client=await pool.connect(),migration=packaged.find(file=>file.name==='0005_task_trace_id.sql');
-    if(!migration)throw Error('TRACE_MIGRATION_MISSING');
+  it('requires a valid trace on each new task', async () => {
+    const client = await pool.connect(), id = randomUUID();
+    const insert = `INSERT INTO public.tasks(id,kind,queue,state,trace_id)
+      VALUES($1,'maintenance.check','maintenance','queued',$2) RETURNING trace_id`;
     await client.query('BEGIN');
-    try{
-      await client.query(`CREATE TABLE public.${table}(id uuid PRIMARY KEY); INSERT INTO public.${table} VALUES(gen_random_uuid()),(gen_random_uuid());`);
-      await client.query(migration.sql.replaceAll('public.tasks',`public.${table}`));
-      const rows=(await client.query(`SELECT trace_id FROM public.${table}`)).rows;
-      expect(rows).toHaveLength(2);expect(new Set(rows.map(row=>row.trace_id)).size).toBe(2);
-      for(const row of rows)expect(row.trace_id).toMatch(/^[a-f0-9-]{36}$/);
+    try {
       await client.query('SAVEPOINT required_trace');
-      await expect(client.query(`INSERT INTO public.${table}(id) VALUES(gen_random_uuid())`)).rejects.toMatchObject({code:'23502'});
+      await expect(client.query(`INSERT INTO public.tasks(id,kind,queue,state)
+        VALUES($1,'maintenance.check','maintenance','queued')`, [id])).rejects.toMatchObject({ code: '23502' });
       await client.query('ROLLBACK TO SAVEPOINT required_trace');
-      await expect(client.query(`INSERT INTO public.${table}(id,trace_id) VALUES(gen_random_uuid(),'bad')`)).rejects.toMatchObject({code:'23514'});
+      await expect(client.query(insert, [id, 'bad'])).rejects.toMatchObject({ code: '23514' });
       await client.query('ROLLBACK TO SAVEPOINT required_trace');
-      await client.query(`INSERT INTO public.${table}(id,trace_id) VALUES(gen_random_uuid(),'current-trace')`);
-      expect(Number((await client.query(`SELECT count(*) AS n FROM public.${table}`)).rows[0].n)).toBe(3);
-    }finally{await client.query('ROLLBACK');client.release();}
+      expect((await client.query(insert, [id, 'current-trace'])).rows).toEqual([{ trace_id: 'current-trace' }]);
+    } finally { await client.query('ROLLBACK'); client.release(); }
   });
   it('preflights pending SQL with a SELECT-only migration-history role without applying any change', async () => {
     const table = probe(), directory = await fixture([`CREATE TABLE ${table}(id int PRIMARY KEY);`]);
@@ -72,6 +69,24 @@ describe('append-only upgrades with real isolated PostgreSQL', () => {
       await expect(migrate(config, directory)).rejects.toThrow('MIGRATION_TRANSACTION_CONTROL');
       expect(await exists(table)).toBe(false); expect(await history()).toEqual(before);
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('refuses the pre-consolidation baseline without changing history or applying pending SQL', async () => {
+    // The previous 0001 checksum is evidence distinct from a new ledger at version 1.
+    const oldBaseline = '5d77ce9faad63e6e1d04b305562367e4264fa69f3cf041cc2ce4100a436015d5';
+    const currentBaseline = packaged[0]!.checksum;
+    const table = probe(), directory = await fixture([`CREATE TABLE ${table}(id int);`]);
+    try {
+      await pool.query('UPDATE schema_migrations SET checksum=$1 WHERE version=1', [oldBaseline]);
+      const before = await history();
+      await expect(preflightMigrations(config, directory)).rejects.toThrow('MIGRATION_CHECKSUM_MISMATCH');
+      await expect(migrate(config, directory)).rejects.toThrow('MIGRATION_CHECKSUM_MISMATCH');
+      expect(await history()).toEqual(before);
+      expect(await exists(table)).toBe(false);
+    } finally {
+      await pool.query('UPDATE schema_migrations SET checksum=$1 WHERE version=1', [currentBaseline]);
+      await cleanup(directory, [table]);
+    }
   });
 
   it('keeps an older image ready after an additive upgrade while the new image requires its own checksum', async () => {

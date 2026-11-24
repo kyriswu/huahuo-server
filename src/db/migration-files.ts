@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-// This exact baseline was deployed at main 1f7adfd. All later changes are additive files.
-const BASELINE_CHECKSUM = '5d77ce9faad63e6e1d04b305562367e4264fa69f3cf041cc2ce4100a436015d5';
+// Fresh-install baseline consolidated from the original migration chain. Later migrations are append-only.
+const BASELINE_CHECKSUM = '84fd02c5adf3c5b8bbeddec03e468e296520dc4befbdc63dccc36338c688b27e';
 export interface MigrationFile { version: number; name: string; checksum: string; sql: string; }
 export interface MigrationHistory { version: number; checksum: string; }
 

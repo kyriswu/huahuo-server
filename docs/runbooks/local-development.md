@@ -71,6 +71,10 @@ pnpm dev:local scheduler
 
 ## 迁移与数据
 
+### 本机基线切换
+
+本机开发使用合并后的空库基线。全新数据库按正常初始化流程启动，由一次性 `migrate` 建立表和种子配置。切换前的 `0001` 至 `0027` 位于 [旧迁移链](https://github.com/kyriswu/huahuo-server/blob/65e03b27afcbd97876db4c08ef01df754b9426dc/migrations)。旧账本与新基线不同，遇到校验和错误时保留原库并确认连接目标；重新初始化旧开发库属于单独的、经授权的维护操作。使用旧链的环境继续使用相匹配的代码和账本。
+
 `pnpm db:generate descriptive_name` 生成待审查 SQL 文件；不是未经审核的 schema push。`pnpm db:migrate` 运行新的一次性 migrate。迁移锁有等待上限；每个文件事务执行，已应用文件的 checksum 不可变。
 
 本机项目更新代码后通过 Compose 构建新镜像并执行待应用迁移。
