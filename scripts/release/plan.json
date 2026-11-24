@@ -19,6 +19,6 @@
   },
   "dependencies": [],
   "backfill": { "required": false, "reference": null },
-  "compatibility": { "database": true, "api": true, "tasks": true, "configuration": true },
+  "compatibility": { "database": true, "api": true, "tasks": true, "configuration": false },
   "smoke": "health"
 }

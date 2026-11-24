@@ -23,7 +23,9 @@ Compose 只向 API 注入短信参数；Admin/Scheduler/Migrate 不新增短信�
 
 ### 飞书测试验证码
 
-在 `APP_ENV=development` 或 `APP_ENV=test` 的 API 私密环境配置中填写 `SMS_FEISHU_WEBHOOK_URL`。Compose 从 `.env` 读取，本机直接运行从所选的 `.env.host` 读取，测试 Pod 从现有 API Secret 读取。机器人开启了签名时同时填写 `SMS_FEISHU_SIGNING_SECRET`。留空 webhook URL 时使用阿里云。
+同事可从 `test` 拉取代码，沿用本机依赖，在私密 `.env` 配置团队提供的 webhook ，再启动 API。已有本机 Compose 依赖时，可运行 `docker compose --env-file .env up -d --no-deps --build api-server`。之后通过 App 调试包或本机 API 申请验证码，从飞书群取码。
+
+在 `APP_ENV=development` 或 `APP_ENV=test` 的 API 私密环境配置中填写 `SMS_FEISHU_WEBHOOK_URL`。Compose 从 `.env` 读取，本机直接运行从所选的 `.env.host` 读取。机器人开启了签名时同时填写 `SMS_FEISHU_SIGNING_SECRET`。留空 webhook URL 时使用阿里云。
 
 飞书群收到环境、脱敏手机号、六位验证码和有效期。所有符合现有手机号格式的号码均可用于测试。飞书票据只能在启用飞书的 API 实例登录或重放，正式环境仅接受真实短信票据。测试环境使用独立于正式环境的身份库和 JWT 密钥。
 
