@@ -31,10 +31,11 @@ GitHub test/production 两个 environment 已实际保存为仅允许 main 分�
 | `TEST_RELEASE_REGION_ID` | 固定 `cn-beijing` |
 | `TEST_RELEASE_INSTANCE_ID` | 已确认的 `i-2zegtoygiiked53yntmj` |
 | `TEST_RELEASE_COMMAND_ID` | 一次性准备的固定云助手命令 ID |
-| `TEST_RELEASE_OIDC_PROVIDER_ARN` | 专用 `github-actions-huahuo-server` Provider ARN |
 | `TEST_RELEASE_ROLE_ARN` | 专用 `huahuo-server-test-release` Role ARN |
 
-按用户选择，以上五项在 GitHub 仓库 Variables 中配置，并由 workflow 顶层 `env` 读取。均为非秘密标识；调用器及角色信任仍限制实际目标。固定命令为 `c-bj07369lkmmf8cg`。调用器只接受指定测试机、完整 40 位 SHA 和 STS 凭据，拒绝长期 AK；唯一命令参数为 `sha`，不从 workflow 输入接收任意 shell。
+以上四项在 GitHub 仓库 Variables 中配置，并由 workflow 顶层 `env` 读取。均为非秘密标识，调用器及角色信任仍限制实际目标。固定命令为 `c-bj07369lkmmf8cg`。调用器只接受指定测试机、完整 40 位 SHA 和 STS 凭据，拒绝长期 AK。唯一命令参数为 `sha`，工作流输入无权传入任意 shell。
+
+工作流固定使用云账号 `1883731481145107` 的共享 Provider `github-actions`。Provider 使用签发方 `https://token.actions.githubusercontent.com` 和受众 `sts.aliyuncs.com`。同一云账号的仓库共用 Provider，各自的 RAM 角色按仓库 OIDC subject 授权。
 
 ## 宿主结果协议
 
