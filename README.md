@@ -220,7 +220,7 @@ node --env-file=.env.host.worker --import tsx src/entrypoints/worker.ts
 - 后端只在本仓库修改；同级 App 只读参照，不合并为父级 workspace，也不运行会写 App 的 Flutter 命令。
 - 使用严格 TypeScript + ESM、项目 pin 和锁文件；真实配置、凭据、签名 URL、原始敏感日志不进入 Git。
 - 数据库关联使用普通 ID 与必要索引，**不新增物理外键或模拟外键触发器**；存在性、归属、并发和清理由 Service/Repository 在事务边界处理。
-- 测试服已上线，`0001_initial_schema.sql` 与所有已执行迁移冻结；后续新增编号，不改历史 SQL/checksum、不在启动时 DROP 或重置。
+- 当前本机开发基线从空库开始，后续按编号追加迁移。旧迁移链留在 Git 历史中。已应用迁移的校验和冻结，应用启动不重置数据库。 [本机基线切换](docs/runbooks/local-development.md#本机基线切换)
 - CI 使用独立 PG/Redis，不携带生产凭据或调用真实付费业务。分别记录单元替身、真实依赖、实际环境验收，不能混写证据。
 - 具体工作约束以 [AGENTS.md](AGENTS.md) 为准；发布准备使用 [huahuo-release Skill](.agents/skills/huahuo-release/SKILL.md)，普通开发不自动获得部署权限。
 

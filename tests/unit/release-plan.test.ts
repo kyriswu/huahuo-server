@@ -173,6 +173,56 @@ describe('reviewed release plan', () => {
     await put('src/config/config.ts', 'export const changed = true;'); commit();
     await expect(reviewReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_CONFIG_REVIEW_REQUIRED');
   });
+  it('reads the fresh-only baseline consolidation plan and refuses automatic deployment', async () => {
+    plan.baseRevision = '65e03b27afcbd97876db4c08ef01df754b9426dc';
+    plan.database.bootstrap = 'fresh-only';
+    plan.database.migrations = ['0001_initial_schema.sql'];
+    plan.database.dataChange = { mode: 'inline', reason: 'Initialize a replacement local database.' };
+    plan.compatibility.database = false;
+    await verifyFile(); await save();
+    await expect(readReleasePlan(root)).resolves.toEqual(plan);
+    await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_INCOMPATIBLE');
+    await expect(reviewReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_BASE_INVALID');
+
+    plan.compatibility.database = true;
+    await save();
+    await expect(readReleasePlan(root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+    plan.compatibility.database = false;
+
+    plan.database.migrations.push('0002_extra.sql');
+    await save();
+    await expect(readReleasePlan(root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+    plan.database.migrations.pop();
+
+    plan.baseRevision = base;
+    await save();
+    await expect(readReleasePlan(root)).rejects.toThrow('RELEASE_PLAN_INVALID');
+  });
+  it('reviews one baseline replacement and freezes that file on the same fresh-only plan', async () => {
+    const objectDirectory = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'objects'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    await put('.git/objects/info/alternates', objectDirectory);
+    plan.baseRevision = '65e03b27afcbd97876db4c08ef01df754b9426dc';
+    git('checkout', '--quiet', '--detach', plan.baseRevision);
+    await rm(join(root, 'migrations'), { recursive: true });
+    await put('migrations/0001_initial_schema.sql', 'SELECT 1;');
+    plan.database.bootstrap = 'fresh-only';
+    plan.database.migrations = ['0001_initial_schema.sql'];
+    plan.database.dataChange = { mode: 'inline', reason: 'Initialize a replacement local database.' };
+    plan.compatibility.database = false;
+    await verifyFile(); const resetRevision = commit();
+
+    await expect(reviewReleasePlan(plan, root)).resolves.toMatchObject({ migrationCount: 1, automaticReleaseReady: false });
+    await put('migrations/0001_initial_schema.sql', 'SELECT 3;');
+    git('add', 'migrations/0001_initial_schema.sql');
+    const rewrittenMerge = git('commit-tree', git('write-tree'), '-p', resetRevision, '-p', plan.baseRevision, '-m', 'modify in merge');
+    git('reset', '--hard', rewrittenMerge);
+    await expect(reviewReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_MIGRATION_HISTORY_CHANGED');
+
+    git('reset', '--hard', resetRevision);
+    await put('migrations/0001_initial_schema.sql', 'SELECT 2;'); commit();
+    await expect(reviewReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_MIGRATION_HISTORY_CHANGED');
+  });
   it('rejects unknown and divergent deployed baselines', async () => {
     plan.baseRevision = 'f'.repeat(40); await expect(validateReleasePlan(plan, root)).rejects.toThrow('RELEASE_PLAN_BASE_INVALID');
     await put('first.txt', 'one'); const branch = commit(); git('checkout', '--quiet', '--detach', base);

@@ -1,3 +1,9 @@
+## 本机空库基线（2026-11-24）
+
+将旧 `0001` 至 `0027` 的最终结构、角色权限和六张种子表合并为一个新 `0001`。旧迁移与专用升级用例留在 [历史提交](https://github.com/kyriswu/huahuo-server/tree/65e03b27afcbd97876db4c08ef01df754b9426dc/migrations)。现行用例继续覆盖完整性、通用增量升级、旧账本拒绝、零物理外键及正常业务。
+
+两个隔离 PostgreSQL 17 实例的结构、索引、约束、触发器、权限和种子内容对比一致，预期生成时间除外。空库应用新基线后重跑无操作，四个运行角色通过只读验收。类型检查、Lint、构建和 1,151 项单元及契约测试通过。隔离 PostgreSQL／Redis 集成通过 459 项、跳过 7 项。当前候选关闭自动部署资格。 [初始基线](../migrations/0001_initial_schema.sql) · [本机基线切换](runbooks/local-development.md#本机基线切换)
+
 ## 本机验证与旧入口整理（2026-11-24，本地验收）
 
 宿主开发统一使用 `pnpm dev:local <角色>`。它检查本机 PostgreSQL 和 Redis 地址并隔离终端继承的应用配置。`pnpm verify` 使用宿主工具链和临时依赖，并渲染本地与云端 Compose 示例校验拓扑。容器隔离诊断和专用 E2E 继续提供额外验收。 [本地开发](runbooks/local-development.md)
@@ -16,9 +22,9 @@ Apifox 已回读确认创建和详情的 M4A 示例使用同一个 `resourceId`�
 
 资产列表和详情返回服务端维护的 `contentStatus`，取值为 `draft`、`processing`、`ready` 和 `failed`。空白原文为草稿，保存非空原文或导入文本后内容就绪，元数据编辑保留当前状态。音频转写和链接读取尚未接入资产状态写回。标签接口保留已有的内容可读性值，索引仍读取已就绪的原文。 [状态定义](content-assets.md#资产内容状态) · [App 源码参照](app-reference.md)
 
-`0027` 复用 `content_assets.processing_status`，把旧 `needs-processing` 转换为 `draft`，保留 `ready` 及原默认值。共享环境迁移前需要暂停并排空旧资产写入方。累计清单保留 `0026` 的 Milvus 元数据刷新。 [迁移](../migrations/0027_content_asset_status.sql) · [发布清单](../scripts/release/plan.json)
+`0027` 复用 `content_assets.processing_status`，把旧 `needs-processing` 转换为 `draft`，保留 `ready` 及原默认值。共享环境迁移前需要暂停并排空旧资产写入方。该阶段累计清单保留 `0026` 的 Milvus 元数据刷新。 [历史迁移](https://github.com/kyriswu/huahuo-server/blob/65e03b27afcbd97876db4c08ef01df754b9426dc/migrations/0027_content_asset_status.sql) · [历史发布清单](https://github.com/kyriswu/huahuo-server/blob/65e03b27afcbd97876db4c08ef01df754b9426dc/scripts/release/plan.json)
 
-类型检查、Lint、构建和 1,149 项单元及契约测试通过。隔离 PostgreSQL／Redis 通过 508 项集成测试，跳过 7 项。HTTP 回归覆盖四种状态的列表及详情序列化、手动正文编辑、文本导入、幂等重放和标签接口兼容。真实 PostgreSQL 的 `0025` → `0027` 演练应用了 `0026`、`0027`，重跑没有待执行迁移，业务表物理外键为零。 [HTTP 回归](../tests/integration/content-asset-pagination.test.ts) · [带数据迁移回归](../tests/integration/current-note-migration.test.ts)
+类型检查、Lint、构建和 1,149 项单元及契约测试通过。隔离 PostgreSQL／Redis 通过 508 项集成测试，跳过 7 项。HTTP 回归覆盖四种状态的列表及详情序列化、手动正文编辑、文本导入、幂等重放和标签接口兼容。真实 PostgreSQL 的 `0025` → `0027` 演练应用了 `0026`、`0027`，重跑没有待执行迁移，业务表物理外键为零。 [HTTP 回归](../tests/integration/content-asset-pagination.test.ts) · [带数据迁移回归](https://github.com/kyriswu/huahuo-server/blob/65e03b27afcbd97876db4c08ef01df754b9426dc/tests/integration/current-note-migration.test.ts)
 
 Apifox「花火AI」主分支已同步并回读两个现有查询条目的响应字段、四个状态的中文说明和成功示例。代码停在独立工作区的本地验收点。 [资产列表](https://app.apifox.com/project/8965877/apis/api-539018656) · [资产详情](https://app.apifox.com/project/8965877/apis/api-539018659)
 
@@ -63,7 +69,7 @@ Admin 编辑器自动识别 `{{变量名}}` 并行内高亮，同名变量同色
 
 资产使用可空的 `content_assets.folder_id`。列表、详情、创建、编辑、批量移动和搜索使用该字段。文件夹软删时保留存储位置，列表和详情返回空，按该文件夹搜索无结果。恢复时重新显示原位置，软删期间主动移动或清空的资产采用新位置。文件夹归属继续在事务内校验，普通组合索引按文件夹、账号、状态和更新时间组织。API 继续使用 `folderId`。 [资产契约](contract-compatibility.md)
 
-迁移 `0024` 在锁内盘点多重归类、孤立关系和跨账号关系。存在异常就返回分类计数并停止。回填后核对新旧位置逐项一致，再退役旧表。隔离真实 PostgreSQL 从 0023 升至 0024，重跑无待执行迁移。带数据用例覆盖有效目录、软删目录和未归类，另外验证四种无效旧关系会拒绝变更。业务 schema 物理外键为零。 [增量迁移](../migrations/0024_content_asset_folder_id.sql)
+迁移 `0024` 在锁内盘点多重归类、孤立关系和跨账号关系。存在异常就返回分类计数并停止。回填后核对新旧位置逐项一致，再退役旧表。隔离真实 PostgreSQL 从 0023 升至 0024，重跑无待执行迁移。带数据用例覆盖有效目录、软删目录和未归类，另外验证四种无效旧关系会拒绝变更。业务 schema 物理外键为零。 [历史增量迁移](https://github.com/kyriswu/huahuo-server/blob/65e03b27afcbd97876db4c08ef01df754b9426dc/migrations/0024_content_asset_folder_id.sql)
 
 类型检查、Lint、构建、1,199 项单元和契约测试、504 项隔离 PostgreSQL／Redis／Milvus 集成测试通过，模型和 OSS 使用替身。首轮沙箱限制回环监听，且 Colima 无法挂载原临时路径。切换到可挂载的独立副本后通过。只读确认 App 提交 `fe6a02c` 的自由创作仍通过本地 store 保存，相关 Server API 形状保持一致。
 
@@ -73,7 +79,7 @@ Admin 编辑器自动识别 `{{变量名}}` 并行内高亮，同名变量同色
 
 用 CodeGraph 追踪资产保存与图片认领、Task/Outbox 到 Milvus、全文回读和 AI 运行。使用无工作区的登录账号验证创作和查询，并检查跨账号隔离。资产标签用于归类和搜索，「我的标签」由 App 本机记录。编辑器润色沿用一次 SSE 生成，内容、建议及理由由后台发布的提示词组织。 [当前契约](contract-compatibility.md) · [AI 模板](runbooks/ai-templates.md)
 
-隔离演练从 0022 升到 0023，复跑无待迁移项。含数据的迁移用例验证正文、图片引用、目录、标签、AI 运行和待索引任务。只读核对 App 提交 `fe6a02c` 的本地创作和通用上传。OSS 与 AI 使用测试替身，PostgreSQL、Redis 和 Milvus 使用临时实例。 [迁移用例](../tests/integration/current-note-migration.test.ts) · [索引验证](../tests/integration/knowledge-base.test.ts)
+隔离演练从 0022 升到 0023，复跑无待迁移项。含数据的迁移用例验证正文、图片引用、目录、标签、AI 运行和待索引任务。只读核对 App 提交 `fe6a02c` 的本地创作和通用上传。OSS 与 AI 使用测试替身，PostgreSQL、Redis 和 Milvus 使用临时实例。 [迁移用例](https://github.com/kyriswu/huahuo-server/blob/65e03b27afcbd97876db4c08ef01df754b9426dc/tests/integration/current-note-migration.test.ts) · [索引验证](../tests/integration/knowledge-base.test.ts)
 
 类型检查、Lint、构建、1199 项单元与契约测试和 499 项隔离集成测试通过。业务 schema 物理外键为零。本次交付停在本地验收。
 

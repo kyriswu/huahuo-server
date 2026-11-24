@@ -52,22 +52,8 @@ export async function checkReleaseHistory(config: AppConfig, plan: ReleasePlan, 
   const pool = poolFor(config); pool.on('error', () => undefined);
   try {
     const { rows } = await pool.query<{ values: Values }>('SELECT "values" FROM public.runtime_configuration WHERE singleton=true');
-    let values = rows[0]?.values;
+    const values = rows[0]?.values;
     if (!values) return fail('RELEASE_DRAIN_POLICY_INVALID');
-    if (history.pending.includes(20) && plan.database.migrations.includes('0020_content_asset_naming.sql')
-      && typeof values === 'object' && !Array.isArray(values)) {
-      // Validate the settings that migration 0020 will persist, without changing the row.
-      values = { ...values };
-      for (const [previous, next] of [
-        ['features.noteIndexing', 'features.contentAssetIndexing'],
-        ['rag.noteRerankBudgetMs', 'rag.contentAssetRerankBudgetMs'],
-      ] as const) {
-        if (Object.hasOwn(values, previous)) {
-          values[next] = values[previous];
-          delete values[previous];
-        }
-      }
-    }
     const drainTimeoutMs = Number(validateValues(values, config)[DRAIN_TIMEOUT_KEY]);
     if (!Number.isSafeInteger(drainTimeoutMs) || drainTimeoutMs < DEFAULT_DRAIN_TIMEOUT_MS
       || drainTimeoutMs > MAX_DRAIN_TIMEOUT_MS) return fail('RELEASE_DRAIN_POLICY_INVALID');

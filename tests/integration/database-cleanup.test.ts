@@ -14,6 +14,11 @@ describe('database cleanup invariants', () => {
   beforeAll(() => migrate(config));
   afterAll(() => pool.end());
 
+  it('starts with the placeholder maintenance schedule disabled', async () => {
+    const { rows } = await pool.query("SELECT enabled FROM public.task_schedules WHERE id='maintenance-check-v1'");
+    expect(rows).toEqual([{ enabled: false }]);
+  });
+
   it('does not retain redundant records or write-only security and scheduler fields', async () => {
     const tables = await pool.query<{ name: string }>(
       `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

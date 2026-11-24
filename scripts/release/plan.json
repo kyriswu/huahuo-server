@@ -1,25 +1,39 @@
 {
   "version": 1,
-  "id": "20261124-content-asset-status",
-  "baseRevision": "4589d94f3b256df972f868f7c67fd17ec74c5070",
-  "services": ["api-server", "admin", "worker", "scheduler"],
+  "id": "20261124-fresh-database-baseline",
+  "baseRevision": "65e03b27afcbd97876db4c08ef01df754b9426dc",
+  "services": [
+    "api-server",
+    "admin",
+    "worker",
+    "scheduler"
+  ],
   "database": {
-    "migrations": ["0026_asset_link_kind.sql", "0027_content_asset_status.sql"],
-    "verifySql": "scripts/release/changes/20261124-content-asset-status/verify-db.sql",
-    "dataChange": {"mode": "separate", "reason": "0026 转换明确标记为链接的旧资产，已发布的 Milvus 分块另行刷新分类元数据。0027 在迁移事务内把旧状态 needs-processing 转换为 draft。发布预检核对待转换资产规模和锁预算，迁移前暂停并排空旧资产写入方，验收通过后只恢复新版写入。"}
+    "bootstrap": "fresh-only",
+    "migrations": [
+      "0001_initial_schema.sql"
+    ],
+    "verifySql": "scripts/release/changes/20261124-fresh-database-baseline/verify-db.sql",
+    "dataChange": {
+      "mode": "inline",
+      "reason": "本次为本机开发和新空库合并 0001 至 0027 的最终结构、权限和初始数据。已有迁移账本不得接续，保留云端数据库及其发布状态。"
+    }
   },
   "configuration": {
-    "mode": "candidate",
-    "changes": [
-      { "key": "SMS_FEISHU_WEBHOOK_URL", "operation": "add", "roles": ["api-server"], "required": true, "hasDefault": false },
-      { "key": "SMS_FEISHU_SIGNING_SECRET", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": true },
-      { "key": "PROCESSING_NODES_ENABLED", "operation": "add", "roles": ["api-server", "admin", "worker", "scheduler"], "required": false, "hasDefault": true }
-    ],
-    "reviewedFiles": [".env.example", ".env.host.example", ".env.host.migrate.example", ".env.compose.cloud.example", ".env.compose.local.example", "compose.yaml", "deploy/local/compose.deps.yaml", "deploy/k8s/config/api.env.example", "deploy/k8s/config/common.env.example", "src/config/config.ts", "src/config/processing-nodes.ts", "src/config/sms.ts"],
-    "verifyFile": "scripts/release/changes/20261124-content-asset-status/verify-config.mjs"
+    "mode": "reuse",
+    "changes": [],
+    "reviewedFiles": []
   },
   "dependencies": [],
-  "backfill": { "required": true, "reference": "docs/runbooks/milvus.md" },
-  "compatibility": { "database": false, "api": true, "tasks": true, "configuration": false },
+  "backfill": {
+    "required": false,
+    "reference": null
+  },
+  "compatibility": {
+    "database": false,
+    "api": true,
+    "tasks": true,
+    "configuration": false
+  },
   "smoke": "health"
 }
