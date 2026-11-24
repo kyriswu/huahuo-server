@@ -1,5 +1,7 @@
 # 花火 Server 标准发布
 
+测试发布入口正在迁移到 ACK。当前 `test` 推送只运行 CI，下文保留发布流程和验收约定。发布恢复条件见[测试服务器发布](test-server-release.md)。
+
 当前测试服务器固定部署 `test` 业务代码；test 合并后的 push CI 成功，以 workflow_run 自动进入受保护 main 中的发布流程。普通 test PR 使用 GitHub 原生 Auto-merge；main 仍由 owner 合并。main/test 同步仍走 PR。正式生产尚未接入，其成功基准为未初始化/null；测试基准保留实际成功版本，不因分支调整重置数据库或已应用迁移。自动化应阻断缺配置、历史冲突及验收失败，不能保证任意业务正确。
 
 团队操作步骤见[团队发布](team-releases.md)。GitHub main/test 分支规则、两个 environment 限制和 production owner 审批已保存并回读。main owner 的 PR-only 例外仅针对新增 update 限制，原 PR、strict CI、禁止删除/强推规则继续生效；没有用真实协作者账号做反向实测。首轮手动发布已真实完成，PR #6/#7 已合并并通过 CI，宿主修复已安装核验，本次 test 更新已完成五阶段发布验收，具体状态见[手动发布验收](../acceptance/manual-release.md)。已有 production environment 配置不代表正式生产已接入。

@@ -1,5 +1,7 @@
 # 团队发布
 
+测试发布入口正在迁移到 ACK。当前 `test` 推送只运行 CI，发布恢复条件见[测试服务器发布](test-server-release.md)。
+
 ## 分支与环境的含义
 
 - `main` 是 Git 分支：当前提供受保护的发布 workflow、调用器、依赖及 Compose 等部署控制文件。下文“从 main 启动 Action”表示执行 main 中的流程，不表示测试业务代码来自 main。
