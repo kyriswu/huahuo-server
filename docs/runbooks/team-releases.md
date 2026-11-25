@@ -40,7 +40,7 @@ main/test 分支规则已保存并通过 API 回读。main 的原规则仍要求
 
 ### 飞书 CI 通知
 
-受保护的 `main` 上的 `Notify Feishu of test CI` 监听本仓库推送到 `test` 的 `Server CI` 终态。成功显示绿色标题，失败显示红色标题。卡片包含分支、短提交 SHA、北京时间起止和耗时、本次变更，以及 GitHub Actions 和关联 PR 的文字链接。失败时优先展示同一次运行尝试中的失败任务、步骤和已知原因，并说明这次 CI 未执行部署。PR 检查、手动 CI 和已取消的运行不发卡片。
+受保护的 `main` 上的 `Notify Feishu of test CI` 监听本仓库推送到 `test` 的 `Server CI` 终态。成功显示绿色标题，失败显示红色标题。卡片副标题显示代码分支，正文列出短提交 SHA、北京时间起止、耗时和部署状态。变更重点用 Markdown 列表展示，最多三项，取关联 PR 的标题和「改动」段落。缺少 PR 时使用提交首行。GitHub Actions 和关联 PR 使用文字链接。失败时优先展示同一次运行尝试中的失败任务、步骤和已知原因。PR 检查、手动 CI 和已取消的运行不发卡片。
 
 将发布通知群机器人的地址配置为仓库 Actions Secret `FEISHU_CI_WEBHOOK_URL`。机器人开启签名时，另配置 `FEISHU_CI_SIGNING_SECRET`。这两个 Secret 专用于 CI 通知，测试验证码使用自己的机器人配置。通知工作流须位于默认分支；地址缺失时，通知日志会记录跳过。
 
