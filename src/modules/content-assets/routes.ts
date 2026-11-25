@@ -7,7 +7,7 @@ import { ErrorSchema, success } from '../../contracts/envelope.js';
 import { Envelope, Id, Text, Strict } from '../identity/schemas.js';
 import { DomainError } from '../identity/store.js';
 import { idempotencyKey } from '../identity/routes.js';
-import { ContentAssetService } from './service.js';
+import { ASSET_TAG_PAGE_SIZE, ContentAssetService } from './service.js';
 import type { StorageService } from '../storage/service.js';
 import { contentAssetImageViews, contentAssetPartImageView } from './content-asset-image-view.js';
 import { EDITABLE_MARKDOWN_BODY_LIMIT, EDITABLE_MARKDOWN_MAX_CHARS } from '../../lib/kb-image-markdown.js';
@@ -61,6 +61,16 @@ export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:Con
  app.post('/api/v1/content-assets/batch-move',{preHandler:guard,schema:{body:Type.Object({folderId:Type.Union([Id,Type.Null()]),contentAssets:Type.Array(Type.Object({contentAssetId:Id,etag:Text(200)},Strict),{minItems:1,maxItems:100})},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const b=req.body as {folderId:string|null;contentAssets:Array<{contentAssetId:string;etag:string}>};return success(await contentAssets.moveContentAssets(scope(req),b.folderId,b.contentAssets,idempotencyKey(req,'required')!),req.id);});
  app.get('/api/v1/content-assets/:contentAssetId/parts/:part',{preHandler:guard,schema:{params:Type.Object({contentAssetId:Id,part:Type.String()},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const p=req.params as {contentAssetId:string;part:string};return success(await contentAssetPartImageView(storage,scope(req),await contentAssets.contentAssetPart(scope(req),p.contentAssetId,p.part)),req.id);});
  app.post('/api/v1/content-assets/search',{preHandler:guard,schema:{body:Type.Object({query:Text(200),mode:Type.Optional(Type.String()),tagIds:Type.Optional(Type.Array(Id,{maxItems:20})),sourceKinds:Type.Optional(Type.Array(Text(32),{maxItems:20})),assetKinds:Type.Optional(AssetKindsSchema),timeField:Type.Optional(Type.Union([Type.Literal('created_at'),Type.Literal('updated_at')])),ownerKinds:Type.Optional(Type.Array(Type.String())),contentAssetParts:Type.Optional(Type.Array(Type.String())),folderIds:Type.Optional(Type.Array(Id)),contentAssetTypeIds:Type.Optional(Type.Array(Id)),from:Type.Optional(Type.String()),to:Type.Optional(Type.String()),limit:Type.Optional(Type.Integer({minimum:1,maximum:30}))},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>success(await contentAssets.search(scope(req),req.body as Parameters<ContentAssetService['search']>[1]),req.id));
+ app.get<{Querystring: {cursor?: string}}>('/api/v1/asset-tags', {
+  preHandler: guard,
+  schema: {
+   querystring: Type.Object({cursor: Type.Optional(Type.String({minLength: 1, maxLength: 24, pattern: '^[^\\u0000]+$'}))}, Strict),
+   response: {200: Envelope(Type.Object({
+    items: Type.Array(Type.Object({tagId: Id, displayName: Type.String(), normalizedName: Type.String()}, Strict), {maxItems: ASSET_TAG_PAGE_SIZE}),
+    nextCursor: Type.Union([Type.String(), Type.Null()]),
+   }, Strict)), ...errors},
+  },
+ }, async req => success(await contentAssets.listAssetTags(scope(req), req.query.cursor), req.id));
  app.get('/api/v1/content-assets/:contentAssetId/tags',{preHandler:guard,schema:{params:contentAssetParams,querystring:empty,response:{200:Envelope(tagView),...errors}}},async (req,reply)=>{reply.header('Cache-Control','no-store');const p=req.params as {contentAssetId:string};return success(await contentAssets.contentAssetTags(scope(req),p.contentAssetId),req.id);});
  app.put('/api/v1/content-assets/:contentAssetId/tags',{preHandler:guard,schema:{params:contentAssetParams,body:Type.Object({tags:Type.Array(Type.Object({name:Text(24)},Strict),{maxItems:20})},Strict),querystring:empty,response:{200:Envelope(tagView),...errors}}},async req=>{const p=req.params as {contentAssetId:string};const b=req.body as {tags:Array<{name:string}>};return success(await contentAssets.replaceContentAssetTags(scope(req),p.contentAssetId,b.tags.map(x=>x.name),String(req.headers['if-match']??''),idempotencyKey(req,'required')!),req.id);});
  app.post('/api/v1/content-assets/:contentAssetId/tags',{preHandler:guard,schema:{params:contentAssetParams,body:Type.Object({name:Text(24)},Strict),querystring:empty,response:{200:Envelope(tagView),...errors}}},async req=>{const p=req.params as {contentAssetId:string};return success(await contentAssets.addContentAssetTag(scope(req),p.contentAssetId,(req.body as {name:string}).name,String(req.headers['if-match']??''),idempotencyKey(req,'required')!),req.id);});

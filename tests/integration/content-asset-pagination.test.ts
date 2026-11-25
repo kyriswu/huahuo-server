@@ -34,6 +34,7 @@ const userIds: string[] = [], contentAssetIds: string[] = [];
 beforeAll(() => migrate(migrationConfig));
 afterAll(async () => {
   try {
+    await root.query('DELETE FROM asset_tags WHERE user_id=ANY($1::uuid[])', [userIds]);
     await root.query('DELETE FROM content_asset_parts WHERE content_asset_id=ANY($1::uuid[])', [contentAssetIds]);
     await root.query('DELETE FROM content_assets WHERE content_asset_id=ANY($1::uuid[])', [contentAssetIds]);
     await root.query('DELETE FROM content_events WHERE user_id=ANY($1::uuid[])', [userIds]);
@@ -343,5 +344,29 @@ it('serves 20 metadata summaries over HTTP while detail retains the complete lat
     const detail = await app.inject({ method: 'GET', url: `${url}/${ids[0]}`, headers });
     expect(detail.statusCode, detail.body).toBe(200);
     expect(detail.json().data.parts.raw.contentMarkdown).toBe(content);
+  } finally { await app.close(); }
+});
+
+it('pages the authenticated account tag dictionary independently of asset membership', async () => {
+  const owner = await fixture(), other = await fixture();
+  const app = await buildApiServer({ config });
+  const url = '/api/v1/asset-tags', headers = fixtureScopeHeaders(owner.bearer);
+  try {
+    expect((await app.inject({ url })).statusCode).toBe(401);
+    expect((await app.inject({ url, headers, query: {userId: other.scope.userId} })).statusCode).toBe(400);
+    expect((await app.inject({ url, headers })).json().data).toEqual({ items: [], nextCursor: null });
+    const names = Array.from({length: 21}, (_, i) => 'tag-' + String(i).padStart(2, '0'));
+    for (const [userId, labels] of [[owner.scope.userId, names], [other.scope.userId, ['tag-00', 'tag-foreign']]] as const) {
+      await root.query(`INSERT INTO asset_tags(tag_id,user_id,normalized_name,display_name,source)
+        SELECT gen_random_uuid(),$1,name,upper(name),'manual' FROM unnest($2::text[]) AS name`, [userId, labels]);
+    }
+    const page = await app.inject({ url, headers });
+    expect(page.statusCode, page.body).toBe(200);
+    expect(page.headers['cache-control']).toBe('no-store');
+    expect(page.json().data.items).toEqual(names.slice(0, 20).map(normalizedName => ({
+      tagId: expect.any(String), normalizedName, displayName: normalizedName.toUpperCase(),
+    })));
+    const last = await app.inject({ url, headers, query: {cursor: page.json().data.nextCursor} });
+    expect(last.json().data).toEqual({items: [{tagId: expect.any(String), normalizedName: 'tag-20', displayName: 'TAG-20'}], nextCursor: null});
   } finally { await app.close(); }
 });

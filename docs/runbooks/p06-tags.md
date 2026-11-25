@@ -6,7 +6,11 @@
 
 ## HTTP 接口
 
+`GET /api/v1/asset-tags` 分页读取当前登录账号的完整标签词表，包括已从所有资产移除但仍保存在账号下的标签。同一标签只返回一次。账号由登录凭据确定。首次请求省略查询参数，后续将上页的 `data.nextCursor` 作为 `cursor` 参数进行 URL 编码后传回。每页最多 20 条，按 `normalizedName` 升序排列。`data.items` 每项含 `tagId`、`displayName`、`normalizedName`。末页的 `nextCursor` 为 `null`，空账号返回空数组。翻页期间新增到游标之前的标签可通过刷新首页读取。
+
 资产列表使用 `GET /api/v1/content-assets`固定每页 20 条，下一页原样传回`nextCursor`，返回null时结束。列表仅返回元信息与最多200字的纯文本`preview`，正文及资源引用通过独立资产详情读取；`preview`可能为空。更新时间降序、ID升序；翻页期间编辑或新增的资产通过刷新首屏读取，无跨请求快照。详情和part接口保持完整正文，见[分页验收](../acceptance/note-pagination.md)。此列表页大小不改变下方图谱预算。
+
+2026-11-24 后端验证：使用临时独立 PostgreSQL 17.9 和 Redis 7.4.8 运行账号词表的 HTTP 集成用例，覆盖未登录、拒绝指定用户、空词表、两个账号使用相同标签名以及 21 条标签跨页读取。因本机 Docker 挂载脚本执行受限，验证时将同一初始化脚本复制进临时容器。CodeGraph CLI 与同级 App 源码在本次工作区不可用，已直接核对 Server 注册入口、会话校验与查询。
 
 基础路径 `/api/v1/content-assets/:contentAssetId`，Bearer 对应的登录账号只能访问自己的资产。所有写请求带 `Idempotency-Key` 或兼容的 `X-Idempotency-Key`；标签改写额外带最新 `If-Match: <tagEtag>`，不可用 contentAssetEtag 替代。
 

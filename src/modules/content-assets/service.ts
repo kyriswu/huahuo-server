@@ -16,6 +16,7 @@ import { syncContentAssetRefs, type ContentAssetResourceRef } from './content-as
 import { EDITABLE_MARKDOWN_MAX_CHARS } from '../../lib/kb-image-markdown.js';
 import { listContentAssetPage } from './content-asset-list.js';
 import type { ResourceClaims } from '../storage/resource-claims.js';
+export const ASSET_TAG_PAGE_SIZE = 20;
 const sha=(v:string)=>createHash('sha256').update(v).digest('hex');
 const normalize=(v:string)=>v.trim().normalize('NFKC').toLocaleLowerCase();
 const etag=(id:string,version:number)=>`"content-asset-${id}-${version}"`;
@@ -188,6 +189,19 @@ export class ContentAssetService {
   });
  }
 
+ async listAssetTags(scope: Scope, cursor?: string) {
+  return transaction(this.pool, async tx => {
+   await assertScope(tx, scope);
+   const { rows } = await tx.query<{tagId: string; displayName: string; normalizedName: string}>(
+    `SELECT tag_id AS "tagId", display_name AS "displayName", normalized_name AS "normalizedName"
+     FROM asset_tags WHERE user_id = $1 AND normalized_name > $2
+     ORDER BY normalized_name LIMIT $3`,
+    [scope.userId, cursor ?? '', ASSET_TAG_PAGE_SIZE + 1],
+   );
+   const items = rows.slice(0, ASSET_TAG_PAGE_SIZE);
+   return { items, nextCursor: rows.length > ASSET_TAG_PAGE_SIZE ? items[ASSET_TAG_PAGE_SIZE - 1]!.normalizedName : null };
+  });
+ }
  async listContentAssets(scope:Scope,cursor?:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return listContentAssetPage(tx,scope.userId,cursor);});}
  async getContentAsset(scope: Scope, id: string, revisionId?: string) {
   return transaction(this.pool, async tx => {
