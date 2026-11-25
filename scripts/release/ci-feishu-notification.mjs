@@ -13,11 +13,48 @@ const chinaTime = new Intl.DateTimeFormat('sv-SE', {
   timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit',
 });
+const changeHeading = /^(?:改动|变更|主要改动|主要变更|本次改动|本次变更|本次变更重点|变更内容|变更摘要|summary|what changed)[：:]?$/iu;
 
 function singleLine(value) {
   if (typeof value !== 'string') return '';
-  const line = value.split(/\r\n|\r|\n/u, 1)[0].replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim();
+  const line = value.split(/\r\n|[\r\n\u2028\u2029]/u, 1)[0].replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim();
   return Array.from(line).slice(0, 160).join('');
+}
+
+function changeHighlights(pr, run) {
+  const title = singleLine(pr?.title) || singleLine(run.head_commit?.message);
+  const points = new Set(title ? [title] : []);
+  const body = typeof pr?.body === 'string' ? pr.body.slice(0, 8192) : '';
+  const lines = body.replace(/<!--[\s\S]*?(?:-->|$)/gu, '').split(/\r\n|\r|\n/u);
+  let sectionLevel = 0;
+  let fence = '';
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const marker = /^(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (marker) {
+      if (!fence) fence = marker[1];
+      else if (marker[1].startsWith(fence) && !marker[2].trim()) fence = '';
+      continue;
+    }
+    if (fence || !line) continue;
+
+    const heading = /^(#{1,6})\s+(.+?)\s*#*$/u.exec(line);
+    if (heading) {
+      if (sectionLevel && heading[1].length <= sectionLevel) break;
+      if (!sectionLevel && changeHeading.test(heading[2])) sectionLevel = heading[1].length;
+      continue;
+    }
+    if (!sectionLevel || /^[<>]/u.test(line) || /^(?: {4}|\t)/u.test(rawLine)) continue;
+    const item = singleLine(line.replace(/^(?:[-+*]|\d+[.)])\s+/u, '').replace(/`([^`]+)`/gu, '$1'));
+    if (item) points.add(item);
+    if (points.size >= 3) break;
+  }
+  return points.size ? [...points] : ['查看提交详情'];
+}
+
+function markdownLiteral(text) {
+  // Feishu interprets both Markdown and its own HTML tags. Render PR text literally.
+  return text.replace(/[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]/gu, character => '&#' + character.charCodeAt(0) + ';');
 }
 
 function describeTime(run) {
@@ -69,20 +106,26 @@ export async function prepareCiNotification(context, read) {
     const phase = [singleLine(failedJob?.name), singleLine(step?.name)].filter(Boolean).join(' / ');
     elements.push(textLine('失败阶段  ' + (phase || '任务详情未返回，请查看 Actions 日志')));
     if (failedJob) elements.push(textLine('失败原因  ' + failureReasons.get(failedJob.conclusion)));
-    elements.push(textLine('环境状态  本次运行未执行部署'));
   }
   const revision = 'test @ ' + run.head_sha.slice(0, 7);
   const attempt = run.run_attempt > 1 ? ' · 第 ' + run.run_attempt + ' 次运行' : '';
-  const change = singleLine(pr?.title) || singleLine(run.head_commit?.message) || '查看提交详情';
+  const highlights = changeHighlights(pr, run).map(point => '- ' + markdownLiteral(point));
   elements.push(
-    textLine('分支与版本  ' + revision + attempt),
-    textLine('时间（北京时间）  ' + describeTime(run)),
-    textLine('本次变更  ' + change),
+    { tag: 'markdown', content: [
+      '**分支与版本** ' + revision + attempt,
+      '**时间（北京时间）** ' + describeTime(run),
+      '**部署状态** 本次未执行部署',
+    ].join('\n\n') },
+    { tag: 'markdown', content: '**本次变更重点**\n\n' + highlights.join('\n') },
     { tag: 'markdown', content: links.join(' · ') },
   );
   return {
     schema: '2.0',
-    header: { template: passed ? 'green' : 'red', title: { tag: 'plain_text', content: passed ? '花火 Server · CI 通过' : '花火 Server · CI 失败' } },
+    header: {
+      template: passed ? 'green' : 'red',
+      title: { tag: 'plain_text', content: passed ? '花火 Server · CI 通过' : '花火 Server · CI 失败' },
+      subtitle: { tag: 'plain_text', content: '环境：测试 · 仅 CI 检查' },
+    },
     body: { elements },
   };
 }

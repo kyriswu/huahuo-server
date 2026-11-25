@@ -20,20 +20,42 @@ function context(conclusion = 'success') {
 }
 
 describe('Feishu notifications for the terminal test push CI run', () => {
-  it('renders a green card with the exact merged PR and trusted text links', async () => {
+  it('renders a green test-environment card with Markdown highlights and trusted text links', async () => {
     const title = '补齐动态纲要模板 <at id=all></at> [外链](https://example.com)';
+    const body = [
+      '## 改动', '', '### 接口和文档', '',
+      '~~~text', '- 围栏里的示意代码', '## 代码内的标题', '~~~', '',
+      '<!--', '- 隐藏说明', '-->',
+      '- 在模板列表说明中补齐纲要场景',
+      '在生成接口补充请求和响应示例。',
+      '- 超过三条后的细节',
+      '## 验证', '- 内部验收步骤',
+    ].join('\n');
     const read = vi.fn(async () => [
       { number: 70, title: '已换版本', merge_commit_sha: 'b'.repeat(40), merged_at: '2026-11-24', base: { ref: 'test' } },
-      { number: 71, title, merge_commit_sha: sha, merged_at: '2026-11-24', base: { ref: 'test', repo: { full_name: repository } } },
+      { number: 71, title, body, merge_commit_sha: sha, merged_at: '2026-11-24', base: { ref: 'test', repo: { full_name: repository } } },
     ]);
     const card = await prepareCiNotification(context(), read);
     expect(read.mock.calls).toEqual([[`/commits/${sha}/pulls?per_page=100`]]);
-    expect(card.header).toMatchObject({ template: 'green', title: { content: '花火 Server · CI 通过' } });
+    expect(card.header).toMatchObject({
+      template: 'green', title: { content: '花火 Server · CI 通过' },
+      subtitle: { tag: 'plain_text', content: '环境：测试 · 仅 CI 检查' },
+    });
     expect(card.body.elements).toEqual(expect.arrayContaining([
-      { tag: 'div', text: { tag: 'plain_text', content: `本次变更  ${title}` } },
-      expect.objectContaining({ text: expect.objectContaining({ content: expect.stringContaining('2026-11-24 18:14:06') }) }),
-      expect.objectContaining({ text: expect.objectContaining({ content: expect.stringContaining('2 分 6 秒') }) }),
+      { tag: 'markdown', content: expect.stringContaining('**分支与版本** test @ a69cfcc') },
+      { tag: 'markdown', content: expect.stringContaining('2026-11-24 18:14:06') },
+      { tag: 'markdown', content: expect.stringContaining('2 分 6 秒') },
+      { tag: 'markdown', content: expect.stringContaining('**部署状态** 本次未执行部署') },
     ]));
+    const highlights = card.body.elements.find((element: { content?: string }) => element.content?.startsWith('**本次变更重点**')).content;
+    expect(highlights.split('\n').filter((line: string) => line.startsWith('- '))).toEqual([
+      expect.stringContaining('补齐动态纲要模板 &#60;at'),
+      '- 在模板列表说明中补齐纲要场景',
+      '- 在生成接口补充请求和响应示例。',
+    ]);
+    expect(highlights).not.toContain('<at');
+    expect(highlights).not.toContain('](https://');
+    expect(highlights).not.toMatch(/围栏|隐藏说明|内部验收步骤|超过三条/u);
     expect(card.body.elements.at(-1)).toEqual({ tag: 'markdown', content:
       `[查看 Actions](https://github.com/${repository}/actions/runs/17/attempts/2) · [查看 PR #71](https://github.com/${repository}/pull/71)` });
     expect(card.body.elements.some((element: { tag: string }) => element.tag === 'button')).toBe(false);
@@ -49,11 +71,14 @@ describe('Feishu notifications for the terminal test push CI run', () => {
     });
     const card = await prepareCiNotification(context('failure'), read);
     expect(read).toHaveBeenCalledWith('/actions/runs/17/attempts/2/jobs?per_page=100');
-    expect(card.header).toMatchObject({ template: 'red', title: { content: '花火 Server · CI 失败' } });
+    expect(card.header).toMatchObject({
+      template: 'red', title: { content: '花火 Server · CI 失败' },
+      subtitle: { content: '环境：测试 · 仅 CI 检查' },
+    });
     expect(card.body.elements[0].text.content).toContain('Server code checks / Lint');
     expect(card.body.elements[1].text.content).toContain('检查未通过');
-    expect(card.body.elements[2].text.content).toContain('未执行部署');
-    expect(card.body.elements).toContainEqual({ tag: 'div', text: { tag: 'plain_text', content: '本次变更  补齐动态纲要模板列表契约' } });
+    expect(card.body.elements).toContainEqual({ tag: 'markdown', content: expect.stringContaining('**部署状态** 本次未执行部署') });
+    expect(card.body.elements).toContainEqual({ tag: 'markdown', content: '**本次变更重点**\n\n- 补齐动态纲要模板列表契约' });
     expect(card.body.elements.at(-1)).toEqual({ tag: 'markdown', content:
       `[查看失败任务](https://github.com/${repository}/actions/runs/17/job/31)` });
   });
