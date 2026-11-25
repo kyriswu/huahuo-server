@@ -1,0 +1,38 @@
+name: Notify Feishu of test CI
+
+on:
+  workflow_run:
+    workflows: [Server CI]
+    branches: [test]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  notify:
+    if: >-
+      github.repository == 'kyriswu/huahuo-server' && github.ref == 'refs/heads/main' &&
+      github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'test' &&
+      github.event.workflow_run.head_repository.full_name == 'kyriswu/huahuo-server' &&
+      (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # github.sha belongs to the default-branch workflow, never the triggering test push.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.11.0'
+          package-manager-cache: false
+      - name: Send result to Feishu
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FEISHU_CI_WEBHOOK_URL: ${{ secrets.FEISHU_CI_WEBHOOK_URL }}
+          FEISHU_CI_SIGNING_SECRET: ${{ secrets.FEISHU_CI_SIGNING_SECRET }}
+        run: node scripts/release/ci-feishu-notification.mjs

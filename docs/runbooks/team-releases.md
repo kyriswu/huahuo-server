@@ -38,6 +38,14 @@ main/test 分支规则已保存并通过 API 回读。main 的原规则仍要求
 3. 核对合并提交的 push CI 和 `release:review` 输出。兼容项存在 `false` 的候选应先完成发布前置条件。
 4. 按[测试服务器发布](test-server-release.md)完成 ACK 切换与验收。CI 结果和发布结果分别记录。
 
+### 飞书 CI 通知
+
+受保护的 `main` 上的 `Notify Feishu of test CI` 监听本仓库推送到 `test` 的 `Server CI` 终态。成功显示绿色标题，失败显示红色标题。卡片包含分支、短提交 SHA、北京时间起止和耗时、本次变更，以及 GitHub Actions 和关联 PR 的文字链接。失败时优先展示同一次运行尝试中的失败任务、步骤和已知原因，并说明这次 CI 未执行部署。PR 检查、手动 CI 和已取消的运行不发卡片。
+
+将发布通知群机器人的地址配置为仓库 Actions Secret `FEISHU_CI_WEBHOOK_URL`。机器人开启签名时，另配置 `FEISHU_CI_SIGNING_SECRET`。这两个 Secret 专用于 CI 通知，测试验证码使用自己的机器人配置。通知工作流须位于默认分支；地址缺失时，通知日志会记录跳过。
+
+飞书接受消息后，独立的通知工作流记录 `FEISHU_CI_NOTIFICATION_ACCEPTED`。HTTP 或飞书业务错误记录在通知工作流，CI 原结果独立保留。发送超时且投递结果未知时，先检查群内是否已收到卡片，再决定是否重新运行通知。 [飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot?lang=zh-CN)
+
 ## main 的自动准备与生产门禁
 
 owner 合入 main 后，main push CI 成功自动触发 `Main release readiness`。只复核准确 CI/main SHA 并生成 plan id、角色、迁移数量和配置键摘要，不输出真实配置值。生产尚未接入：基准仍未初始化，不取得生产身份、执行生产迁移或更新容器。

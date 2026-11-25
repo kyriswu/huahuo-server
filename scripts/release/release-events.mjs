@@ -2,14 +2,19 @@ import { readFile } from 'node:fs/promises';
 export const REPOSITORY = 'kyriswu/huahuo-server';
 export const CI_PATH = '.github/workflows/release-smoke-check.yml';
 export const isSha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
-export function verifyCiTrigger(context, branch) {
+export function verifyCompletedCiTrigger(context, branch) {
   const run = context.trigger;
   if (!['main', 'test'].includes(branch) || context.repository !== REPOSITORY || context.eventName !== 'workflow_run'
     || context.ref !== 'refs/heads/main' || !isSha(context.controlSha) || !Number.isSafeInteger(run?.id) || run.id < 1
     || run.path !== CI_PATH || run.event !== 'push' || run.head_branch !== branch || run.status !== 'completed'
-    || run.conclusion !== 'success' || run.head_repository?.full_name !== REPOSITORY || !isSha(run.head_sha)) {
+    || run.head_repository?.full_name !== REPOSITORY || !isSha(run.head_sha)) {
     throw Error('RELEASE_CI_EVENT_NOT_VERIFIED');
   }
+  return run;
+}
+export function verifyCiTrigger(context, branch) {
+  const run = verifyCompletedCiTrigger(context, branch);
+  if (run.conclusion !== 'success') throw Error('RELEASE_CI_EVENT_NOT_VERIFIED');
   return run;
 }
 export async function readReleaseEventContext(env = process.env) {
