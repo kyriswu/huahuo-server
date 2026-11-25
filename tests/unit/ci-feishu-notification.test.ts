@@ -20,7 +20,7 @@ function context(conclusion = 'success') {
 }
 
 describe('Feishu notifications for the terminal test push CI run', () => {
-  it('renders a green test-environment card with Markdown highlights and trusted text links', async () => {
+  it('renders a green card with the test branch, Markdown highlights and trusted text links', async () => {
     const title = '补齐动态纲要模板 <at id=all></at> [外链](https://example.com)';
     const body = [
       '## 改动', '', '### 接口和文档', '',
@@ -39,10 +39,10 @@ describe('Feishu notifications for the terminal test push CI run', () => {
     expect(read.mock.calls).toEqual([[`/commits/${sha}/pulls?per_page=100`]]);
     expect(card.header).toMatchObject({
       template: 'green', title: { content: '花火 Server · CI 通过' },
-      subtitle: { tag: 'plain_text', content: '环境：测试 · 仅 CI 检查' },
+      subtitle: { tag: 'plain_text', content: '分支：test' },
     });
     expect(card.body.elements).toEqual(expect.arrayContaining([
-      { tag: 'markdown', content: expect.stringContaining('**分支与版本** test @ a69cfcc') },
+      { tag: 'markdown', content: expect.stringContaining('**提交** a69cfcc · 第 2 次运行') },
       { tag: 'markdown', content: expect.stringContaining('2026-11-24 18:14:06') },
       { tag: 'markdown', content: expect.stringContaining('2 分 6 秒') },
       { tag: 'markdown', content: expect.stringContaining('**部署状态** 本次未执行部署') },
@@ -73,7 +73,7 @@ describe('Feishu notifications for the terminal test push CI run', () => {
     expect(read).toHaveBeenCalledWith('/actions/runs/17/attempts/2/jobs?per_page=100');
     expect(card.header).toMatchObject({
       template: 'red', title: { content: '花火 Server · CI 失败' },
-      subtitle: { content: '环境：测试 · 仅 CI 检查' },
+      subtitle: { content: '分支：test' },
     });
     expect(card.body.elements[0].text.content).toContain('Server code checks / Lint');
     expect(card.body.elements[1].text.content).toContain('检查未通过');

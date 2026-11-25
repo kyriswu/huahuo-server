@@ -107,12 +107,12 @@ export async function prepareCiNotification(context, read) {
     elements.push(textLine('失败阶段  ' + (phase || '任务详情未返回，请查看 Actions 日志')));
     if (failedJob) elements.push(textLine('失败原因  ' + failureReasons.get(failedJob.conclusion)));
   }
-  const revision = 'test @ ' + run.head_sha.slice(0, 7);
+  const revision = run.head_sha.slice(0, 7);
   const attempt = run.run_attempt > 1 ? ' · 第 ' + run.run_attempt + ' 次运行' : '';
   const highlights = changeHighlights(pr, run).map(point => '- ' + markdownLiteral(point));
   elements.push(
     { tag: 'markdown', content: [
-      '**分支与版本** ' + revision + attempt,
+      '**提交** ' + revision + attempt,
       '**时间（北京时间）** ' + describeTime(run),
       '**部署状态** 本次未执行部署',
     ].join('\n\n') },
@@ -124,7 +124,7 @@ export async function prepareCiNotification(context, read) {
     header: {
       template: passed ? 'green' : 'red',
       title: { tag: 'plain_text', content: passed ? '花火 Server · CI 通过' : '花火 Server · CI 失败' },
-      subtitle: { tag: 'plain_text', content: '环境：测试 · 仅 CI 检查' },
+      subtitle: { tag: 'plain_text', content: '分支：' + run.head_branch },
     },
     body: { elements },
   };
