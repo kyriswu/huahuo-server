@@ -1,3 +1,7 @@
+## FunASR 算力适配器（2026-11-25，本地候选）
+
+新适配器可选 ACS 单卡竞速或固定 GPU HTTP 端点。ACS 编排使用 Kubernetes 替身测试，HTTPS 控制传输使用真实本机 TLS。此前通过 Node01 的单 A10 试跑独立保留为镜像和模型就绪证据。本轮开发尚无真实 ACS 多卡竞速或 Worker 到 Pod 的运行证据。 [适配器验收范围](runbooks/funasr-compute.md#验收范围)
+
 ## 禁用标签时跳过自动任务（2026-11-18，本地候选）
 
 运行配置明确 disabled 时，保存/编辑不创建自动标签任务；显式请求返回 `TAG_PROVIDER_UNAVAILABLE`。启用后的原任务路径和 Provider 能力保持现状，未接入新模型、Dify 或计费调用；既有任务不批量删除/回填。见[写入优化](acceptance/pg-row-growth-optimization-20261118.md)，实际环境尚未应用。

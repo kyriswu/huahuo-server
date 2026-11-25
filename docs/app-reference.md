@@ -1,3 +1,7 @@
+## FunASR 算力适配器只读核对（2026-11-25）
+
+核对 App 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`，工作区干净。`lib/core/platform/inspiration_media.dart` 的 `InspirationDictation` 仍直接调用系统 `SpeechToText`，该文件 SHA-256 为 `64d38aef5ffa11b41ea0bdf1a217ff908a31e3791ad546c731f9aecd28f2b252`。本轮底层算力改动尚无 App 调用入口，现有公开 HTTP 契约继续适用。
+
 ## 播放链接字节数契约核对（2026-11-19）
 
 只读核对 App 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`，工作区干净。共享上传客户端 `lib/core/uploads/upload_service.dart` 的 `UploadedResource._parse` 从上传完成响应的 `data.resource` 读取正整数 `sizeBytes`，`_finish` 与本地文件大小核对。该文件 SHA-256 为 `9bf8313e16ace50c736dc55f5e070ac3222fec33595c714af74e15f8c29dd704`。本次在 Server 的播放链接响应中使用相同的字段名和单位，当前 App 的 `lib` 和 `test` 未发现该播放地址的调用。验收范围为 Server 本地 HTTP 契约。
