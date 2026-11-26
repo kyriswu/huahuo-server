@@ -29,27 +29,51 @@ describe('FunASR compute configuration', () => {
     })).toEqual({ provider: 'fixed', baseUrl: 'http://funasr.internal:8000' });
   });
 
-  it('uses a pinned image and eight default GPU and zone combinations', () => {
+  it('accepts a single Server callback origin for ACS', () => {
+    const config = loadFunAsrComputeConfig({
+      ...acsEnvironment,
+      FUNASR_COMPUTE_CALLBACK_ORIGIN: 'https://server.internal:8443/',
+    });
+    expect(config).toMatchObject({ options: {
+      callbackOrigin: 'https://server.internal:8443',
+      image: expect.stringMatching(/@sha256:58492f5445e18d102718de536b110b12fbc03278e94a41bc55e73f75d4349cbf$/),
+    } });
+    expect(loadFunAsrComputeConfig(acsEnvironment)).not.toHaveProperty('options.callbackOrigin');
+  });
+
+  it('uses a pinned image and eight default GPU, zone and QoS combinations', () => {
     const config = loadFunAsrComputeConfig(acsEnvironment);
     expect(config).toMatchObject({
       provider: 'acs',
       connection: { apiUrl: 'https://kube.example.test:6443', caFile: '/run/kube/ca.crt', tokenFile: '/run/kube/token' },
       options: {
         namespace: 'funasr',
+        batchSize: 3,
         image: expect.stringMatching(/@sha256:cbdfcf5ec862a4857d9852a22ba7fa805292170a060cbefde6c4a837443f9d2c$/),
         podCidrs: ['172.16.0.0/16', '10.2.0.0/24'],
         candidates: [
           { model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open' },
+          { model: 'G28Ti', zone: 'cn-beijing-h', driver: '580.95.05-open', qos: 'best-effort' },
           { model: 'G49E', zone: 'cn-beijing-l', driver: '580.95.05-open' },
+          { model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open', qos: 'best-effort' },
+          { model: 'G28Ti', zone: 'cn-beijing-i', driver: '580.95.05-open' },
+          { model: 'G59', zone: 'cn-beijing-l', driver: '580.95.05-open' },
           { model: 'L20', zone: 'cn-beijing-l', driver: '580.95.05-open' },
           { model: 'L20N', zone: 'cn-beijing-i', driver: '580.95.05-open' },
-          { model: 'G59', zone: 'cn-beijing-l', driver: '580.95.05-open' },
-          { model: 'L20NE', zone: 'cn-beijing-l', driver: '580.126.09-open' },
-          { model: 'G28Ti', zone: 'cn-beijing-h', driver: '580.95.05-open' },
-          { model: 'G28Ti', zone: 'cn-beijing-i', driver: '580.95.05-open' },
         ],
       },
     });
+  });
+
+  it('accepts both QoS classes for the same GPU and rejects equivalent or invalid tiers', () => {
+    const ordinary = { model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open' };
+    const bestEffort = { ...ordinary, qos: 'best-effort' };
+    const configure = (candidates: unknown[]) => loadFunAsrComputeConfig({
+      ...acsEnvironment, FUNASR_COMPUTE_CANDIDATES_JSON: JSON.stringify(candidates),
+    });
+    expect(configure([ordinary, bestEffort])).toMatchObject({ options: { candidates: [ordinary, bestEffort] } });
+    expect(() => configure([ordinary, { ...ordinary, qos: 'default' }])).toThrow('INVALID_CONFIG:FUNASR_COMPUTE_CANDIDATES_JSON');
+    expect(() => configure([{ ...ordinary, qos: 'spot' }])).toThrow('INVALID_CONFIG:FUNASR_COMPUTE_CANDIDATES_JSON');
   });
 
   it('accepts certificate paths and validates configured candidate identities', () => {
@@ -58,10 +82,11 @@ describe('FunASR compute configuration', () => {
       FUNASR_COMPUTE_KUBE_TOKEN_FILE: undefined,
       FUNASR_COMPUTE_KUBE_CLIENT_CERTIFICATE_FILE: '/run/kube/client.crt',
       FUNASR_COMPUTE_KUBE_CLIENT_KEY_FILE: '/run/kube/client.key',
+      FUNASR_COMPUTE_BATCH_SIZE: '1',
       FUNASR_COMPUTE_CANDIDATES_JSON: JSON.stringify([{ model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open' }]),
     })).toMatchObject({
       connection: { clientCertificateFile: '/run/kube/client.crt', clientKeyFile: '/run/kube/client.key' },
-      options: { candidates: [{ model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open' }] },
+      options: { batchSize: 1, candidates: [{ model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open' }] },
     });
   });
 
@@ -107,9 +132,16 @@ describe('FunASR compute configuration', () => {
     ['FUNASR_COMPUTE_POD_CIDRS', '169.254.169.254/32'],
     ['FUNASR_COMPUTE_KUBE_API_URL', 'http://kube.example.test:6443'],
     ['FUNASR_COMPUTE_KUBE_API_URL', 'https://user:secret@kube.example.test/'],
+    ['FUNASR_COMPUTE_CALLBACK_ORIGIN', 'https://server.internal/callback'],
+    ['FUNASR_COMPUTE_CALLBACK_ORIGIN', 'http://server.internal:0'],
+    ['FUNASR_COMPUTE_CALLBACK_ORIGIN', 'https://user:secret@server.internal'],
+    ['FUNASR_COMPUTE_CALLBACK_ORIGIN', 'http://server.internal,other.internal'],
+    ['FUNASR_COMPUTE_CALLBACK_ORIGIN', 'http://$(API_TOKEN).internal'],
     ['FUNASR_COMPUTE_IMAGE', 'registry.example.test/team/funasr:latest'],
     ['FUNASR_COMPUTE_CANDIDATES_JSON', '[]'],
     ['FUNASR_COMPUTE_CANDIDATES_JSON', '[{"model":"a/b","zone":"cn-beijing-i","driver":"580.95.05-open"}]'],
+    ['FUNASR_COMPUTE_BATCH_SIZE', '0'],
+    ['FUNASR_COMPUTE_BATCH_SIZE', '9'],
     ['FUNASR_COMPUTE_LIFETIME_SECONDS', '600'],
   ])('rejects invalid %s without reporting the supplied value', (key, value) => {
     expect(() => loadFunAsrComputeConfig({ ...acsEnvironment, [key]: value })).toThrow(

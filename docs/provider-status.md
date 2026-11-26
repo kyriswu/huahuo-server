@@ -4,7 +4,9 @@ JustOneAPI 适配器依据公开接口文档开发并以替身验证。付费、
 
 ## FunASR 算力适配器（2026-11-25，本地候选）
 
-新适配器可选 ACS 单卡竞速或固定 GPU HTTP 端点。ACS 编排使用 Kubernetes 替身测试，HTTPS 控制传输使用真实本机 TLS。此前通过 Node01 的单 A10 试跑独立保留为镜像和模型就绪证据。本轮开发尚无真实 ACS 多卡竞速或 Worker 到 Pod 的运行证据。 [适配器验收范围](runbooks/funasr-compute.md#验收范围)
+算力可选 ACS 单卡分批申请或固定 GPU HTTP 端点。Node01 使用此前的 `gpu-standard` 发布提交首批三个 ACS Job，由 A10 胜出，验证私网直连、GPU 转写、查询、ACK 和清理。P07 的 Server 队列、签名回调和查询兜底已用隔离 PG、Redis 和 FunASR HTTP 替身验证，真实跨集群业务回调仍待验证。 [Node01 实机验收](runbooks/funasr-compute.md#node01-实机验证2026-11-25)
+
+2026-11-26 调整默认三批候选，首批加入北京 H 区 G28Ti `best-effort`，第二批加入北京 I 区 A10 `best-effort`，L20NE 可在自定义列表中使用。当前批次的实际库存仍待云端验证。 [默认候选配置](runbooks/funasr-compute.md#配置)
 
 ## 禁用标签时跳过自动任务（2026-11-18，本地候选）
 

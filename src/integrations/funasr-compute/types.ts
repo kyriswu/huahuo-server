@@ -6,7 +6,7 @@ export type FunAsrComputeRelease = 'released' | 'releasing';
 export interface FunAsrCompute {
   /** Use one persisted allocation ID per activation attempt. */
   start(allocationId: string, signal?: AbortSignal): Promise<void>;
-  /** Make a bounded observation. Poll again while starting or releasing. */
+  /** Check readiness and advance to the next eligible batch. Poll while starting or releasing. */
   status(allocationId: string, signal?: AbortSignal): Promise<FunAsrComputeStatus>;
   /** Request release. Repeat with the same ID while cleanup is in progress. */
   release(allocationId: string, signal?: AbortSignal): Promise<FunAsrComputeRelease>;
@@ -16,6 +16,7 @@ export interface AcsGpuCandidate {
   model: string;
   zone: string;
   driver: string;
+  qos?: 'default' | 'best-effort';
   resources?: { cpu: number; memoryGiB: number };
 }
 
@@ -26,8 +27,10 @@ export interface AcsFunAsrOptions {
   image: string;
   apiSecretName: string;
   imagePullSecretName: string;
+  callbackOrigin?: string;
   podCidrs: readonly string[];
   candidates: readonly AcsGpuCandidate[];
+  batchSize: number;
   startupTimeoutSeconds: number;
   lifetimeSeconds: number;
 }

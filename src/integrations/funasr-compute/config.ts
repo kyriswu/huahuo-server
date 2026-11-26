@@ -9,17 +9,18 @@ export type FunAsrComputeConfig =
   | { provider: 'fixed'; baseUrl: string }
   | { provider: 'acs'; connection: KubernetesConnection; options: AcsFunAsrOptions };
 
-const DEFAULT_IMAGE =
-  'huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com/huahuo/huahuo-funasr@sha256:cbdfcf5ec862a4857d9852a22ba7fa805292170a060cbefde6c4a837443f9d2c';
+const IMAGE_REPOSITORY = 'huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com/huahuo/huahuo-funasr';
+const DEFAULT_IMAGE = IMAGE_REPOSITORY + '@sha256:cbdfcf5ec862a4857d9852a22ba7fa805292170a060cbefde6c4a837443f9d2c';
+const DEFAULT_CALLBACK_IMAGE = IMAGE_REPOSITORY + '@sha256:58492f5445e18d102718de536b110b12fbc03278e94a41bc55e73f75d4349cbf';
 const DEFAULT_CANDIDATES = [
   { model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open' },
+  { model: 'G28Ti', zone: 'cn-beijing-h', driver: '580.95.05-open', qos: 'best-effort' },
   { model: 'G49E', zone: 'cn-beijing-l', driver: '580.95.05-open' },
+  { model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open', qos: 'best-effort' },
+  { model: 'G28Ti', zone: 'cn-beijing-i', driver: '580.95.05-open' },
+  { model: 'G59', zone: 'cn-beijing-l', driver: '580.95.05-open' },
   { model: 'L20', zone: 'cn-beijing-l', driver: '580.95.05-open' },
   { model: 'L20N', zone: 'cn-beijing-i', driver: '580.95.05-open' },
-  { model: 'G59', zone: 'cn-beijing-l', driver: '580.95.05-open' },
-  { model: 'L20NE', zone: 'cn-beijing-l', driver: '580.126.09-open' },
-  { model: 'G28Ti', zone: 'cn-beijing-h', driver: '580.95.05-open' },
-  { model: 'G28Ti', zone: 'cn-beijing-i', driver: '580.95.05-open' },
 ] as const;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const LABEL_VALUE = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$/u;
@@ -40,6 +41,15 @@ function readOrigin(raw: string, key: string, httpsOnly = false): string {
 function secretName(value: string, key: string): string {
   if (value.length > 253 || !value.split('.').every(label => DNS_LABEL.test(label))) invalid(key);
   return value;
+}
+
+export function readCallbackOrigin(raw: string, key: string): string {
+  const origin = readOrigin(raw, key);
+  const { hostname, port } = new URL(origin);
+  if (port === '0' || (!hostname.startsWith('[') && !hostname.split('.').every(label => DNS_LABEL.test(label)))) {
+    invalid(key);
+  }
+  return origin;
 }
 
 function isPrivateCidr(cidr: string): boolean {
@@ -74,17 +84,18 @@ function readCandidates(raw: string | undefined): AcsFunAsrOptions['candidates']
   const seen = new Set<string>();
   return (items as unknown[]).map(item => {
     if (item === null || typeof item !== 'object' || Array.isArray(item)) invalid(key);
-    const { model, zone, driver, resources: hostResources, ...extra } = item as Record<string, unknown>;
+    const { model, zone, driver, qos, resources: hostResources, ...extra } = item as Record<string, unknown>;
     if (Object.keys(extra).length > 0 ||
       typeof model !== 'string' || !LABEL_VALUE.test(model) ||
       typeof zone !== 'string' || !DNS_LABEL.test(zone) ||
-      typeof driver !== 'string' || !LABEL_VALUE.test(driver)) invalid(key);
+      typeof driver !== 'string' || !LABEL_VALUE.test(driver) ||
+      (qos !== undefined && qos !== 'default' && qos !== 'best-effort')) invalid(key);
     const resources = hostResources === undefined ? undefined : readCandidateResources(hostResources, key);
     const { cpu, memoryGiB } = resources ?? defaultAcsGpuHostResources;
-    const identity = `${model}:${zone}:${cpu}:${memoryGiB}`;
+    const identity = `${model}:${zone}:${cpu}:${memoryGiB}:${qos ?? 'default'}`;
     if (seen.has(identity)) invalid(key);
     seen.add(identity);
-    return resources ? { model, zone, driver, resources } : { model, zone, driver };
+    return { model, zone, driver, ...(qos === undefined ? {} : { qos }), ...(resources ? { resources } : {}) };
   });
 }
 
@@ -119,8 +130,10 @@ export function loadFunAsrComputeConfig(env: Environment = process.env): FunAsrC
   const namespaceKey = 'FUNASR_COMPUTE_NAMESPACE';
   const namespace = required(namespaceKey);
   if (!DNS_LABEL.test(namespace)) invalid(namespaceKey);
+  const callbackOriginKey = 'FUNASR_COMPUTE_CALLBACK_ORIGIN';
+  const callbackOrigin = optional(callbackOriginKey);
   const imageKey = 'FUNASR_COMPUTE_IMAGE';
-  const image = optional(imageKey) ?? DEFAULT_IMAGE;
+  const image = optional(imageKey) ?? (callbackOrigin ? DEFAULT_CALLBACK_IMAGE : DEFAULT_IMAGE);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$/u.test(image)) invalid(imageKey);
   const apiSecretKey = 'FUNASR_COMPUTE_API_SECRET_NAME';
   const imagePullSecretKey = 'FUNASR_COMPUTE_IMAGE_PULL_SECRET_NAME';
@@ -143,8 +156,10 @@ export function loadFunAsrComputeConfig(env: Environment = process.env): FunAsrC
       image,
       apiSecretName: secretName(required(apiSecretKey), apiSecretKey),
       imagePullSecretName: secretName(required(imagePullSecretKey), imagePullSecretKey),
+      ...(callbackOrigin ? { callbackOrigin: readCallbackOrigin(callbackOrigin, callbackOriginKey) } : {}),
       podCidrs,
       candidates: readCandidates(optional('FUNASR_COMPUTE_CANDIDATES_JSON')),
+      batchSize: integer('FUNASR_COMPUTE_BATCH_SIZE', 3, 1, 8),
       startupTimeoutSeconds,
       lifetimeSeconds,
     },

@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { transaction, assertScope, audit, DomainError, type Scope } from '../identity/store.js';
 import { idempotent } from '../../lib/idempotency.js';
 import type { AdminScope } from '../admin/service.js';
-import { type TaskRow, event, enqueueIntent, newTaskMaxAttempts, taskDto, terminal, accountAssetTaskKinds } from './model.js';
+import { type TaskRow, event, enqueueIntent, newTaskMaxAttempts, taskDto, terminal, accountAssetTaskKinds, isFunAsrTask } from './model.js';
+import { wakeExternalTaskTx } from './external-continuation.js';
 import type { BillingService } from '../billing/service.js';
 import { finalizeUnsuccessfulTaskTx } from './reservations.js';
 import {resolveTraceId} from '../../lib/trace.js';
@@ -57,10 +58,13 @@ export class TaskService {
   } else {
    if(terminal(t.state))return;
    const managedWaiting=t.state==='waiting_external'&&['rag.document-ingest','text.ingest'].includes(t.kind);
-   const next=t.external_state!=='none'||t.state==='running'||managedWaiting?'cancel_requested':'cancelled';
+   const managedAsr=isFunAsrTask(t);
+   if(managedAsr&&t.cancel_requested_at)return;
+   const next=t.external_state!=='none'||t.state==='running'||managedWaiting||managedAsr?'cancel_requested':'cancelled';
    if(next==='cancelled'){await finalizeUnsuccessfulTaskTx(tx,t,{state:'cancelled'});return;}
    await tx.query('UPDATE tasks SET state=$2,cancel_requested_at=now(),version=version+1,retryable=false WHERE id=$1',[t.id,next]);
    if(managedWaiting){await tx.query('UPDATE tasks SET available_at=now() WHERE id=$1',[t.id]);await enqueueIntent(tx,t.id);}
+   if(managedAsr&&await wakeExternalTaskTx(tx,t))return;
   }
   await event(tx,t.id);
  }

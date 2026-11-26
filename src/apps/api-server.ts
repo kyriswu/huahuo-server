@@ -30,6 +30,9 @@ import { registerAiTemplateRoutes } from '../modules/ai-templates/routes.js';
 import { AiTemplateRuns } from '../modules/ai-templates/runs.js';
 import { BearerCache } from '../modules/identity/bearer-cache.js';
 import { PgEvents } from '../lib/pg-events.js';
+import { FunAsrStore, transcriptionQueue } from '../modules/funasr/store.js';
+import { registerFunAsrTranscripts } from '../modules/funasr/transcript-routes.js';
+import { FunAsrTranscripts } from '../modules/funasr/transcript.js';
 export async function buildApiServer(options: BuildOptions & IdentityOptions & { linkExtractor?: LinkExtractor; ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
@@ -76,9 +79,14 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
   resolveImages: (scope,images)=>imageLinks.resolve(scope,images),
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
- registerInternalRoutes(app,{identity,callbacks,ragQuery,settings});
+ const funAsr=options.config.funAsr?.role==='api-server'?options.config.funAsr:undefined;
+ const assets=new ContentAssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims,
+  funAsr ? transcriptionQueue(funAsr.taskCredits,billing) : undefined);
+ registerInternalRoutes(app,{identity,callbacks,ragQuery,settings,
+  ...(funAsr ? { funAsr: { store: new FunAsrStore(pool,assets), secret: funAsr.callbackSecret } } : {})});
  registerAiTemplateRoutes(app, new AiTemplateRuns(pool), new AiTemplateAgentClient(options.config.agentBaseUrl));
- registerContentAssetRoutes(app,new ContentAssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService,options.linkExtractor);
+ registerContentAssetRoutes(app,assets,storageService,options.linkExtractor);
+ registerFunAsrTranscripts(app,new FunAsrTranscripts(pool,options.config.appTokenSecret!));
  registerRagRoutes(app,new RagIngestionRepository(pool,options.config,resourceClaims),storageService.storage,ragQuery);
  registerTaskRoutes(app,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
 }

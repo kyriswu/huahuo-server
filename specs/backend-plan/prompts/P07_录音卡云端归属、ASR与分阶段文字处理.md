@@ -7,7 +7,7 @@
 ## 本阶段固定部署与 App 参照
 
 - App只读参考仓库：**`../huahuo-ai`（本机源码；尚无远端）**。本机后端根为 `huahuo-server`，App位于同级 `../huahuo-ai` 且只读；禁止把服务写进App、复制Flutter作为运行依赖或擅自修改UI。
-- 同一根目录Compose：`api-server`、`worker`、`admin`、`scheduler`独立容器；`postgres`（可切云）、`redis`、一次性`migrate`。本阶段涉及：api-server设备/回调/状态；worker ASR与后处理；scheduler轮询任务投递。
+- 同一根目录Compose：`api-server`、`worker`、`admin`、`scheduler`独立容器；`postgres`（可切云）、`redis`、一次性`migrate`。本阶段涉及 api-server 的设备、回调与状态接口，Worker 的 ASR 与后处理，以及 Scheduler 的任务投递与到期补偿。
 - 先按 `07_App代码持续参照与契约核对.md` 核对本阶段：录音卡云端归属、recording/ASR、speaker、transcript及分阶段重试。路径/符号从当前checkout发现，不猜它们一定在旧目录；记录实际commit和本地改动。
 - 实施前保存App基线；过程中每个客户端端点均能追到请求与响应解析；结束更新 `docs/app-reference.md` 和契约测试。不能等P15才第一次对照App。
 - 读取不到源码时写UNVERIFIED_APP和受影响API，继续可独立开发部分，不声称兼容、不借此重做前端。
@@ -36,8 +36,8 @@
 
 1. Device/DeviceBinding/上传来源建立归属校验。设备claim需要可信proof/平台确认；SN本身不足以证明所有权。具体硬件证明协议未知时记录blocking，不开放任意SN抢绑定。
 2. 记录device file identity、手机resource、recording、ASR job、transcript revision、note间映射；设备上报电量/状态标observedAt，不将云缓存说成实时值。云端解绑不假称手机已擦除卡内文件。
-3. AsrProvider的submit/status/cancel（实际支持时）、规范化回调或轮询。Dify ASR与独立ASR二选实际配置，不重复给同音频转写。API密钥、region、model版本在适配层。
-4. 内容验证后创建ASR任务和额度预留，持久providerJobId。长任务采用提交+轮询/回调的阶段，不让API长连接等整个ASR；未知提交结果优先核查。
+3. ASR 统一走回调优先。每次提交都带受信配置生成的回调地址，成功和失败都由回调交付。只有回调等待期限已过且本地仍没有终态时，Scheduler 才投递有限次数的查询兜底。Dify ASR 与独立 ASR 二选其一，密钥、区域、模型版本由适配层管理。
+4. 内容验证后创建 ASR 任务和额度预留，提交前持久化能关联早到回调的本地提交标识，收到响应后记录 `providerJobId` 和所属实例。任务尚无终态时进入 `waiting_external`，释放 Worker。未知提交结果先核查。回调验签后与兜底查询共用幂等写入路径。转写正文和资产 `contentStatus=ready` 在同一事务保存，事务成功后再向提供方确认消费。
 5. 转写按segment存text、start/end、speakerLabel与来源revision。说话人聚类不等于实名/本人；提供用户确认接口及后续数字孪生可用片段范围。
 6. 原始转写、摘要/纲要、深度洞察分别状态、分别重试。转写成功先可读，不因摘要失败重做ASR。修改转写保留版本并让依赖结果待更新。
 7. 批量任务是子任务组合，有已完成跳过、partial、逐文件错误；通知在P13接入，当前PG任务状态先可靠可查。
@@ -47,7 +47,8 @@
 
 - 已到手机、已上传、ASR运行、文本可读、摘要失败各自准确。
 - 重复音频提交在明确scope策略下去重，不暴露别人相同文件存在性。
-- 重复/乱序回调、杀worker、ASR超时结果未知、用量迟到、批量部分失败均不重复收费。
+- 正常回调到达时，对提供方的状态和结果查询均为 0。回调缺失时，等待期限到达才查询。验证早到、重复、乱序或与兜底并发的回调只落一次结果。
+- Worker 重启、ASR 超时结果未知、用量迟到及批量部分失败时均不重复收费。
 - 本人确认变更后候选来源失效能被数字孪生检查。
 - 使用合法测试音频和供应商sandbox需授权；无供应商仅模拟语料，状态登记。
 

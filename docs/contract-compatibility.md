@@ -385,7 +385,7 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 | API | Server 当前行为 |
 |---|---|
 | `GET/POST /content-assets` | 分页读取资产元信息，或创建含 raw、outline、germination 的资产，返回 `contentAssetId`。 |
-| `GET/PATCH/DELETE /content-assets/{contentAssetId}` | 资产详情、编辑与删除。返回 `contentAssetRevisionId`、`etag`、`resourceRefs` 和 `sourceRef`。整篇读取可校验 `revisionId`。 |
+| `GET/PATCH/DELETE /content-assets/{contentAssetId}` | 资产详情、编辑与删除。返回 `contentAssetRevisionId`、`etag`、`resourceRefs` 和 `sourceRef`。`GET` 另外统一返回主内容状态及 `content`，可校验 `revisionId`。 |
 | `GET/PUT /content-assets/{contentAssetId}/parts/{part}` | 读取或更新当前正文部分，读取返回 `contentMarkdown`、`partRevisionId`、`contentSha256`。 |
 | `POST /content-asset-imports` | 将纯文本或 Markdown 写为资产，可引用已有原文件。 |
 | `POST /content-assets/batch-move` | 修改账号下资产的文件夹位置，逐项返回结果。 |
@@ -399,6 +399,8 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 `GET /api/v1/content-assets` 可传单值查询参数 `assetKind`，省略时查询全部类型。每页（包括空页）的 `data.assetKinds` 均返回完整枚举 `["audio","image","file","creative","link"]`。翻页须保持相同筛选条件，切换类型时省略游标重新查询；旧的无筛选游标继续适用。非法类型或游标与筛选条件不匹配返回 400。
 
 资产列表在 `data.items[]` 的每项返回 `contentStatus`，资产详情在 `data` 返回。该字段由服务端维护，取值为 `draft`、`processing`、`ready`、`failed`。前端可结合 `assetKind` 和 `contentStatus` 选择对应的内容和状态展示。 [资产内容状态](content-assets.md#资产内容状态)
+
+启用自动转写时，`POST /api/v1/content-assets` 创建带唯一原始音频的无正文资产后，列表及详情从 `processing` 推进到 `ready` 或 `failed`。沿用原有创建响应、状态枚举和音频播放接口。转写任务沿用现有账号级 Task 接口，类型为 `content-asset.transcribe`。Apifox 已更新并回读已有创建、列表和详情的描述。 [创建](https://app.apifox.com/project/8965877/apis/api-539018651) · [列表](https://app.apifox.com/project/8965877/apis/api-539018656) · [详情](https://app.apifox.com/project/8965877/apis/api-539018659)
 
 有效标签由 `content_asset_tags` 维护，自动提取由 `content-asset.tag-extract` 执行。标签写入使用标签自己的 ETag。 [标签与图谱](runbooks/p06-tags.md)
 

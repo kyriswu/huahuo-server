@@ -246,9 +246,13 @@ it('returns the persisted asset kind and content status in both list and detail 
     for (const [index, item] of cases.entries()) {
       const detail = await app.inject({ url: `${url}/${ids[index]}`, headers });
       expect(detail.statusCode, detail.body).toBe(200);
-      expect(detail.json().data).toMatchObject({
+      const data = detail.json().data;
+      expect(data).toMatchObject({
         contentAssetId: ids[index], assetKind: item.assetKind, sourceKind: item.sourceKind, contentStatus: item.contentStatus,
       });
+      if (item.contentStatus === 'processing' || item.contentStatus === 'failed') expect(data.content).toBeNull();
+      if (item.assetKind === 'creative') expect(data.content).toEqual({ text: '', format: 'markdown', resources: [] });
+      if (item.assetKind === 'image') expect(data.content).toMatchObject({ sourceUrl: item.sourceId, resources: [] });
       const tags = await app.inject({ url: `${url}/${ids[index]}/tags`, headers });
       expect(tags.statusCode, tags.body).toBe(200);
       expect(tags.json().data.processingStatus).toBe(item.contentStatus === 'ready' ? 'ready' : 'needs-processing');
@@ -260,32 +264,42 @@ it('persists link creation and returns ready content status for saved text and i
   const f = await fixture(), app = await buildApiServer({ config });
   const url = '/api/v1/content-assets', headers = fixtureScopeHeaders(f.bearer);
   const writes = [
+    { title: 'Saved work', assetKind: 'creative', sourceKind: 'manual', expectedKind: 'creative' },
     { title: 'Explicit link', assetKind: 'link', sourceKind: 'manual', expectedKind: 'link' },
     { title: 'Legacy link', sourceKind: 'link', expectedKind: 'link' },
     { title: 'Link-sourced image', assetKind: 'image', sourceKind: 'link', expectedKind: 'image' },
   ];
-  const assertSaved = async (id: string, assetKind: string) => {
+  const assertSaved = async (id: string, assetKind: string, content: Record<string, unknown>) => {
     contentAssetIds.push(id);
     expect((await root.query('SELECT asset_kind FROM content_assets WHERE content_asset_id=$1', [id])).rows)
       .toEqual([{ asset_kind: assetKind }]);
     const detail = await app.inject({ url: `${url}/${id}`, headers });
     expect(detail.statusCode, detail.body).toBe(200);
-    expect(detail.json().data).toMatchObject({ contentAssetId: id, assetKind, contentStatus: 'ready' });
+    expect(detail.json().data).toMatchObject({ contentAssetId: id, assetKind, contentStatus: 'ready', content });
+    return detail.json().data;
   };
   try {
     for (const { expectedKind, ...input } of writes) {
+      const sourceId = 'https://example.invalid/source';
       const result = await app.inject({ method: 'POST', url, headers: { ...headers, 'x-idempotency-key': randomUUID() },
-        payload: { ...input, sourceId: 'https://example.invalid/source', parts: { raw: 'Asset body' } } });
+        payload: { ...input, sourceId, parts: { raw: 'Asset body' } } });
       expect(result.statusCode, result.body).toBe(200);
-      await assertSaved(result.json().data.contentAssetId, expectedKind);
+      await assertSaved(result.json().data.contentAssetId, expectedKind, {
+        text: 'Asset body', format: 'markdown', resources: [], ...(expectedKind === 'creative' ? {} : { sourceUrl: sourceId }),
+      });
     }
+    const unsafeLink = await app.inject({ method: 'POST', url, headers: { ...headers, 'x-idempotency-key': randomUUID() },
+      payload: { title: 'Legacy source', assetKind: 'link', sourceId: 'javascript:alert(1)', parts: { raw: 'Already saved' } } });
+    expect(unsafeLink.statusCode, unsafeLink.body).toBe(200);
+    const unsafeDetail = await assertSaved(unsafeLink.json().data.contentAssetId, 'link', { text: 'Already saved', format: 'markdown' });
+    expect(unsafeDetail.content.sourceUrl ?? null).toBeNull();
     const sourceUrl = 'https://example.invalid/original.pdf';
     const result = await app.inject({ method: 'POST', url: '/api/v1/content-asset-imports',
       headers: { ...headers, 'x-idempotency-key': randomUUID() },
       payload: { title: 'Imported document', mimeType: 'text/markdown', content: '# Document', sourceUrl } });
     expect(result.statusCode, result.body).toBe(200);
     const imported = result.json().data;
-    await assertSaved(imported.contentAsset.contentAssetId, 'file');
+    await assertSaved(imported.contentAsset.contentAssetId, 'file', { text: '# Document', format: 'markdown', sourceUrl, resources: [] });
     expect(imported).toMatchObject({ status: 'ready', contentAsset: { sourceRef: { kind: 'import', id: sourceUrl } } });
   } finally { await app.close(); }
 });

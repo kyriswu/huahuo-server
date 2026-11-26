@@ -287,9 +287,14 @@ describe('canonical ContentAsset images with real isolated PostgreSQL and mocked
       expect(saved.statusCode, saved.body).toBe(200);
       const ready = await api.inject({ method: 'GET', url: path, headers });
       expect(ready.statusCode, ready.body).toBe(200);
-      expect(ready.json().data).toMatchObject({
+      const detail = ready.json().data;
+      expect(detail).toMatchObject({
         contentStatus: 'ready', parts: { raw: { contentMarkdown: transcript } }, resourceRefs: [attachment],
+        content: { text: transcript, format: 'markdown', resources: [
+          { resourceId, mimeType, usage: 'original', url: expect.any(String), expiresAt: expect.any(String) },
+        ] },
       });
+      expect(new URL(detail.content.resources[0].url).searchParams.has('x-oss-signature')).toBe(true);
 
       const playbackPath = `/api/v1/media/resources/${resourceId}/playback`;
       const playback = await api.inject({ method: 'GET', url: playbackPath, headers });
@@ -326,7 +331,9 @@ describe('canonical ContentAsset images with real isolated PostgreSQL and mocked
     try {
       const response = await api.inject({ method: 'GET', url: path, headers });
       expect(response.statusCode, response.body).toBe(200);
-      const view = response.json().data.parts.raw.contentMarkdown as string, originalUrl = inputImages(view)[0]!.url;
+      const detail = response.json().data;
+      const view = detail.parts.raw.contentMarkdown as string, originalUrl = inputImages(view)[0]!.url;
+      expect(detail.content).toEqual({ text: view, format: 'markdown', resources: [] });
       const expiredUrl = new URL(originalUrl);
       expect(expiredUrl.hostname).toBe('fixture-assets.oss-cn-beijing.aliyuncs.com');
       expiredUrl.searchParams.set('x-oss-date', '20000101T000000Z');
