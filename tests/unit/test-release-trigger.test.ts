@@ -73,6 +73,13 @@ describe('native test deployment intent (read-only API fixtures)', () => {
     const files = ['scripts/release/deployment-policy.py', 'tests/unit/deployment-policy.test.ts', 'src/release/plan.ts', 'tests/unit/release-plan.test.ts'].map(filename => ({ filename }));
     await expect(testReleaseIntent(context(), fixture(files).read)).resolves.toEqual({ deploy: false, reason: 'no-application-change' });
   });
+  it('treats ACK deployment files as control code and checks both sides of a rename', async () => {
+    const filename = 'deploy/k8s/verify-from-ecs.sh';
+    await expect(testReleaseIntent(context(), fixture([{ filename }]).read))
+      .resolves.toEqual({ deploy: false, reason: 'no-application-change' });
+    await expect(testReleaseIntent(context(), fixture([{ filename, previous_filename: 'src/business.ts' }]).read))
+      .rejects.toThrow('TEST_RELEASE_PLAN_UPDATE_REQUIRED');
+  });
   it('treats impact reporting files as CI-only and still requires a plan for mixed application changes', async () => {
     const files = ['.github/workflows/release-smoke-check.yml', '.github/release-impact/package.json',
       '.github/release-impact/pnpm-lock.yaml', '.github/release-impact/report.mjs'].map(filename => ({ filename }));

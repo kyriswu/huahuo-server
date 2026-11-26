@@ -1,0 +1,110 @@
+name: Test server release
+
+# Exercise the ACK release with manual dispatch before enabling the test CI trigger.
+# All runner-side control code and dependencies come from main, never test.
+# This does not replace the authenticated release-smoke workflow.
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Server CI]
+    types: [completed]
+    branches: [test]
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+# Non-secret repository variables; the caller and OIDC checks enforce fixed targets.
+env:
+  TEST_ACK_BUILDER_INSTANCE_ID: ${{ vars.TEST_ACK_BUILDER_INSTANCE_ID }}
+  TEST_ACK_RELEASE_COMMAND_ID: ${{ vars.TEST_ACK_RELEASE_COMMAND_ID }}
+  GITHUB_OIDC_PROVIDER_ARN: acs:ram::1472289886746775:oidc-provider/github-actions
+
+concurrency:
+  group: huahuo-test-server-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test ACK server deployment acceptance
+    if: >-
+      github.repository == 'kyriswu/huahuo-server' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_run' && vars.TEST_ACK_AUTO_RELEASE == 'true' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'test' &&
+        github.event.workflow_run.head_repository.full_name == 'kyriswu/huahuo-server'))
+    environment: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify trusted main control revision
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.11.0'
+          package-manager-cache: false
+      - name: Verify successful test CI and release intent
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release/test-release-trigger.mjs
+      - name: Confirm the public test API before deploying
+        if: steps.candidate.outputs.deploy == 'true'
+        run: |
+          curl -fsS --max-time 8 https://test-api.huahuoai.net/health/ready |
+            jq -e '.success == true and .data.service == "api-server" and .data.status == "ready"' >/dev/null
+      - name: Install locked caller dependencies
+        if: steps.candidate.outputs.deploy == 'true'
+        run: |
+          npm install --global pnpm@10.15.1
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify the ACK release target and OIDC claims
+        if: steps.candidate.outputs.deploy == 'true'
+        run: |
+          node --input-type=module <<'NODE'
+          import { verifyTestReleaseOidcClaims } from './scripts/release/test-release-source.mjs';
+          try {
+            if (process.env.TEST_ACK_BUILDER_INSTANCE_ID !== 'i-2zeaydxol26pp3dxg1ak' ||
+              !/^c-[A-Za-z0-9]{5,80}$/.test(process.env.TEST_ACK_RELEASE_COMMAND_ID ?? '')) throw new Error();
+            const url = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+            url.searchParams.set('audience', 'sts.aliyuncs.com');
+            const response = await fetch(url, { headers: { authorization: 'Bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }, signal: AbortSignal.timeout(10000), redirect: 'error' });
+            if (!response.ok) throw new Error();
+            const token = (await response.json()).value;
+            if (typeof token !== 'string' || token.length > 20000 || token.split('.').length !== 3) throw new Error();
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+            verifyTestReleaseOidcClaims(claims, process.env.GITHUB_SHA, process.env.GITHUB_EVENT_NAME);
+            console.log('Dedicated test environment and main OIDC claims verified.');
+          } catch {
+            console.error('::error::TEST_RELEASE_OIDC_NOT_VERIFIED');
+            process.exit(1);
+          }
+          NODE
+      - name: Obtain temporary test-server credentials
+        if: steps.candidate.outputs.deploy == 'true'
+        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
+        with:
+          oidc-provider-arn: ${{ env.GITHUB_OIDC_PROVIDER_ARN }}
+          role-to-assume: acs:ram::1472289886746775:role/github-actions-release
+          audience: sts.aliyuncs.com
+          role-session-expiration: 5400
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Build on Node01 and release the digest to test ACK
+        if: steps.candidate.outputs.deploy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release/test-release-source.mjs
+          node deploy/k8s/invoke-ack-release.mjs
+      - name: Confirm the public test API after deploying
+        if: steps.candidate.outputs.deploy == 'true'
+        run: |
+          curl -fsS --max-time 8 https://test-api.huahuoai.net/health/ready |
+            jq -e '.success == true and .data.service == "api-server" and .data.status == "ready"' >/dev/null
