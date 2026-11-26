@@ -206,7 +206,7 @@ export class ContentAssetService {
    return { items, nextCursor: rows.length > ASSET_TAG_PAGE_SIZE ? items[ASSET_TAG_PAGE_SIZE - 1]!.normalizedName : null };
   });
  }
- async listContentAssets(scope:Scope,cursor?:string){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return listContentAssetPage(tx,scope.userId,cursor);});}
+ async listContentAssets(scope:Scope,cursor?:string,assetKind?:AssetKind){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return listContentAssetPage(tx,scope.userId,cursor,assetKind);});}
  async getContentAsset(scope: Scope, id: string, revisionId?: string) {
   return transaction(this.pool, async tx => {
    await assertScope(tx, scope);

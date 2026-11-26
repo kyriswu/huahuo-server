@@ -103,11 +103,46 @@ it('returns 45 active contentAssets as 20, 20 and 5 without duplicates or missin
 
 it('returns no next cursor for an empty page or exactly 20 contentAssets', async () => {
   const f = await fixture();
-  expect(await contentAssets.listContentAssets(f.scope)).toEqual({ items: [], nextCursor: null });
+  expect(await contentAssets.listContentAssets(f.scope)).toEqual({ assetKinds, items: [], nextCursor: null });
   await seed(f, 20);
   const page = await contentAssets.listContentAssets(f.scope);
   expect(page.items).toHaveLength(20);
   expect(page.nextCursor).toBeNull();
+});
+
+it('filters before pagination, returns every kind and binds cursors to the filter', async () => {
+  const f = await fixture(), ids = await seed(f, 43);
+  const images = ids.filter((_, i) => i % 2 === 0);
+  await root.query("UPDATE content_assets SET asset_kind='image' WHERE content_asset_id=ANY($1::uuid[])", [images]);
+  // UPDATE touches updated_at, so read the final ordering from the fixture.
+  const expected = (await root.query<{content_asset_id: string}>(
+    "SELECT content_asset_id FROM content_assets WHERE user_id=$1 AND asset_kind='image' ORDER BY updated_at DESC,content_asset_id",
+    [f.scope.userId],
+  )).rows.map(row => row.content_asset_id);
+  const app = await buildApiServer({config});
+  const get = (query: Record<string, string>) => app.inject({url: '/api/v1/content-assets', headers: fixtureScopeHeaders(f.bearer), query});
+  try {
+    const first = await get({assetKind: 'image'});
+    expect(first.statusCode, first.body).toBe(200);
+    const page = first.json().data;
+    expect(page.assetKinds).toEqual(assetKinds);
+    expect(page.items.map((item: {contentAssetId: string}) => item.contentAssetId)).toEqual(expected.slice(0, 20));
+    const last = (await get({assetKind: 'image', cursor: page.nextCursor})).json().data;
+    expect(last.items.map((item: {contentAssetId: string}) => item.contentAssetId)).toEqual(expected.slice(20));
+    expect(last.nextCursor).toBeNull();
+    expect((await get({assetKind: 'audio'})).json().data).toEqual({assetKinds, items: [], nextCursor: null});
+    const all = (await get({})).json().data;
+    expect(all.assetKinds).toEqual(assetKinds);
+    const invalidQueries: Record<string, string>[] = [
+      {cursor: page.nextCursor}, {cursor: page.nextCursor, assetKind: 'file'}, {cursor: all.nextCursor, assetKind: 'image'},
+    ];
+    for (const query of invalidQueries) {
+      const invalid = await get(query);
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.body).toContain('CONTENT_ASSET_CURSOR_INVALID');
+    }
+    expect((await get({assetKind: 'unknown'})).statusCode).toBe(400);
+  } finally { await app.close(); }
 });
 
 it('uses contentAsset ID to continue across equal update timestamps', async () => {
