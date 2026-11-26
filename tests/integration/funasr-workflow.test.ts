@@ -189,7 +189,7 @@ async function workflow(early: boolean, longRecording = false) {
   const assetPath = `/api/v1/content-assets/${contentAssetId}`;
   const processing = await api.inject({ method: 'GET', url: assetPath, headers });
   expect(processing.statusCode, processing.body).toBe(200);
-  expect(processing.json().data).toMatchObject({ contentStatus: 'processing' });
+  expect(processing.json().data).toMatchObject({ assetKind: 'audio', contentStatus: 'processing', content: null });
   const tasks = await root.query<{ id: string }>('SELECT id FROM tasks WHERE user_id=$1 AND kind=$2', [userId, funAsrTaskKind]);
   expect(tasks.rows).toHaveLength(1);
   const taskId = tasks.rows[0]!.id;
@@ -217,7 +217,11 @@ async function workflow(early: boolean, longRecording = false) {
     const detail = await api.inject({ method: 'GET', url: assetPath, headers });
     expect(detail.statusCode, detail.body).toBe(200);
     expect(detail.json().data).toMatchObject({
-      contentStatus: 'ready', parts: { raw: { contentMarkdown: funasr.originalText } }, resourceRefs: [{ resourceId, usage: 'original' }],
+      assetKind: 'audio', contentStatus: 'ready', parts: { raw: { contentMarkdown: funasr.originalText } }, resourceRefs: [{ resourceId, usage: 'original' }],
+      content: {
+        text: expect.any(String), format: 'text', resources: [{ resourceId, mimeType: 'audio/wav', usage: 'original' }],
+        transcription: { transcriptionId: taskId, contentRevision: expect.any(String), durationMs: expect.any(Number), language: 'zh' },
+      },
     });
     expect((await root.query('SELECT id FROM task_results WHERE task_id=$1', [taskId])).rows).toHaveLength(1);
     return detail.json().data.parts.raw.partRevisionId as string;
@@ -324,6 +328,12 @@ describe('callback-first FunASR with isolated PostgreSQL, Redis and a loopback p
     const fullText = await api.inject({ method: 'GET', url: `${transcriptionPath}/text`, headers });
     expect(fullText.statusCode, fullText.body).toBe(200);
     expect(fullText.json().data).toEqual({ transcriptionId: taskId, contentRevision: '1', text: editedText });
+    const assetDetail = await api.inject({ method: 'GET', url: assetPath, headers });
+    expect(assetDetail.statusCode, assetDetail.body).toBe(200);
+    expect(assetDetail.json().data).toMatchObject({
+      contentStatus: 'ready', parts: { raw: { contentMarkdown: scenario.funasr.originalText } },
+      content: { text: editedText, format: 'text', transcription: { transcriptionId: taskId, contentRevision: '1', durationMs: 4523, language: 'zh' } },
+    });
 
     const otherUserId = await insertFixtureUser(root);
     const otherHeaders = fixtureScopeHeaders(await insertFixtureSession(root, otherUserId));

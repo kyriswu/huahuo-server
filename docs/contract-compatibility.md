@@ -381,7 +381,7 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 | API | Server 当前行为 |
 |---|---|
 | `GET/POST /content-assets` | 分页读取资产元信息，或创建含 raw、outline、germination 的资产，返回 `contentAssetId`。 |
-| `GET/PATCH/DELETE /content-assets/{contentAssetId}` | 资产详情、编辑与删除。返回 `contentAssetRevisionId`、`etag`、`resourceRefs` 和 `sourceRef`。整篇读取可校验 `revisionId`。 |
+| `GET/PATCH/DELETE /content-assets/{contentAssetId}` | 资产详情、编辑与删除。返回 `contentAssetRevisionId`、`etag`、`resourceRefs` 和 `sourceRef`。`GET` 另外统一返回主内容状态及 `content`，可校验 `revisionId`。 |
 | `GET/PUT /content-assets/{contentAssetId}/parts/{part}` | 读取或更新当前正文部分，读取返回 `contentMarkdown`、`partRevisionId`、`contentSha256`。 |
 | `POST /content-asset-imports` | 将纯文本或 Markdown 写为资产，可引用已有原文件。 |
 | `POST /content-assets/batch-move` | 修改账号下资产的文件夹位置，逐项返回结果。 |

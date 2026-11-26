@@ -16,6 +16,7 @@ import { syncContentAssetRefs, type ContentAssetResourceRef } from './content-as
 import { EDITABLE_MARKDOWN_MAX_CHARS } from '../../lib/kb-image-markdown.js';
 import { listContentAssetPage } from './content-asset-list.js';
 import type { ResourceClaims } from '../storage/resource-claims.js';
+import { findAudioTranscript, readAudioTranscriptText } from '../funasr/transcript-data.js';
 const sha=(v:string)=>createHash('sha256').update(v).digest('hex');
 const normalize=(v:string)=>v.trim().normalize('NFKC').toLocaleLowerCase();
 const etag=(id:string,version:number)=>`"content-asset-${id}-${version}"`;
@@ -126,7 +127,7 @@ export class ContentAssetService {
    'SELECT part,part_revision_id,content_markdown,content_sha256 FROM content_asset_parts WHERE content_asset_id=$1', [contentAssetId],
   );
   const currentParts = new Map(savedParts.rows.map(part => [part.part, part]));
-  const refs = await tx.query(
+  const refs = await tx.query<{resource_id:string;sha256:string|null;mime_type:string;ref_order:number;usage:string;anchor:string|null;alt:string|null}>(
    `SELECT r.resource_id,r.sha256,r.mime_type,ref.ref_order,ref.usage,ref.anchor,ref.alt
     FROM content_asset_resource_refs ref JOIN resources r ON r.resource_id=ref.resource_id AND r.user_id=$2
     WHERE ref.content_asset_id=$1 ORDER BY ref.ref_order`, [contentAssetId, scope.userId],
@@ -214,10 +215,15 @@ export class ContentAssetService {
    if (revisionId && (contentAsset.content_asset_revision_id !== revisionId || contentAsset.state !== 'active')) {
     throw new DomainError(409, 'CONTENT_ASSET_REVISION_MISMATCH');
    }
+   const resourceId = contentAsset.state === 'active' && contentAsset.asset_kind === 'audio' && contentAsset.processing_status === 'ready'
+    ? await originalAudioResource(tx, scope.userId, id) : undefined;
+   const ref = resourceId ? await findAudioTranscript(tx, id, scope.userId, resourceId, false) : undefined;
+   const audioTranscript = ref ? { transcriptionId: ref.transcriptionId, ...await readAudioTranscriptText(tx, ref) } : undefined;
    return {
     ...await this.contentAssetDto(tx, scope, id, contentAsset),
     assetKind: contentAsset.asset_kind,
     contentStatus: contentAsset.processing_status,
+    audioTranscript,
    };
   });
  }

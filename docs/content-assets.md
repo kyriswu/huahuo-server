@@ -17,11 +17,25 @@
 - 通用上传完成后交付可供业务认领的 `resourceId`。资产可引用录音、PDF 或其他原文件。 [上传与资源](runbooks/user-storage-layout.md)
 - `/api/v1/rag/ingestions` 和 `/api/v1/text-ingestions` 当前分别保存独立的文件解析记录和文本导入记录，用于各自的状态与检索。形成可管理的资产时，由业务调用资产写入入口。 [文件入库](runbooks/rag-url-ingestion.md) · [文本入库](runbooks/text-ingestion.md)
 
+## 统一资产详情
+
+列表返回 `assetKind`、`contentStatus` 和短预览。打开资产时，`GET /api/v1/content-assets/{contentAssetId}` 在一次响应里返回最新 `contentStatus` 和 `content`。素材处理中返回 `200` 和 `content: null`，完成后重新读取同一路径即可取得内容。处理失败也沿用详情的 `200` 响应和 `failed` 状态。
+
+| `assetKind` | `content` 数据 |
+| --- | --- |
+| `creative` | `text` 为已保存的 Markdown。空白草稿返回空字符串，可直接进入编辑。 |
+| `audio` | `text` 为校对后的完整转写，`format` 为 `text`，`transcription` 提供转写 ID、内容版本、时长和语言。已有手写正文的音频也可返回 Markdown。 |
+| `file` | 已保存的 Markdown 正文及可用原件引用。 |
+| `link` | `sourceUrl` 为有效的 HTTP(S) 链接，并可附带已保存的正文。 |
+| `image` | 已保存的说明以及关联图片资源，也可返回外部图片的来源地址。 |
+
+`content.resources` 包含可用于展示的已关联资源。支持直读的存储返回签名 `url` 和 `expiresAt`，其余情况用 `resourceId` 标识资源。内嵌图片继续在 Markdown 中渲染。原有的 `parts`、`sourceRef` 和 `resourceRefs` 字段继续支持资产编辑和既有客户端。
+
 ## 原始音频附件
 
 音视频导入或录音上传完成后，取完成响应中的 `data.resource.resourceId`。创建音频资产时传 `assetKind: "audio"` 和 `resourceRefs: [{ resourceId, usage: "original" }]`。服务端在创建事务中认领文件，把附件及用途写入已有的 `content_asset_resource_refs`，并登记资源引用。资源元数据保存在 `resources`。 [资产路由](../src/modules/content-assets/routes.ts) · [引用写入](../src/modules/content-assets/content-asset-images.ts)
 
-`parts.raw` 存纯文本或 Markdown 正文。音频的现有工作流在这个字段保留转写完成时的兼容文本。音频页面通过转写接口取得当前全文。播放器从 `data.resourceRefs` 取 `usage` 为 `original` 的音频资源 ID，再调用 `GET /api/v1/media/resources/{resourceId}/playback` 读取 `data.url`。 [播放接口](../src/modules/storage/routes.ts)
+`parts.raw` 存纯文本或 Markdown 正文。音频的现有工作流在这个字段保留转写完成时的兼容文本。音频页面从统一详情的 `data.content.text` 取得当前全文，且可直接使用 `data.content.resources` 中可用的播放地址。原有播放接口可按 `resourceId` 刷新签名。 [播放接口](../src/modules/storage/routes.ts)
 
 ## 录音转写详情与单段保存
 
