@@ -394,6 +394,8 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 
 资产列表在 `data.items[]` 的每项返回 `contentStatus`，资产详情在 `data` 返回。该字段由服务端维护，取值为 `draft`、`processing`、`ready`、`failed`。前端可结合 `assetKind` 和 `contentStatus` 选择对应的内容和状态展示。 [资产内容状态](content-assets.md#资产内容状态)
 
+启用自动转写时，`POST /api/v1/content-assets` 创建带唯一原始音频的无正文资产后，列表及详情从 `processing` 推进到 `ready` 或 `failed`。沿用原有创建响应、状态枚举和音频播放接口。转写任务沿用现有账号级 Task 接口，类型为 `content-asset.transcribe`。Apifox 已更新并回读已有创建、列表和详情的描述。 [创建](https://app.apifox.com/project/8965877/apis/api-539018651) · [列表](https://app.apifox.com/project/8965877/apis/api-539018656) · [详情](https://app.apifox.com/project/8965877/apis/api-539018659)
+
 有效标签由 `content_asset_tags` 维护，自动提取由 `content-asset.tag-extract` 执行。标签写入使用标签自己的 ETag。 [标签与图谱](runbooks/p06-tags.md)
 
 App 只读依据见 [App 源码参照](app-reference.md)。Server 中的搜索路由是当前技术实现。 [搜索业务边界](runbooks/search-status.md)

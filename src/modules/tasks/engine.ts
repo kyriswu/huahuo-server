@@ -3,11 +3,11 @@ import type pg from 'pg';
 import type { StorageJobs } from '../storage/jobs.js';
 import { randomUUID } from 'node:crypto';
 import { transaction } from '../identity/store.js';
-import { type TaskRow, hash, event, enqueueIntent, retryDelay,parserRequestId } from './model.js';
+import { type TaskRow, hash, event, enqueueIntent, retryDelay,parserRequestId,funAsrTaskKind,isFunAsrTask } from './model.js';
 import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 import type {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
 import { UnavailableTagExtractor, extractBoundedTags, validateTagLabels, type TagExtractor } from '../content-assets/tag-extractor.js';
-import type { Attempt, TaskExecutor, TaskStepOutcome } from './execution.js';
+import type { Attempt, ExternalTaskExecutor, TaskExecutor, TaskStepOutcome } from './execution.js';
 import type { ContentAssetIndexJobs } from '../ingestion/jobs.js';
 import { withApplicationMetrics, type TaskMetrics, type TaskResult } from '../../plugins/metrics.js';
 import { finalizeTaskTx, lockOwnedAttemptTx } from './lifecycle.js';
@@ -26,17 +26,22 @@ export class TaskEngine {
   readonly textIngestion?: TextIngestionJobs,
   readonly nodeJobs?: ProcessingNodeJobs,
   readonly metrics?: TaskMetrics,
+  readonly asr?: ExternalTaskExecutor,
  ){}
  private transaction<T>(operation:(tx:pg.PoolClient)=>Promise<T>){return withApplicationMetrics(this.metrics,()=>transaction(this.pool,operation));}
  private recordAttempt(kind:string,result:TaskResult){try{this.metrics?.recordTaskAttempt(kind,result);}catch{/* Diagnostics cannot replace a committed attempt result. */}}
  async claim(id:string,owner:string):Promise<Attempt|null>{return this.transaction(async tx=>{
-  const r=await tx.query<TaskRow>(`SELECT * FROM tasks WHERE id=$1 AND available_at<=now() AND (
+  const r=await tx.query<TaskRow>(`SELECT * FROM tasks WHERE id=$1 AND available_at<=now()
+   AND (kind<>$2 OR ($3::boolean AND external_reference='funasr:'||id::text)) AND (
    (state IN ('queued','retry_scheduled') AND external_state='none') OR
    (state IN ('waiting_external','reconciling','cancel_requested') AND (lease_until IS NULL OR lease_until<now()) AND (
     (kind IN ('rag.document-ingest','text.ingest') AND (external_reference LIKE 'xberg-bound:%' OR external_reference LIKE 'xberg-job:%' OR external_reference LIKE 'xberg-cancelling:%')) OR
-    (kind='processing.node-start' AND external_reference LIKE 'node-start:%')))
-  ) FOR UPDATE`,[id]);const t=r.rows[0];if(!t)return null;
-  const continuation=Boolean(parserRequestId((t as TaskRow&{external_reference:string}).external_reference))||t.kind==='processing.node-start'&&t.attempt_no>0;
+    (kind='processing.node-start' AND external_reference LIKE 'node-start:%') OR
+    kind=$2))
+  ) FOR UPDATE`,[id,funAsrTaskKind,Boolean(this.asr)]);const t=r.rows[0];if(!t)return null;
+  const continuation=Boolean(parserRequestId(t.external_reference))||
+   t.kind==='processing.node-start'&&t.attempt_no>0||
+   isFunAsrTask(t)&&t.attempt_no>0&&['waiting_external','reconciling','cancel_requested'].includes(t.state);
   if(!continuation&&t.attempt_no-t.resume_count>=t.max_attempts){await finalizeUnsuccessfulTaskTx(tx,t,{state:'failed',errorCode:'ATTEMPTS_EXHAUSTED',retryable:true});return null;}
   const updated=await tx.query<TaskRow>("UPDATE tasks SET state='running',attempt_no=attempt_no+1,resume_count=resume_count+$4,version=version+1,lease_owner=$2,lease_until=clock_timestamp()+$3*interval '1 millisecond' WHERE id=$1 RETURNING *",[id,owner,this.leaseMs,continuation?1:0]);
   const task=updated.rows[0]!;await tx.query("INSERT INTO task_attempts(task_id,attempt_no,version,owner,state) VALUES($1,$2,$3,$4,'running')",[id,task.attempt_no,task.version,owner]);await event(tx,id);
@@ -56,7 +61,9 @@ export class TaskEngine {
    if(this.billing&&t.reservation_id)await this.billing.commitReservationTx(tx,t.reservation_id);
   });return true;
  });a.stepOutcome=applied?'recorded':'stale';if(applied)this.recordAttempt(a.task.kind,'success');return applied;}
- async fail(a:Attempt,code:string,retryable:boolean){const outcome=await this.transaction(async tx=>{
+ async fail(a:Attempt,code:string,retryable:boolean){
+  if(a.task.kind===funAsrTaskKind&&this.asr?.fail)return this.asr.fail(a,code,retryable);
+  const outcome=await this.transaction(async tx=>{
   const t=await lockOwnedAttemptTx(tx,a);if(!t)return {applied:false,result:null,stepOutcome:'stale' as TaskStepOutcome};
   const retry=retryable&&t.attempt_no-t.resume_count<t.max_attempts&&t.external_state==='none',delay=retryDelay(t.attempt_no-t.resume_count);
   const state=t.external_state!=='none'?'reconciling':retry?'retry_scheduled':'failed';
@@ -100,6 +107,10 @@ export class TaskEngine {
   try{const result=await this.executeOwned(a);a.stepOutcome??='stale';return result;}catch(error){if(error instanceof ParserExecutionDeferred)return this.defer(a,error.delayMs);throw error;}
  }
  private async executeOwned(a:Attempt){
+  if(a.task.kind===funAsrTaskKind){
+   if(!this.asr)throw new Error('FUNASR_WORKER_NOT_CONFIGURED');
+   return this.asr.execute(a);
+  }
   if(a.task.kind==='processing.node-start'&&this.nodeJobs){const result=await this.nodeJobs.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind==='text.ingest'&&this.textIngestion){const result=await this.textIngestion.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind.startsWith('storage.')&&this.storage){const result=await this.storage.execute(a);return this.finish(a,result.digest,result.bytes);}

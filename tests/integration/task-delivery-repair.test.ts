@@ -6,10 +6,12 @@ import { loadConfig } from '../../src/config/config.js';
 import { migrate } from '../../src/db/migrate.js';
 import { poolFor } from '../../src/plugins/dependencies.js';
 import { transaction } from '../../src/modules/identity/store.js';
-import { enqueueIntent } from '../../src/modules/tasks/model.js';
+import { enqueueIntent, funAsrTaskKind, funAsrTaskReference, type TaskRow } from '../../src/modules/tasks/model.js';
 import { TaskEngine } from '../../src/modules/tasks/engine.js';
 import { QueuePublisher } from '../../src/modules/tasks/publisher.js';
 import { TaskScheduler, type Delivery } from '../../src/modules/tasks/scheduler.js';
+import { deferTaskAttemptTx, wakeExternalTaskTx } from '../../src/modules/tasks/external-continuation.js';
+import { lockOwnedAttemptTx } from '../../src/modules/tasks/lifecycle.js';
 
 const database = process.env.TEST_DATABASE_MIGRATION_URL, redisUrl = process.env.REDIS_QUEUE_URL;
 if (!database || !/^huahuo_test_[a-z0-9_]+$/u.test(new URL(database).pathname.slice(1))
@@ -21,6 +23,8 @@ const root = poolFor(migrationConfig);
 const schedulerPool = poolFor(loadConfig('scheduler', { ...env, DATABASE_URL: process.env.TEST_DATABASE_SCHEDULER_URL }));
 const workerPool = poolFor(loadConfig('worker', { ...env, DATABASE_URL: process.env.TEST_DATABASE_WORKER_URL }));
 const engine = new TaskEngine(workerPool, 15000);
+const asrEngine = new TaskEngine(workerPool, 15000, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined, { execute: async attempt => attempt.task.kind === funAsrTaskKind });
 let publisher: QueuePublisher, scheduler: TaskScheduler, second: TaskScheduler, prefix: string;
 const taskIds: string[] = [], workers: Worker[] = [], connections: Redis[] = [];
 
@@ -52,6 +56,13 @@ async function task(withIntent = true, kind = 'maintenance.check') {
     await transaction(schedulerPool, tx => enqueueIntent(tx, id));
     await root.query("UPDATE task_outbox SET created_at='1900-01-01' WHERE task_id=$1", [id]);
   }
+  return id;
+}
+async function asrTask() {
+  const id = randomUUID(); taskIds.push(id);
+  await root.query(`INSERT INTO tasks(id,user_id,kind,queue,state,trace_id,created_at,max_attempts,external_reference)
+    VALUES($1,$2,$3,'content','queued',$4,'1900-01-01',1,$5)`,
+  [id, randomUUID(), funAsrTaskKind, randomUUID(), funAsrTaskReference(id)]);
   return id;
 }
 async function deliveries(id: string) {
@@ -160,5 +171,45 @@ describe('delivery repair with real isolated PostgreSQL and Redis', () => {
       const claimed = (await engine.claim(id, randomUUID()))!;
       expect(claimed.attempt).toBe(2); expect(claimed.task.resume_count).toBe(kind === 'maintenance.check' ? 0 : 1);
     }
+  });
+
+  it('keeps a deferred ASR attempt idle until its outbox is brought forward by a callback', async () => {
+    const id = await asrTask();
+    expect(await engine.claim(id, randomUUID())).toBeNull();
+    const first = (await asrEngine.claim(id, randomUUID()))!;
+    expect(first.task.resume_count).toBe(0);
+    await transaction(workerPool, async tx => {
+      const row = (await lockOwnedAttemptTx(tx, first))!;
+      await deferTaskAttemptTx(tx, row, first, 120_000);
+    });
+    expect(await asrEngine.claim(id, randomUUID())).toBeNull();
+    expect(await deliveries(id)).toHaveLength(1);
+    await transaction(workerPool, async tx => {
+      const row = (await tx.query<TaskRow>('SELECT * FROM tasks WHERE id=$1 FOR UPDATE', [id])).rows[0]!;
+      expect(await wakeExternalTaskTx(tx, row)).toBe(true);
+    });
+    expect(await deliveries(id)).toHaveLength(1);
+    const resumed = (await asrEngine.claim(id, randomUUID()))!;
+    expect(resumed.task.attempt_no - resumed.task.resume_count).toBe(1);
+    expect(await asrEngine.execute(resumed)).toBe(true);
+  });
+
+  it('repairs an expired ASR attempt and any lost delivery for its deferred continuation', async () => {
+    const id = await asrTask();
+    await asrEngine.claim(id, randomUUID());
+    await root.query("UPDATE tasks SET lease_until=now()-interval '1 second' WHERE id=$1", [id]);
+    await Promise.all([scheduler.recover(), second.recover()]);
+    expect(await deliveries(id)).toEqual([expect.objectContaining({task_id:id,status:'pending'})]);
+    const resumed = (await asrEngine.claim(id, randomUUID()))!;
+    expect(resumed.task.resume_count).toBe(1);
+    await transaction(workerPool, async tx => {
+      const row = (await lockOwnedAttemptTx(tx, resumed))!;
+      await deferTaskAttemptTx(tx, row, resumed, 60_000);
+    });
+    await root.query('DELETE FROM task_outbox WHERE task_id=$1', [id]);
+    await root.query("UPDATE tasks SET available_at=now()-interval '1 second' WHERE id=$1", [id]);
+    await Promise.all([scheduler.recover(), second.recover()]);
+    expect(await deliveries(id)).toEqual([expect.objectContaining({task_id:id,status:'pending'})]);
+    expect((await asrEngine.claim(id, randomUUID()))?.task.resume_count).toBe(2);
   });
 });

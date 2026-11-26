@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AcsFunAsrCompute } from '../../src/integrations/funasr-compute/acs.js';
 import { loadFunAsrComputeConfig } from '../../src/integrations/funasr-compute/config.js';
-import { KubernetesApiError, type KubernetesRequest } from '../../src/integrations/funasr-compute/kubernetes.js';
+import { KubernetesApiError, type KubernetesRequest, type KubernetesTransport } from '../../src/integrations/funasr-compute/kubernetes.js';
 import type { AcsFunAsrOptions } from '../../src/integrations/funasr-compute/types.js';
 
 const options: AcsFunAsrOptions = {
@@ -14,13 +14,31 @@ const options: AcsFunAsrOptions = {
     { model: 'A10', zone: 'cn-beijing-i', driver: '580.95.05-open' },
     { model: 'L20', zone: 'cn-beijing-l', driver: '580.95.05-open' },
   ],
+  batchSize: 3,
   startupTimeoutSeconds: 600,
   lifetimeSeconds: 3600,
 };
 
+function defaultAcsOptions(): AcsFunAsrOptions {
+  const config = loadFunAsrComputeConfig({
+    FUNASR_COMPUTE_PROVIDER: 'acs',
+    FUNASR_COMPUTE_KUBE_API_URL: 'https://kube.example.test:6443',
+    FUNASR_COMPUTE_KUBE_CA_FILE: '/run/kube/ca.crt',
+    FUNASR_COMPUTE_KUBE_TOKEN_FILE: '/run/kube/token',
+    FUNASR_COMPUTE_NAMESPACE: options.namespace,
+    FUNASR_COMPUTE_API_SECRET_NAME: options.apiSecretName,
+    FUNASR_COMPUTE_IMAGE_PULL_SECRET_NAME: options.imagePullSecretName,
+    FUNASR_COMPUTE_POD_CIDRS: options.podCidrs.join(','),
+    FUNASR_COMPUTE_IMAGE: options.image,
+  });
+  if (config.provider !== 'acs') throw new Error('Expected ACS configuration');
+  return config.options;
+}
+
 type Resource = {
   metadata: { name: string; uid?: string; resourceVersion?: string; ownerReferences?: Array<{ uid: string }> };
   spec?: { template: { metadata: { labels: Record<string, string> } } };
+  status?: { conditions: Array<{ type: string; status: string }> };
 };
 
 class FakeCluster {
@@ -81,6 +99,14 @@ class FakeCluster {
     return [...this.resources].filter(([name]) => name.includes('/jobs/')).map(([, resource]) => resource);
   }
 
+  jobSubmissions() {
+    return this.writes.filter(request => request.method === 'POST' && request.path.endsWith('/jobs'));
+  }
+
+  failJobs() {
+    for (const job of this.jobs()) job.status = { conditions: [{ type: 'Failed', status: 'True' }] };
+  }
+
   pod(job: Resource, ip: string, ready = true) {
     return {
       metadata: { name: job.metadata.name + '-pod', uid: job.metadata.uid + '-pod',
@@ -91,35 +117,37 @@ class FakeCluster {
   }
 }
 
+function afterNextBatchClaim(cluster: FakeCluster, afterClaim: () => void): KubernetesTransport {
+  return async request => {
+    const response = await cluster.request(request);
+    const data = (request.body as { data?: Record<string, string> } | undefined)?.data;
+    if (request.method === 'PUT' && data?.phase === 'submitting' && data.batchOffset === '3') afterClaim();
+    return response;
+  };
+}
+
 describe('ACS FunASR compute', () => {
-  it('submits all eight default candidates concurrently under one durable allocation', async () => {
-    const config = loadFunAsrComputeConfig({
-      FUNASR_COMPUTE_PROVIDER: 'acs',
-      FUNASR_COMPUTE_KUBE_API_URL: 'https://kube.example.test:6443',
-      FUNASR_COMPUTE_KUBE_CA_FILE: '/run/kube/ca.crt',
-      FUNASR_COMPUTE_KUBE_TOKEN_FILE: '/run/kube/token',
-      FUNASR_COMPUTE_NAMESPACE: options.namespace,
-      FUNASR_COMPUTE_API_SECRET_NAME: options.apiSecretName,
-      FUNASR_COMPUTE_IMAGE_PULL_SECRET_NAME: options.imagePullSecretName,
-      FUNASR_COMPUTE_POD_CIDRS: options.podCidrs.join(','),
-      FUNASR_COMPUTE_IMAGE: options.image,
-    });
-    if (config.provider !== 'acs') throw new Error('Expected ACS configuration');
+  it('starts the first three of eight default candidates in parallel under one durable allocation', async () => {
+    const config = defaultAcsOptions();
+    expect(config.candidates).toHaveLength(8);
     const cluster = new FakeCluster();
     let openGate!: () => void;
     cluster.deferJobs = new Promise<void>(resolve => { openGate = resolve; });
-    const compute = new AcsFunAsrCompute(config.options, cluster.request);
+    const compute = new AcsFunAsrCompute(config, cluster.request);
     const starting = compute.start('asr:activation:1');
     try {
-      await vi.waitFor(() => expect(cluster.writes.filter(request => request.path.endsWith('/jobs'))).toHaveLength(8));
+      await vi.waitFor(() => expect(cluster.jobSubmissions()).toHaveLength(3));
 
-      await new AcsFunAsrCompute(config.options, cluster.request).start('asr:activation:1');
+      await new AcsFunAsrCompute(config, cluster.request).start('asr:activation:1');
       expect(await compute.status('asr:activation:1')).toEqual({ state: 'starting' });
     } finally {
       openGate();
       await starting;
     }
-    expect(cluster.jobs()).toHaveLength(8);
+    expect(cluster.jobs()).toHaveLength(3);
+    expect(cluster.jobs().map(job => job.spec?.template.metadata.labels['alibabacloud.com/compute-qos'])).toEqual([
+      'default', 'best-effort', 'default',
+    ]);
     for (const job of cluster.jobs()) {
       expect(job).toMatchObject({
         metadata: { ownerReferences: [{ kind: 'ConfigMap', uid: expect.any(String) }] },
@@ -134,6 +162,156 @@ describe('ACS FunASR compute', () => {
         },
       });
     }
+  });
+
+  it('drains a timed-out batch before concurrent observers can launch the next three and final two candidates', async () => {
+    const config = defaultAcsOptions();
+    const cluster = new FakeCluster();
+    const allocationId = 'staged-asr';
+    const now = 1_800_000_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const unready = async () => false;
+    try {
+      await new AcsFunAsrCompute(config, cluster.request, unready).start(allocationId);
+      expect(cluster.jobSubmissions()).toHaveLength(3);
+      const first = cluster.jobs()[0]!;
+      cluster.pods.push(cluster.pod(first, '172.31.140.1', false));
+      clock.mockReturnValue(now + config.startupTimeoutSeconds * 1000 + 1);
+
+      const restarted = new AcsFunAsrCompute(config, cluster.request, unready);
+      await vi.waitFor(async () => {
+        expect(await restarted.status(allocationId)).toEqual({ state: 'starting' });
+        expect(cluster.jobs()).toHaveLength(0);
+      });
+      expect(await restarted.status(allocationId)).toEqual({ state: 'starting' });
+      expect(cluster.jobSubmissions()).toHaveLength(3);
+
+      cluster.pods.length = 0;
+      const concurrent = new AcsFunAsrCompute(config, cluster.request, unready);
+      await vi.waitFor(async () => {
+        await Promise.all([restarted.status(allocationId), concurrent.status(allocationId)]);
+        expect(cluster.jobSubmissions()).toHaveLength(6);
+      });
+      expect(cluster.jobs()).toHaveLength(3);
+      expect(cluster.jobs().map(job => job.spec?.template.metadata.labels['alibabacloud.com/compute-qos'])).toEqual([
+        'best-effort', 'default', 'default',
+      ]);
+      expect(await restarted.status(allocationId)).toEqual({ state: 'starting' });
+
+      cluster.failJobs();
+      await vi.waitFor(async () => {
+        await Promise.all([restarted.status(allocationId), concurrent.status(allocationId)]);
+        expect(cluster.jobSubmissions()).toHaveLength(8);
+      });
+      expect(cluster.jobs()).toHaveLength(2);
+
+      cluster.failJobs();
+      await vi.waitFor(async () => {
+        expect(await concurrent.status(allocationId)).toEqual({ state: 'failed' });
+        expect(cluster.jobs()).toHaveLength(0);
+      });
+      expect(cluster.jobSubmissions()).toHaveLength(8);
+    } finally { clock.mockRestore(); }
+  });
+
+  it('resumes implicit standard QoS allocations with explicit default and fences a changed QoS', async () => {
+    const cluster = new FakeCluster();
+    const id = 'allocation-with-legacy-qos';
+    await new AcsFunAsrCompute(options, cluster.request).start(id);
+
+    const candidates = options.candidates.map(candidate => ({ ...candidate, qos: 'default' as const }));
+    await expect(new AcsFunAsrCompute({ ...options, candidates }, cluster.request).start(id)).resolves.toBeUndefined();
+    const revised = new AcsFunAsrCompute({
+      ...options, candidates: [{ ...candidates[0]!, qos: 'best-effort' }, candidates[1]!],
+    }, cluster.request);
+    await expect(revised.start(id)).rejects.toThrow('FUNASR_COMPUTE_CONFIGURATION_CHANGED');
+    await expect(revised.release(id)).resolves.toBe('releasing');
+    await expect(revised.release(id)).resolves.toBe('released');
+  });
+
+  it('injects callback configuration into each candidate and binds it to the allocation', async () => {
+    const cluster = new FakeCluster();
+    const callbackOptions = { ...options, callbackOrigin: 'https://server.internal:8443' };
+    const compute = new AcsFunAsrCompute(callbackOptions, cluster.request);
+    const allocationId = 'callback-configured';
+
+    await compute.start(allocationId);
+    expect(cluster.jobs()).toHaveLength(2);
+    for (const job of cluster.jobs()) {
+      expect(job).toMatchObject({ spec: { template: { spec: { containers: [{ env: [
+        { name: 'DEVICE', value: 'cuda:0' },
+        { name: 'API_TOKEN', valueFrom: { secretKeyRef: { name: 'funasr-api', key: 'API_TOKEN' } } },
+        { name: 'CALLBACK_ALLOWED_ORIGINS', value: 'https://server.internal:8443' },
+        { name: 'CALLBACK_SECRET', valueFrom: { secretKeyRef: { name: 'funasr-api', key: 'CALLBACK_SECRET' } } },
+      ] }] } } } });
+    }
+    const restarted = new AcsFunAsrCompute(callbackOptions, cluster.request);
+    await expect(restarted.start(allocationId)).resolves.toBeUndefined();
+    const moved = new AcsFunAsrCompute({ ...callbackOptions, callbackOrigin: 'https://new.internal' }, cluster.request);
+    await expect(moved.start(allocationId)).rejects.toThrow('FUNASR_COMPUTE_CONFIGURATION_CHANGED');
+    await expect(moved.release(allocationId)).resolves.toBe('releasing');
+    await expect(moved.release(allocationId)).resolves.toBe('released');
+  });
+
+  it('keeps a healthy first-batch winner even after its startup timeout and does not launch later candidates', async () => {
+    const config = defaultAcsOptions();
+    const cluster = new FakeCluster();
+    const allocationId = 'initial-batch-winner';
+    const now = 1_800_000_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const ready = async () => true;
+    try {
+      const compute = new AcsFunAsrCompute(config, cluster.request, ready);
+      await compute.start(allocationId);
+      cluster.pods.push(cluster.pod(cluster.jobs()[0]!, '172.31.140.1'));
+      const winner = { state: 'ready', baseUrl: 'http://172.31.140.1:8000' };
+      await vi.waitFor(async () => expect(await compute.status(allocationId)).toEqual(winner));
+      clock.mockReturnValue(now + config.startupTimeoutSeconds * 1000 + 1);
+      const restarted = new AcsFunAsrCompute(config, cluster.request, ready);
+      expect(await restarted.status(allocationId)).toEqual(winner);
+      expect(cluster.jobs()).toHaveLength(1);
+      expect(cluster.jobSubmissions()).toHaveLength(3);
+    } finally { clock.mockRestore(); }
+  });
+
+  it('recovers a committed batch claim with a lost response and submits the next candidates once', async () => {
+    const config = defaultAcsOptions();
+    const cluster = new FakeCluster();
+    const lostResponse = vi.fn(() => { throw new KubernetesApiError(); });
+    const request = afterNextBatchClaim(cluster, lostResponse);
+    const first = new AcsFunAsrCompute(config, request);
+    const second = new AcsFunAsrCompute(config, request);
+    const id = 'lost-next-batch-claim';
+    await first.start(id);
+    cluster.failJobs();
+    await first.status(id);
+
+    await Promise.all([first.status(id), second.status(id)]);
+
+    expect(lostResponse).toHaveBeenCalledTimes(1);
+    expect(cluster.jobSubmissions()).toHaveLength(6);
+    expect(cluster.jobs()).toHaveLength(3);
+    expect(await second.status(id)).toEqual({ state: 'starting' });
+  });
+
+  it('finishes the claimed batch when the observer aborts without cancelling the allocation', async () => {
+    const config = defaultAcsOptions();
+    const cluster = new FakeCluster();
+    const controller = new AbortController();
+    const abort = new Error('observation expired');
+    const request = afterNextBatchClaim(cluster, () => controller.abort(abort));
+    const observer = new AcsFunAsrCompute(config, request);
+    const id = 'abort-next-batch-observer';
+    await observer.start(id);
+    cluster.failJobs();
+    await observer.status(id);
+
+    await expect(observer.status(id, controller.signal)).rejects.toBe(abort);
+
+    const resumed = new AcsFunAsrCompute(config, cluster.request);
+    expect(await resumed.status(id)).toEqual({ state: 'starting' });
+    expect(cluster.jobSubmissions()).toHaveLength(6);
+    expect(cluster.jobs()).toHaveLength(3);
   });
 
   it('requests the configured larger host size for a candidate without increasing its GPU count', async () => {

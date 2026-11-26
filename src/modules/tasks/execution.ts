@@ -14,3 +14,8 @@ export interface Attempt {
 export interface TaskExecutor {
   execute(attempt: Attempt): Promise<{ digest: string; bytes: number }>;
 }
+
+export interface ExternalTaskExecutor {
+  execute(attempt: Attempt): Promise<boolean>;
+  fail?(attempt: Attempt, code: string, retryable: boolean): Promise<boolean>;
+}

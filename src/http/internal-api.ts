@@ -6,7 +6,7 @@ export const INTERNAL_API_PREFIX = '/internal/v1';
 type Authorize = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 export type InternalApiPolicy =
   | { auth: 'trusted-scope'; runtimeSettings?: true }
-  | { auth: 'gateway-session' | 'parser-capability'; authorize: Authorize };
+  | { auth: 'gateway-session' | 'parser-capability' | 'signed-provider'; authorize: Authorize };
 
 declare module 'fastify' { interface FastifyContextConfig { internalApi?: InternalApiPolicy } }
 
@@ -17,7 +17,7 @@ export function registerInternalApi(app: FastifyInstance, routes: (internal: Fas
   void app.register(async internal => {
     internal.addHook('onRoute', route => {
       const policy = route.config?.internalApi;
-      if (!policy || !['trusted-scope','gateway-session','parser-capability'].includes(policy.auth)
+      if (!policy || !['trusted-scope','gateway-session','parser-capability','signed-provider'].includes(policy.auth)
         || policy.auth !== 'trusted-scope' && typeof policy.authorize !== 'function'
         || policy.auth === 'trusted-scope' && policy.runtimeSettings && !settings) {
         throw new Error('INTERNAL_API_POLICY_REQUIRED');
@@ -29,7 +29,7 @@ export function registerInternalApi(app: FastifyInstance, routes: (internal: Fas
       const policy = request.routeOptions.config.internalApi;
       if (!policy) return;
       if (policy.auth === 'trusted-scope') request.authScope = readTrustedScope(request.headers, request.id);
-      else if (policy.auth === 'parser-capability') await policy.authorize(request, reply);
+      else if (policy.auth !== 'gateway-session') await policy.authorize(request, reply);
     });
     // Gateway authorization may rotate/revoke sessions; validate its request first.
     // Parser capabilities must be checked before accepting a large callback body.

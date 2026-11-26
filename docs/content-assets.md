@@ -21,7 +21,15 @@
 
 音视频导入或录音上传完成后，取完成响应中的 `data.resource.resourceId`。创建音频资产时传 `assetKind: "audio"` 和 `resourceRefs: [{ resourceId, usage: "original" }]`。服务端在创建事务中认领文件，把附件及用途写入已有的 `content_asset_resource_refs`，并登记资源引用。资源元数据保存在 `resources`。 [资产路由](../src/modules/content-assets/routes.ts) · [引用写入](../src/modules/content-assets/content-asset-images.ts)
 
-`parts.raw` 存正文或转写。没有正文时可传空字符串，之后仅更新正文会保留原附件。播放器从资产详情的 `data.resourceRefs` 取 `usage` 为 `original` 的音频资源 ID，再调用 `GET /api/v1/media/resources/{resourceId}/playback` 读取 `data.url`。 [播放接口](../src/modules/storage/routes.ts)
+`parts.raw` 存纯文本或 Markdown 正文。音频的现有工作流在这个字段保留转写完成时的兼容文本。音频页面通过转写接口取得当前全文。播放器从 `data.resourceRefs` 取 `usage` 为 `original` 的音频资源 ID，再调用 `GET /api/v1/media/resources/{resourceId}/playback` 读取 `data.url`。 [播放接口](../src/modules/storage/routes.ts)
+
+## 录音转写详情与单段保存
+
+`GET /api/v1/content-assets/{contentAssetId}/transcription` 一次返回已保存的纯全文 `text`、标题、创建日期、来源、内容状态、`resourceId`、音频时长和语言码。服务直接读取全文供前端渲染。处理中 `contentStatus` 为 `processing`，`text` 和 `contentRevision` 为 `null`。历史结果缺少语言码时，`language` 为 `null`。播放地址、标签、纲要和深度洞察沿用资源播放、资产标签及 `outline` / `germination` 部分接口。
+
+`PATCH /api/v1/content-assets/{contentAssetId}/transcription/segments/{segmentId}` 使用 `Idempotency-Key` 并传 `{"text":"已校对的文字","revision":0}`。成功返回该段的新文本和版本，过期版本返回 `409 TRANSCRIPT_SEGMENT_REVISION_CONFLICT`。时序分段仍存于内部转写 JSON。保存修改 `content_asset_audio_transcripts.transcript` 中的目标段落，并在同一事务内更新 JSON 的 `text` 和转写内容版本。FunASR 原始结果保留在任务记录中。迁移 `0005` 将旧版已校对的转写保存为完整 JSON，供展示时直接读取。
+
+`GET /api/v1/content-assets/{contentAssetId}/transcription/text` 返回同一版本的纯全文、`transcriptionId` 和 `contentRevision`。内容版本以十进制字符串返回，每次成功保存推进一次，可与 `transcriptionId` 组成未来知识库的来源版本。当前转写完成和单段保存均跳过知识库自动切片。 [接口定义](../src/modules/funasr/transcript-routes.ts) · [存储与读取](../src/modules/funasr/transcript-data.ts)
 
 ## 资产分类
 
@@ -40,7 +48,9 @@
 | `ready` | 资产所需的内容已就绪。 |
 | `failed` | 后台任务处理资产内容失败。 |
 
-当前创建和编辑以保存的原文为准。空白原文进入 `draft`，保存非空原文或成功导入纯文本／Markdown 后进入 `ready`，仅修改标题、文件夹或资源关联时保留原状态。音频转写和链接内容提取尚未接入资产状态写回。标签提取和搜索索引各自管理任务状态。 [接口对照](contract-compatibility.md#p06-个人资产文件夹检索与图谱)
+保存非空原文或成功导入纯文本／Markdown 后进入 `ready`。启用 FunASR 时，创建类型为 `audio`、原文为空且只关联一份 `usage: "original"` 原始音频 Resource 的资产会同时创建转写任务并进入 `processing`。未提交转写的空白资产为 `draft`。排队、等待 GPU、转写和结果查询兜底期间保持 `processing`。转写成功时原文与 `ready` 在同一事务保存，任务最终失败时写入 `failed`。 [回调与查询兜底](runbooks/funasr-compute.md#异步转写接口与长音频)
+
+仅修改标题或移动文件夹会保留正在进行的转写。手动保存原文、更换原始音频或软删除会使待写回的转写失效，避免迟到结果覆盖现有内容。标签提取和搜索索引各自管理任务状态。 [接口对照](contract-compatibility.md#p06-个人资产文件夹检索与图谱)
 
 ## 搜索与观测
 

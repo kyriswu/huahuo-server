@@ -1,28 +1,52 @@
 {
   "version": 1,
-  "id": "20261124-fresh-database-baseline",
-  "baseRevision": "65e03b27afcbd97876db4c08ef01df754b9426dc",
-  "services": [
-    "api-server",
-    "admin",
-    "worker",
-    "scheduler"
-  ],
+  "id": "20261125-funasr-transcription-local",
+  "baseRevision": "e6ad2b2cb1f4fe9547a3f45399481063a609c515",
+  "services": ["api-server", "admin", "worker", "scheduler"],
   "database": {
-    "bootstrap": "fresh-only",
     "migrations": [
-      "0001_initial_schema.sql"
+      "0002_funasr_transcription.sql",
+      "0003_funasr_transcript_edits.sql",
+      "0004_content_asset_audio_transcripts.sql",
+      "0005_materialize_legacy_audio_transcript_edits.sql"
     ],
-    "verifySql": "scripts/release/changes/20261124-fresh-database-baseline/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261125-funasr-transcription-local/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "本次为本机开发和新空库合并 0001 至 0027 的最终结构、权限和初始数据。已有迁移账本不得接续，保留云端数据库及其发布状态。"
+      "reason": "以当前 test 提交作为隔离 CI 演练基线。0005 仅处理有旧单段修订、尚无当前转写且原音频仍匹配的资产，并保留当前转写记录。实际环境迁移账本、行数和发布基准待发布恢复时核对。"
     }
   },
   "configuration": {
-    "mode": "reuse",
-    "changes": [],
-    "reviewedFiles": []
+    "mode": "candidate",
+    "changes": [
+      { "key": "FUNASR_COMPUTE_PROVIDER", "operation": "add", "roles": ["api-server", "worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_CALLBACK_SECRET", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_TASK_CREDITS", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_API_TOKEN", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_CALLBACK_ORIGIN", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_FIXED_BASE_URL", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_KUBE_API_URL", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_KUBE_CA_FILE", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_KUBE_TOKEN_FILE", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_KUBE_CLIENT_CERTIFICATE_FILE", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_KUBE_CLIENT_KEY_FILE", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_NAMESPACE", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_API_SECRET_NAME", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_IMAGE_PULL_SECRET_NAME", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_POD_CIDRS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "FUNASR_COMPUTE_IMAGE", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_COMPUTE_CANDIDATES_JSON", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_COMPUTE_BATCH_SIZE", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_COMPUTE_KUBE_REQUEST_TIMEOUT_MS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_COMPUTE_STARTUP_TIMEOUT_SECONDS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_COMPUTE_LIFETIME_SECONDS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_UPLOAD_TIMEOUT_MS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_CALLBACK_WAIT_MS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_TASK_TIMEOUT_MS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
+      { "key": "FUNASR_IDLE_MS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true }
+    ],
+    "reviewedFiles": [".env.example", "compose.yaml", "src/config/config.ts", "src/config/funasr.ts"],
+    "verifyFile": "scripts/release/changes/20261125-funasr-transcription-local/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {
@@ -32,7 +56,7 @@
   "compatibility": {
     "database": false,
     "api": true,
-    "tasks": true,
+    "tasks": false,
     "configuration": false
   },
   "smoke": "health"

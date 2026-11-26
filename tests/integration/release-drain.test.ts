@@ -6,7 +6,7 @@ import { migrate } from '../../src/db/migrate.js';
 import { TaskService } from '../../src/modules/tasks/service.js';
 import { QueuePublisher } from '../../src/modules/tasks/publisher.js';
 import { createTaskWorkers } from '../../src/apps/worker.js';
-import type { TaskWorkers } from '../../src/modules/tasks/queue.js';
+import { TaskWorkers } from '../../src/modules/tasks/queue.js';
 import { insertFixtureUser, insertFixtureSession, testJwtEnv } from './jwt-fixture.js';
 import { fixtureScopeHeaders } from './jwt-fixture.js';
 import { buildApiServer } from '../../src/apps/api-server.js';
@@ -150,3 +150,35 @@ it('updates all shared-queue consumers before API handover, including late reque
     await Promise.all([oldApi.close(), nextApi.close()]);
   }
 }, 30000);
+
+it('aborts an in-flight FunASR allocation cleanup on drain and waits for it on close', async () => {
+  let started!: (signal: AbortSignal) => void, finish!: () => void;
+  const entered = new Promise<AbortSignal>(resolve => { started = resolve; });
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  let calls = 0, closed = false;
+  const workers = new TaskWorkers(workerPool, workerConfig, { execute: async () => { throw new Error('UNEXPECTED_RAG_JOB'); },
+    close: async () => undefined }, undefined, undefined, {
+    execute: async () => false,
+    collect: async signal => {
+      calls++;
+      started(signal!);
+      await finished;
+    },
+  });
+  try {
+    const signal = await entered;
+    expect(workers.activeJobs()).toBe(1);
+    await workers.drain();
+    expect(signal.aborted).toBe(true);
+    const closing = workers.close().then(() => { closed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(closed).toBe(false);
+    finish();
+    await closing;
+    expect(calls).toBe(1);
+    expect(workers.activeJobs()).toBe(0);
+  } finally {
+    finish();
+    await workers.close();
+  }
+}, 10000);

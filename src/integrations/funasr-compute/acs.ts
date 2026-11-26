@@ -11,7 +11,7 @@ const allocationLabel = 'huahuo.app/funasr-allocation';
 const port = 8000;
 
 type JsonObject = Record<string, unknown>;
-type Phase = 'submitting' | 'active' | 'selected' | 'failed' | 'releasing';
+type Phase = 'submitting' | 'active' | 'batch_releasing' | 'selected' | 'failed' | 'releasing';
 type Reference = { name: string; uid: string };
 type Allocation = Reference & {
   resourceVersion: string;
@@ -21,6 +21,7 @@ type Allocation = Reference & {
   startupDeadline: number;
   submissionComplete: boolean;
   candidateCount: number;
+  batchOffset: number;
   jobUids: string[];
   jobUid?: string;
   podUid?: string;
@@ -77,7 +78,7 @@ function belongs(metadata: JsonObject, name: string): boolean {
   return marked[ownerLabel] === owner && marked[allocationLabel] === name;
 }
 
-function uncertainCreate(error: unknown): boolean {
+function uncertainWrite(error: unknown): boolean {
   return error instanceof KubernetesApiError
     && (error.status === undefined || error.status >= 500 || [408, 409, 429].includes(error.status));
 }
@@ -86,13 +87,17 @@ function allocation(value: unknown, name: string): Allocation {
   const { metadata: rawMetadata, data: rawData } = object(value);
   const metadata = object(rawMetadata);
   const ref = reference(metadata);
-  const { phase, fingerprint, startupDeadline, attempt, submissionComplete, candidateCount, jobUids, jobUid, podUid } = object(rawData);
+  const { phase, fingerprint, startupDeadline, attempt, submissionComplete, candidateCount,
+    batchOffset = '0', jobUids, jobUid, podUid } = object(rawData);
   const version = metadata.resourceVersion;
   if (ref.name !== name || !belongs(metadata, name) || typeof version !== 'string'
-      || (phase !== 'submitting' && phase !== 'active' && phase !== 'selected' && phase !== 'failed' && phase !== 'releasing')
+      || (phase !== 'submitting' && phase !== 'active' && phase !== 'batch_releasing'
+        && phase !== 'selected' && phase !== 'failed' && phase !== 'releasing')
       || typeof fingerprint !== 'string' || typeof attempt !== 'string' || typeof jobUids !== 'string'
       || (submissionComplete !== 'true' && submissionComplete !== 'false')
+      || (phase === 'batch_releasing' && submissionComplete !== 'true')
       || typeof candidateCount !== 'string' || !/^[1-8]$/u.test(candidateCount)
+      || typeof batchOffset !== 'string' || !/^[0-7]$/u.test(batchOffset) || Number(batchOffset) >= Number(candidateCount)
       || typeof startupDeadline !== 'string' || !Number.isSafeInteger(Number(startupDeadline))) {
     throw new FunAsrComputeError('FUNASR_COMPUTE_ALLOCATION_CONFLICT');
   }
@@ -104,7 +109,7 @@ function allocation(value: unknown, name: string): Allocation {
     throw new FunAsrComputeError('FUNASR_COMPUTE_ALLOCATION_CONFLICT');
   }
   return { ...ref, resourceVersion: version, phase, attempt, fingerprint, startupDeadline: Number(startupDeadline),
-    submissionComplete: submissionComplete === 'true', candidateCount: Number(candidateCount),
+    submissionComplete: submissionComplete === 'true', candidateCount: Number(candidateCount), batchOffset: Number(batchOffset),
     jobUids: uids, jobUid: typeof jobUid === 'string' ? jobUid : undefined,
     podUid: typeof podUid === 'string' ? podUid : undefined };
 }
@@ -126,15 +131,19 @@ export class AcsFunAsrCompute implements FunAsrCompute {
     this.pods = '/api/v1/namespaces/' + namespace + '/pods';
     this.jobs = '/apis/batch/v1/namespaces/' + namespace + '/jobs';
     const candidates = options.candidates.map(candidate => {
-      const identity = [candidate.model, candidate.zone, candidate.driver];
+      const identity: (string | number)[] = [candidate.model, candidate.zone, candidate.driver];
       const { cpu, memoryGiB } = candidate.resources ?? defaultAcsGpuHostResources;
-      // Keep the fingerprint of allocations created with the original host size.
-      if (cpu === defaultAcsGpuHostResources.cpu && memoryGiB === defaultAcsGpuHostResources.memoryGiB) return identity;
-      return [...identity, cpu, memoryGiB];
+      // Keep the fingerprint of allocations created with the original host size and QoS.
+      if (cpu !== defaultAcsGpuHostResources.cpu || memoryGiB !== defaultAcsGpuHostResources.memoryGiB) identity.push(cpu, memoryGiB);
+      if (candidate.qos === 'best-effort') identity.push('qos', candidate.qos);
+      return identity;
     });
-    this.fingerprint = hash(JSON.stringify([options.namespace, options.image, options.apiSecretName,
+    const configuration = [options.namespace, options.image, options.apiSecretName,
       options.imagePullSecretName, options.podCidrs, candidates,
-      options.startupTimeoutSeconds, options.lifetimeSeconds]));
+      options.startupTimeoutSeconds, options.lifetimeSeconds];
+    if (options.batchSize < candidates.length) configuration.push(options.batchSize);
+    if (options.callbackOrigin) configuration.push(['callbackOrigin', options.callbackOrigin]);
+    this.fingerprint = hash(JSON.stringify(configuration));
     this.privateNetwork.addSubnet('10.0.0.0', 8);
     this.privateNetwork.addSubnet('172.16.0.0', 12);
     this.privateNetwork.addSubnet('192.168.0.0', 16);
@@ -153,30 +162,36 @@ export class AcsFunAsrCompute implements FunAsrCompute {
     const attempt = randomUUID();
     const startupDeadline = Date.now() + this.options.startupTimeoutSeconds * 1000;
     const data = { fingerprint: this.fingerprint, attempt, startupDeadline: String(startupDeadline),
-      phase: 'submitting', submissionComplete: 'false', candidateCount: String(this.options.candidates.length), jobUids: '[]' };
+      phase: 'submitting', submissionComplete: 'false', candidateCount: String(this.options.candidates.length),
+      batchOffset: '0', jobUids: '[]' };
     let claimed: Allocation;
     try {
       claimed = allocation(await this.request({ method: 'POST', path: this.configMaps,
         body: this.configMap({ name, labels: labels(name) }, data) }), name);
     } catch (error) {
-      if (!uncertainCreate(error)) throw error;
+      if (!uncertainWrite(error)) throw error;
       const recovered = await this.getAllocation(name, signal);
       if (!recovered) throw error;
       claimed = recovered;
     }
     this.assertConfiguration(claimed);
     if (claimed.attempt !== attempt || claimed.phase !== 'submitting') return;
+    await this.submitBatch(id, claimed, signal);
+  }
+
+  private async submitBatch(id: string, record: Allocation, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) {
-      await this.completeSubmission(claimed, [], true);
+      await this.completeSubmission(record, [], true);
       await this.release(id);
       signal.throwIfAborted();
     }
 
     // Mutation requests have their own timeout. Allow every POST to settle before deciding what can be cleaned.
-    const jobs = await Promise.allSettled(this.options.candidates.map((candidate, index) =>
-      this.submitJob(claimed, candidate, index)));
+    const candidates = this.options.candidates.slice(record.batchOffset, record.batchOffset + this.options.batchSize);
+    const jobs = await Promise.allSettled(candidates.map((candidate, index) =>
+      this.submitJob(record, candidate, record.batchOffset + index)));
     const jobUids = jobs.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value.uid] : []);
-    const updated = await this.completeSubmission(claimed, jobUids, jobs.every(result => result.status === 'fulfilled'));
+    const updated = await this.completeSubmission(record, jobUids, jobs.every(result => result.status === 'fulfilled'));
     if (signal?.aborted) {
       await this.release(id);
       signal.throwIfAborted();
@@ -198,11 +213,13 @@ export class AcsFunAsrCompute implements FunAsrCompute {
       return { state: 'failed' };
     }
     if (record.phase === 'selected') return this.selected(record, current, signal);
+    if (record.phase === 'batch_releasing') return this.advanceBatch(id, record, current, signal);
     if (Date.now() >= record.startupDeadline || current.jobs.every(job => job.terminal)) {
-      const failed = await this.update(record, { phase: 'failed' });
-      if (!failed) return { state: 'starting' };
+      const hasAnotherBatch = record.submissionComplete && record.batchOffset + this.options.batchSize < record.candidateCount;
+      const retired = await this.update(record, { phase: hasAnotherBatch ? 'batch_releasing' : 'failed' });
+      if (!retired) return { state: 'starting' };
       await this.clearJobs(current);
-      return { state: 'failed' };
+      return { state: hasAnotherBatch ? 'starting' : 'failed' };
     }
     const winner = await this.firstReady(record, current, signal);
     if (!winner) return { state: 'starting' };
@@ -211,6 +228,35 @@ export class AcsFunAsrCompute implements FunAsrCompute {
     // An independent observer may have won the resourceVersion race. Its selection is authoritative.
     if (!chosen) return { state: 'starting' };
     return this.selected(chosen, current, signal, true);
+  }
+
+  private async advanceBatch(id: string, record: Allocation, current: Snapshot, signal?: AbortSignal): Promise<FunAsrComputeStatus> {
+    await this.clearJobs(current);
+    if (current.jobs.length || current.pods.length) return { state: 'starting' };
+    signal?.throwIfAborted();
+    const attempt = randomUUID();
+    const batchOffset = record.batchOffset + this.options.batchSize;
+    let next: Allocation | null;
+    try {
+      next = await this.update(record, {
+        attempt, phase: 'submitting', batchOffset,
+        startupDeadline: Date.now() + this.options.startupTimeoutSeconds * 1000,
+        submissionComplete: false, jobUids: [],
+      });
+    } catch (error) {
+      if (!uncertainWrite(error)) throw error;
+      next = await this.getAllocation(record.name);
+    }
+    if (next?.uid === record.uid && next.batchOffset === batchOffset && next.attempt === attempt) {
+      // A polling deadline must not cancel a batch after its claim has committed.
+      if (next.phase === 'submitting') await this.submitBatch(id, next);
+      if (next.phase === 'releasing' && !next.submissionComplete) {
+        const updated = await this.completeSubmission(next, [], true);
+        if (updated?.phase === 'releasing') await this.finishRelease(updated);
+      }
+    }
+    signal?.throwIfAborted();
+    return { state: 'starting' };
   }
 
   async release(id: string, signal?: AbortSignal): Promise<FunAsrComputeRelease> {
@@ -247,11 +293,11 @@ export class AcsFunAsrCompute implements FunAsrCompute {
   }
 
   private async update(record: Allocation,
-    change: Partial<Pick<Allocation, 'phase' | 'submissionComplete' | 'jobUids' | 'jobUid' | 'podUid'>>) {
+    change: Partial<Pick<Allocation, 'attempt' | 'phase' | 'batchOffset' | 'startupDeadline' | 'submissionComplete' | 'jobUids' | 'jobUid' | 'podUid'>>) {
     const next = { ...record, ...change };
     const data = { phase: next.phase, attempt: next.attempt, fingerprint: next.fingerprint,
       startupDeadline: String(next.startupDeadline), submissionComplete: String(next.submissionComplete),
-      candidateCount: String(next.candidateCount), jobUids: JSON.stringify(next.jobUids),
+      candidateCount: String(next.candidateCount), batchOffset: String(next.batchOffset), jobUids: JSON.stringify(next.jobUids),
       ...(next.jobUid && next.podUid ? { jobUid: next.jobUid, podUid: next.podUid } : {}) };
     const metadata = { name: record.name, uid: record.uid, resourceVersion: record.resourceVersion, labels: labels(record.name) };
     try {
@@ -266,11 +312,11 @@ export class AcsFunAsrCompute implements FunAsrCompute {
   private async completeSubmission(original: Allocation, jobUids: string[], submissionComplete: boolean) {
     let current = original;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const phase = current.phase === 'submitting' ? (submissionComplete && jobUids.length ? 'active' : 'failed') : current.phase;
+      const phase = current.phase === 'submitting' ? (submissionComplete ? 'active' : 'failed') : current.phase;
       const updated = await this.update(current, { phase, jobUids, submissionComplete });
       if (updated) return updated;
       const latest = await this.getAllocation(original.name);
-      if (latest?.uid !== original.uid) return null;
+      if (latest?.uid !== original.uid || latest.attempt !== original.attempt) return null;
       current = latest;
     }
     throw new FunAsrComputeError('FUNASR_COMPUTE_STATE_CHANGED');
@@ -280,8 +326,19 @@ export class AcsFunAsrCompute implements FunAsrCompute {
     const name = record.name + '-' + index;
     const { cpu, memoryGiB } = candidate.resources ?? defaultAcsGpuHostResources;
     const resources = { cpu: String(cpu), memory: `${memoryGiB}Gi`, 'nvidia.com/gpu': '1' };
+    const { apiSecretName, callbackOrigin } = this.options;
+    const env = [
+      { name: 'DEVICE', value: 'cuda:0' },
+      { name: 'API_TOKEN', valueFrom: { secretKeyRef: { name: apiSecretName, key: 'API_TOKEN' } } },
+    ];
+    if (callbackOrigin) {
+      env.push(
+        { name: 'CALLBACK_ALLOWED_ORIGINS', value: callbackOrigin },
+        { name: 'CALLBACK_SECRET', valueFrom: { secretKeyRef: { name: apiSecretName, key: 'CALLBACK_SECRET' } } },
+      );
+    }
     const podLabels = { ...labels(record.name), 'alibabacloud.com/compute-class': 'gpu',
-      'alibabacloud.com/compute-qos': 'default', 'alibabacloud.com/gpu-model-series': candidate.model,
+      'alibabacloud.com/compute-qos': candidate.qos ?? 'default', 'alibabacloud.com/gpu-model-series': candidate.model,
       'alibabacloud.com/gpu-driver-version': candidate.driver };
     const body = {
       apiVersion: 'batch/v1', kind: 'Job',
@@ -299,8 +356,7 @@ export class AcsFunAsrCompute implements FunAsrCompute {
             securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001,
               allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
             ports: [{ name: 'http', containerPort: port }],
-            env: [{ name: 'DEVICE', value: 'cuda:0' },
-              { name: 'API_TOKEN', valueFrom: { secretKeyRef: { name: this.options.apiSecretName, key: 'API_TOKEN' } } }],
+            env,
             resources: { requests: resources, limits: resources },
             readinessProbe: { httpGet: { path: '/readyz', port }, periodSeconds: 5, timeoutSeconds: 3 },
           }],
@@ -311,8 +367,8 @@ export class AcsFunAsrCompute implements FunAsrCompute {
     try {
       value = await this.request({ method: 'POST', path: this.jobs, body });
     } catch (error) {
-      if (error instanceof KubernetesApiError && !uncertainCreate(error)) return null;
-      if (!uncertainCreate(error)) throw error;
+      if (error instanceof KubernetesApiError && !uncertainWrite(error)) return null;
+      if (!uncertainWrite(error)) throw error;
       value = await this.get(this.jobs + '/' + name);
       if (!value) throw error;
     }

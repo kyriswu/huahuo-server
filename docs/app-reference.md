@@ -1,3 +1,16 @@
+## FunASR 录音转写只读核对（2026-11-25）
+
+核对 App 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`，工作区干净。App 在 `lib/features/inspiration/presentation/record_inspiration_sheet.dart` 向本地灵感存储交付 `audioPath`，`lib/features/inspiration/data/inspiration_store.dart` 将 M4A 文件复制到本地目录。共享上传组件可从上传完成响应读取 `resourceId`，当前 App 源码尚未将该录音传入 Server 的资产创建接口，也未订阅服务端转写状态。文字听写继续由 `InspirationDictation` 使用系统 `SpeechToText`。
+
+Server 复用现有 `POST /api/v1/content-assets`。启用转写时，当前正文为空、类型为 `audio` 且恰有一份已上传的原始音频 Resource 的新资产进入 `processing`。App 后续接入可以沿用列表和详情已有的 `contentStatus` 观察 `processing`、`ready` 或 `failed`。本轮覆盖后端资产流程。 [资产状态](content-assets.md#资产内容状态)
+
+| App 相对路径 | SHA-256 |
+| --- | --- |
+| `lib/features/inspiration/presentation/record_inspiration_sheet.dart` | `5f35bfd0ee80338ce8099a6e9db95d446878f9fdb88183386b2183228ac59fd7` |
+| `lib/features/inspiration/data/inspiration_store.dart` | `f30eafb32c6ea6ac6c2472688cd67274fe1f88ce2d51b77e89c10875d2ed5065` |
+| `lib/core/uploads/upload_service.dart` | `9bf8313e16ace50c736dc55f5e070ac3222fec33595c714af74e15f8c29dd704` |
+| `lib/core/platform/inspiration_media.dart` | `64d38aef5ffa11b41ea0bdf1a217ff908a31e3791ad546c731f9aecd28f2b252` |
+
 ## FunASR 算力适配器只读核对（2026-11-25）
 
 核对 App 提交 `fe6a02c12794029dba620ab7ffd85b1f464e4de8`，工作区干净。`lib/core/platform/inspiration_media.dart` 的 `InspirationDictation` 仍直接调用系统 `SpeechToText`，该文件 SHA-256 为 `64d38aef5ffa11b41ea0bdf1a217ff908a31e3791ad546c731f9aecd28f2b252`。本轮底层算力改动尚无 App 调用入口，现有公开 HTTP 契约继续适用。
