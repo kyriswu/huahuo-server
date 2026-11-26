@@ -1,3 +1,5 @@
+import { importLink } from './link-import.js';
+import type { LinkExtractor } from '../../lib/link-extraction/index.js';
 import {inferAssetKind} from './asset-kind.js';
 import type { AssetKind } from '../../contracts/asset-kind.js';
 import type { ContentStatus } from '../../contracts/content-status.js';
@@ -76,6 +78,8 @@ function checkContentAssetParts(values:Record<string,string>,mode:'create'|'upda
    if(++chars>limit)throw new DomainError(400,'CONTENT_ASSET_CONTENT_TOO_LARGE');
  }
 }
+type CreateAssetInput = {title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];assetKind?:AssetKind;sourceKind?:string;sourceId?:string;processingStatus?:'ready'};
+
 export class ContentAssetService {
  constructor(readonly pool:pg.Pool,readonly secret:string,readonly config?:AppConfig,private readonly ragQuery?:RagQueryService,private readonly resourceClaims?:ResourceClaims){}
  private async indexContentAsset(tx:pg.PoolClient,scope:Scope,contentAssetId:string){if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).schedule(tx,scope,contentAssetId);}
@@ -321,11 +325,22 @@ export class ContentAssetService {
   const contentAsset=await this.createContentAsset(scope,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:'ready',parts:{raw:input.content,outline:'',germination:''}},key);
   return {status:'ready' as const,contentAsset};
  }
- async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];assetKind?:AssetKind;sourceKind?:string;sourceId?:string;processingStatus?:'ready'},key:string){return transaction(this.pool,async tx=>{
+ async importLinkAsset(scope: Scope, url: string, key: string, extractor: LinkExtractor, signal: AbortSignal) {
+  return importLink(this.pool,this.secret,scope,key,url,() => extractor.extract(url,signal), async (tx,body) => {
+   const asset = await this.createAssetInTransaction(tx,scope,{
+    title:body.title, sourceKind:'link', assetKind:'link', sourceId:url, parts:{raw:body.markdown}
+   });
+   return {...body, contentAssetId:asset.contentAssetId};
+  },signal);
+ }
+ async createContentAsset(scope:Scope,input:CreateAssetInput,key:string){
+  return transaction(this.pool,tx=>this.createAssetInTransaction(tx,scope,input,key));
+ }
+ private async createAssetInTransaction(tx:pg.PoolClient,scope:Scope,input:CreateAssetInput,key?:string){
   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
   await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
-  const prepared=await normalizeOwnedImageParts(tx,scope,input.parts,this.config,this.resourceClaims);
+  const prepared=await normalizeOwnedImageParts(tx,scope,input.parts,this.config,this.resourceClaims,undefined,(input.assetKind??inferAssetKind(input.sourceKind))==='link');
   const normalized={...input,parts:prepared.parts,imageOrigins:prepared.imageOrigins};
   return idempotent(tx,this.secret,scope.userId,'content-asset.create',key,normalized,async()=>{
    const canonicalParts=restoreOwnedImageParts({},prepared);
@@ -347,7 +362,7 @@ export class ContentAssetService {
    await this.indexContentAsset(tx,scope,id);
    return this.contentAssetDto(tx,scope,id);
   });
- });}
+ }
  async updateContentAsset(scope:Scope,id:string,input:{title?:string;folderId?:string|null;parts?:Record<string,string>;resourceRefs?:ContentAssetResourceRef[]},ifMatch:string,key:string){
   return transaction(this.pool,async tx=>{
    await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
@@ -361,7 +376,8 @@ export class ContentAssetService {
    )).rowCount) await this.resourceClaims.lockAccount(tx,scope);
    await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
    // Normalize before the idempotency digest and before comparing revisions.
-   const prepared=await normalizeOwnedImageParts(tx,scope,input.parts??{},this.config,this.resourceClaims);
+   const assetKind = input.parts && (await this.findContentAsset(tx,scope,id))?.asset_kind;
+   const prepared=await normalizeOwnedImageParts(tx,scope,input.parts??{},this.config,this.resourceClaims,undefined,assetKind==='link');
    const normalized={...input,...(input.parts?{parts:prepared.parts}:{}),imageOrigins:prepared.imageOrigins};
    return idempotent(tx,this.secret,scope.userId,'content-asset.update',key,{id,input:normalized,ifMatch},async()=>{
     const asset=await this.findContentAsset(tx,scope,id,'FOR UPDATE OF asset');

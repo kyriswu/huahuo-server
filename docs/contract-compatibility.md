@@ -1,5 +1,9 @@
 # Server 契约与阶段记录
 
+## 创作页链接导入（2026-11-25）
+
+新增 POST /api/v1/link-extractions。链接类型资产允许保留外部 Markdown 图片 URL，涉及资产创建、PATCH 更新和 PUT 正文。新接口使用标准鉴权、幂等键与 envelope。 [验收记录](acceptance/link-extraction.md)
+
 ## 当前资产契约
 
 Server 使用 `ContentAsset` 表达用户可以管理的资产，中文显示为「资产」。PostgreSQL 主表为 `content_assets`，归属字段为 `user_id`，标识字段为 `content_asset_id`。正文、原文件、文件夹和标签按关系挂到资产。上传原文件使用 `Resource` 和 `resourceId`。 [资产与搜索术语](content-assets.md)

@@ -1,3 +1,7 @@
+## 创作页链接导入（2026-11-25）
+
+链接导入在 api-server 的同步请求内执行。JUSTONE_API_TOKEN 和可选 HUAHUO_SHARE_HOST 仅传给该角色。本轮使用隔离 PostgreSQL/Redis 验收，未发布。 [验收记录](acceptance/link-extraction.md)
+
 ## 发布保护安装与原地复核（2026-11-17）
 
 只更新已确认测试机的Server发布执行器及小型策略文件，没有替换业务镜像、停止容器或更改ENV/入口配置。安装时成功业务版本为085de22，安装前后四容器ID与成功记录一致。真实同SHA调用返回OK，旧b729842调用在checkout被拒绝，两次均0业务重启，公开ready200。后续按services选择角色，成功记录逐角色保存镜像，不再要求未更新角色与全局SHA同镜像；未做真实单角色新业务发布演示，15组合替换范围来自替身。详见[验收](acceptance/release-order-and-services.md)。

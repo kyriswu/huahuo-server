@@ -34,19 +34,26 @@ function imageTarget(value: string, config?: AppConfig): { id?: string; key?: st
   } catch { throw new DomainError(400, 'IMAGE_URL_INVALID'); }
 }
 
-export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, parts: Record<string, string>, config?: AppConfig, claims?: ResourceClaims, workspaceId?: string): Promise<NormalizedImageParts> {
+export async function normalizeOwnedImageParts(tx: pg.PoolClient, scope: Scope, parts: Record<string, string>, config?: AppConfig, claims?: ResourceClaims, workspaceId?: string, allowExternalMarkdown = false): Promise<NormalizedImageParts> {
   const parsed = Object.entries(parts).map(([part, text]) => ({ part, text, images: parseInputImages(text) }));
   const imageCount = parsed.reduce((total, part) => total + part.images.length, 0);
   if (imageCount > MAX_REFS) throw new DomainError(400, 'IMAGE_LIMIT_EXCEEDED');
   if (!imageCount) return { parts: { ...parts }, imageOrigins: [] };
-  const oss = config?.storageAliyunOss;
-  if (config?.storageDriver !== 'aliyun-oss' || !oss) throw new DomainError(503, 'DIRECT_READ_NOT_CONFIGURED');
+  const oss = config?.storageDriver === 'aliyun-oss' ? config.storageAliyunOss : undefined;
+  if (!oss && !allowExternalMarkdown) throw new DomainError(503, 'DIRECT_READ_NOT_CONFIGURED');
   const targets = new Map<string, { id?: string; key?: string }>();
-  for (const part of parsed) for (const image of part.images) {
-    const target = imageTarget(image.url, config);
-    if (!target) throw new DomainError(400, 'IMAGE_UPLOAD_REQUIRED');
-    targets.set(image.url, target);
+  for (const part of parsed) {
+    part.images = part.images.filter(image => {
+      const target = imageTarget(image.url, config);
+      if (!target && allowExternalMarkdown && image.kind === 'markdown') return false;
+      if (!oss) throw new DomainError(503, 'DIRECT_READ_NOT_CONFIGURED');
+      if (!target) throw new DomainError(400, 'IMAGE_UPLOAD_REQUIRED');
+      targets.set(image.url, target);
+      return true;
+    });
   }
+  if (!targets.size) return {parts:{...parts},imageOrigins:[]};
+  if (!oss) throw new DomainError(503, 'DIRECT_READ_NOT_CONFIGURED');
   const ids = [...new Set([...targets.values()].flatMap(target => target.id ? [target.id] : []))];
   const keys = [...new Set([...targets.values()].flatMap(target => target.key && imageUuid(target.key) ? [target.key] : []))];
   if (workspaceId && !claims && !(await tx.query(

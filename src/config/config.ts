@@ -27,6 +27,7 @@ export interface AppConfig {
   statementTimeout: number; redisCacheUrl: string; redisQueueUrl: string;
   schemaMinVersion: number; instanceId: string; logLevel: string;
   connectDeadlineMs: number; migrationLockTimeoutMs: number;
+  justOneApiToken?: string; huahuoShareHost?: string;
   appTokenSecret?: string; adminSessionSecret?: string;
   jwt: { issuer:string; audience:string[]; serverAudience:string; keyId:string; accessTtlSeconds:number; refreshTtlSeconds:number; privateKeyPem?:string; publicKeyPem?:string };
   gatewayStudio: { enabled: boolean; origin: string; publicPath: string };
@@ -235,6 +236,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     schemaMinVersion: integer('DB_SCHEMA_MIN_VERSION', 1, 1, 99999), instanceId: randomUUID(), logLevel,
     connectDeadlineMs: integer('DATABASE_CONNECT_DEADLINE_MS', 60000, 1000, 120000),
     migrationLockTimeoutMs: integer('MIGRATION_LOCK_TIMEOUT_MS', 10000, 100, 60000),
+    ...(role === 'api-server' ? {justOneApiToken:env.JUSTONE_API_TOKEN?.trim(),huahuoShareHost:env.HUAHUO_SHARE_HOST?.trim().toLowerCase()} : {}),
     appTokenSecret: env.APP_TOKEN_SECRET,
     adminSessionSecret: env.ADMIN_SESSION_SECRET,
     jwt: {

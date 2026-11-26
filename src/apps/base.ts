@@ -1,3 +1,4 @@
+import { LinkError } from '../lib/link-extraction/index.js';
 import Fastify, { LogController, type FastifyError, type FastifyLoggerOptions } from 'fastify';
 import swagger from '@fastify/swagger';
 import { Type } from '@sinclair/typebox';
@@ -88,7 +89,7 @@ export async function buildBase({ config, dependencies, backgroundHealthy, backg
     if (error instanceof DomainError) {
       if (error.statusCode >= 500) req.log.error({ err: error, errorCode: error.code, method: req.method, route: req.routeOptions.url ?? 'unmatched', statusCode: error.statusCode }, 'Request failed');
       if (error.statusCode === 429) reply.header('Retry-After', '60');
-      return reply.code(error.statusCode).send(failure(error.code, 'Request could not be completed', req.id, error.statusCode === 503));
+      return reply.code(error.statusCode).send(failure(error.code, error instanceof LinkError ? error.userMessage : 'Request could not be completed', req.id, error.statusCode === 503));
     }
     const status = error.validation ? 400 : error.statusCode && error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 500;
     if (status === 500) req.log.error({ err: error, errorCode: 'INTERNAL_ERROR', method: req.method, route: req.routeOptions.url ?? 'unmatched', statusCode: status }, 'Request failed');

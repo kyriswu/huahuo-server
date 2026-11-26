@@ -1,3 +1,4 @@
+import type { LinkExtractor } from '../lib/link-extraction/index.js';
 import { TextIngestionService } from '../modules/text-ingestion/service.js';
 import { registerTextIngestionRoutes } from '../modules/text-ingestion/routes.js';
 import { registerTaskRoutes } from '../modules/tasks/routes.js';
@@ -29,7 +30,7 @@ import { registerAiTemplateRoutes } from '../modules/ai-templates/routes.js';
 import { AiTemplateRuns } from '../modules/ai-templates/runs.js';
 import { BearerCache } from '../modules/identity/bearer-cache.js';
 import { PgEvents } from '../lib/pg-events.js';
-export async function buildApiServer(options: BuildOptions & IdentityOptions & { ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
+export async function buildApiServer(options: BuildOptions & IdentityOptions & { linkExtractor?: LinkExtractor; ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
  const pool=dependencies.pool??poolFor(options.config);
@@ -77,7 +78,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  app.addHook('onClose',async()=>{await ragQuery.close();});
  registerInternalRoutes(app,{identity,callbacks,ragQuery,settings});
  registerAiTemplateRoutes(app, new AiTemplateRuns(pool), new AiTemplateAgentClient(options.config.agentBaseUrl));
- registerContentAssetRoutes(app,new ContentAssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService);
+ registerContentAssetRoutes(app,new ContentAssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims),storageService,options.linkExtractor);
  registerRagRoutes(app,new RagIngestionRepository(pool,options.config,resourceClaims),storageService.storage,ragQuery);
  registerTaskRoutes(app,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;
 }

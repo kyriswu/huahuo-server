@@ -1,3 +1,4 @@
+import {LinkError,LinkExtractor} from '../../src/lib/link-extraction/index.js';
 import {beforeAll,afterAll,describe,it,expect,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {buildApiServer} from '../../src/apps/api-server.js';
@@ -23,6 +24,62 @@ async function fixture(){
 async function makeContentAsset(u:Awaited<ReturnType<typeof fixture>>){return contentAssets.createContentAsset(u.scope,{title:'素材',parts:{raw:'正文 alpha'}},randomUUID());}
 async function jobFor(contentAssetId:string){return String((await root.query('SELECT task_id FROM content_jobs WHERE content_asset_id=$1',[contentAssetId])).rows[0].task_id);}
 describe('P06 personal contentAssets, revisions and search',()=>{beforeAll(()=>migrate(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl})));afterAll(async()=>{await Promise.all([pool.end(),root.end(),worker.end()]);});
+it('returns synchronous Markdown and authorized link assets, with explicit provider errors',async()=>{
+ const f=await fixture(), other=await fixture();
+ const resolve=vi.fn(async (_platform: unknown, url:string)=>{
+  if(url.endsWith('/paid')) throw new LinkError('LINK_PAID_CONTENT');
+  if(url.endsWith('/video')) return {title:'video',nodes:[{kind:'media' as const,id:'p1',format:'video' as const}]};
+  return {title:'article',nodes:[{kind:'markdown' as const,value:'A ![](<https://cdn.example/cover>) B'}]};
+ });
+ const api=await buildApiServer({config:cfg,linkExtractor:new LinkExtractor({resolve})});
+ const path='/api/v1/link-extractions', origin='https://mp.weixin.qq.com/s';
+ const headers={...fixtureScopeHeaders(f.bearer),'x-idempotency-key':randomUUID()};
+ try {
+  expect((await api.inject({method:'POST',url:path,payload:{url:origin}})).statusCode).toBe(401);
+  expect(resolve).not.toHaveBeenCalled();
+  for (const [suffix,code,message] of [['paid',422,'付费内容不可导入'],['video',503,'暂不可转写']] as const) {
+   const response=await api.inject({method:'POST',url:path,headers:{...headers,'x-idempotency-key':randomUUID()},payload:{url:origin+'/'+suffix}});
+   expect(response.statusCode,response.body).toBe(code);
+   expect(response.json().error.message).toBe(message);
+  }
+  expect((await pool.query('SELECT COUNT(*)::int n FROM content_assets WHERE user_id=$1',[f.userId])).rows[0].n).toBe(0);
+  const request={method:'POST' as const,url:path,headers,payload:{url:origin}};
+  const result=await api.inject(request);
+  expect(result.statusCode,result.body).toBe(200);
+  const data=result.json().data;
+  expect((await api.inject(request)).json().data).toEqual(data);
+  expect(resolve).toHaveBeenCalledTimes(3);
+  const detailPath='/api/v1/content-assets/'+data.contentAssetId;
+  const detail=await api.inject({url:detailPath,headers:fixtureScopeHeaders(f.bearer)});
+  expect(detail.json().data.parts.raw.contentMarkdown).toBe(data.markdown);
+  expect((await api.inject({url:detailPath,headers:fixtureScopeHeaders(other.bearer)})).statusCode).toBe(404);
+ } finally {await api.close();}
+});
+it('commits the link asset and replay together and preserves external images on later edits',async()=>{
+ const f=await fixture(),key=randomUUID(),url='https://mp.weixin.qq.com/s/example';
+ const service=new ContentAssetService(pool,cfg.appTokenSecret!,{...cfg,kb:{...cfg.kb,contentAssetEnabled:false}});
+ const raw='intro\n\n![image](https://img.example/a.jpg)';
+ let unblock!:()=>void, entered!:()=>void;
+ const gate=new Promise<void>(resolve=>{unblock=resolve;});
+ const started=new Promise<void>(resolve=>{entered=resolve;});
+ const resolve=vi.fn(async()=>{entered();await gate;return {title:'article',nodes:[{kind:'markdown' as const,value:raw}]};});
+ const extractor=new LinkExtractor({resolve});
+ const submit=(input=url)=>service.importLinkAsset(f.scope,input,key,extractor,AbortSignal.timeout(10000));
+ const pending=submit();
+ await started;
+ try { await expect(submit()).rejects.toMatchObject({code:'LINK_EXTRACTION_IN_PROGRESS'}); }
+ finally { unblock(); }
+ const result=await pending;
+ expect(await submit()).toEqual(result);
+ expect(resolve).toHaveBeenCalledTimes(1);
+ await expect(submit(url+'?other=1')).rejects.toMatchObject({code:'IDEMPOTENCY_CONFLICT'});
+ const asset=await service.getContentAsset(f.scope,result.contentAssetId);
+ expect(asset).toMatchObject({assetKind:'link',parts:{raw:{contentMarkdown:raw}}});
+ const edited=await service.updateContentAsset(f.scope,asset.contentAssetId,{parts:{raw:raw+' edited'}},asset.etag,randomUUID());
+ expect(edited.parts.raw?.contentMarkdown).toContain('https://img.example/a.jpg');
+ expect(await submit()).toEqual(result);
+ expect((await pool.query('SELECT count(*)::int n FROM content_assets WHERE user_id=$1',[f.userId])).rows[0].n).toBe(1);
+});
 it('skips disabled automatic tags while preserving ContentAsset saves, content events, indexing and explicit request outcomes',async()=>{
  const u=await fixture(),settings:typeof cfg={...cfg,tagExtractorProvider:'disabled',kb:{...cfg.kb,contentAssetEnabled:true},rag:{...cfg.rag,providerMode:'mock'}};
  const service=new ContentAssetService(pool,cfg.appTokenSecret!,settings);

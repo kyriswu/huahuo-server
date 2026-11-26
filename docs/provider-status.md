@@ -1,3 +1,7 @@
+## 创作页链接导入（2026-11-25）
+
+JustOneAPI 适配器依据公开接口文档开发并以替身验证。付费、访问限制、回放和播放器字段覆盖率待真实授权样本确认。音视频转码及 ASR 尚未接入。 [验收记录](acceptance/link-extraction.md)
+
 ## 禁用标签时跳过自动任务（2026-11-18，本地候选）
 
 运行配置明确 disabled 时，保存/编辑不创建自动标签任务；显式请求返回 `TAG_PROVIDER_UNAVAILABLE`。启用后的原任务路径和 Provider 能力保持现状，未接入新模型、Dify 或计费调用；既有任务不批量删除/回填。见[写入优化](acceptance/pg-row-growth-optimization-20261118.md)，实际环境尚未应用。
