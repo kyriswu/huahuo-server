@@ -248,18 +248,21 @@ describe('existing document workflows: real isolated PG/Redis/storage, loopback 
   }finally{await s.close();}
  });
  it('lets Scheduler recover a lost Worker after a callback binds its still-running intent',async()=>{
-  const s=await setup('async','accepted-without-reply');try{
+  const s=await setup('async','accepted-without-reply');
+  const schedulerPool=poolFor(loadConfig('scheduler',{APP_ENV:'test',DATABASE_URL:process.env.TEST_DATABASE_SCHEDULER_URL,
+   REDIS_CACHE_URL:s.workerConfig.redisCacheUrl,REDIS_QUEUE_URL:s.workerConfig.redisQueueUrl}));
+  try{
    const created=await s.start(),attempt=await s.attempt(created.jobId);
    // Leave the attempt running to model exit before Worker error bookkeeping.
    await expect(s.engine.execute(attempt)).rejects.toBeTruthy();
    const [jobId,job]=[...remoteJobs.entries()][0]!;
    await deliverCallback!(job.callbackUrl,jobId,job.response);expect((await s.task(created.jobId)).state).toBe('running');
    await root.query("UPDATE tasks SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",[created.jobId]);
-   await new TaskScheduler(s.workerPool,{publish:async()=>undefined}).recover();
+   await new TaskScheduler(schedulerPool,{publish:async()=>undefined}).recover();
    expect(await s.task(created.jobId)).toMatchObject({state:'reconciling',lease_owner:null,external_state:'submitted'});
    expect(await s.run(await s.attempt(created.jobId))).toBeUndefined();expect((await s.task(created.jobId)).state).toBe('succeeded');
    expect(postCount).toBe(1);expect(getCount).toBe(0);expect(await redis.zcard(s.nodePrefix+':active')).toBe(0);
-  }finally{await s.close();}
+  }finally{await Promise.all([s.close(),schedulerPool.end()]);}
  });
  it.each([false,true])('keeps an early callback receipt when the POST reply arrives later (conflicting reply=%s)',async conflicting=>{
   const s=await setup('async');autoCallback=false;let release!:()=>void;const gate=new Promise<void>(done=>{release=done;});beforeAsyncReply=()=>gate;

@@ -6,7 +6,7 @@ import { ApplicationTelemetry, currentTelemetryFields, withTelemetryRuntime, wit
 import { withApplicationMetrics, type TaskMetrics } from '../../src/plugins/metrics.js';
 import { transaction } from '../../src/modules/identity/store.js';
 import { finalizeTaskTx, type TerminalOutcome } from '../../src/modules/tasks/lifecycle.js';
-import { enqueueIntent, type TaskRow } from '../../src/modules/tasks/model.js';
+import { enqueueIntent, funAsrTaskKind, type TaskRow } from '../../src/modules/tasks/model.js';
 import { TaskEngine, type Attempt } from '../../src/modules/tasks/engine.js';
 import { taskLogFields, withTaskTrace } from '../../src/modules/tasks/observability.js';
 import { TaskScheduler } from '../../src/modules/tasks/scheduler.js';
@@ -79,6 +79,16 @@ describe('durable task trace metadata',()=>{
 });
 
 describe('terminal observations follow the actual committed transition',()=>{
+ it('delegates ASR failures so asset and allocation state can settle with the task',async()=>{
+  const f=fixture();
+  f.attempt.task.kind=funAsrTaskKind;
+  const fail=vi.fn(async()=>true);
+  const engine=new TaskEngine(f.pool,60000,undefined,undefined,undefined,undefined,undefined,undefined,undefined,f.metrics,
+   {execute:async()=>false,fail});
+  expect(await engine.fail(f.attempt,'TEMPORARY_PROVIDER_FAILURE',true)).toBe(true);
+  expect(fail).toHaveBeenCalledExactlyOnceWith(f.attempt,'TEMPORARY_PROVIDER_FAILURE',true);
+  expect(f.query).not.toHaveBeenCalled();
+ });
  it.each<TerminalOutcome>([{state:'succeeded',resultId:'result'},{state:'failed',errorCode:'FAILED',retryable:false},{state:'cancelled'}])('counts $state after COMMIT using DB-returned duration',async outcome=>{
   const f=fixture();
   f.recordTaskTerminal.mockImplementation(()=>{expect(f.query.mock.calls.at(-1)?.[0]).toBe('COMMIT');expect(f.release).toHaveBeenCalledOnce();});

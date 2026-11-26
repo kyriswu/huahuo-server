@@ -16,6 +16,7 @@ import { syncContentAssetRefs, type ContentAssetResourceRef } from './content-as
 import { EDITABLE_MARKDOWN_MAX_CHARS } from '../../lib/kb-image-markdown.js';
 import { listContentAssetPage } from './content-asset-list.js';
 import type { ResourceClaims } from '../storage/resource-claims.js';
+import { findAudioTranscript, readAudioTranscriptText } from '../funasr/transcript-data.js';
 const sha=(v:string)=>createHash('sha256').update(v).digest('hex');
 const normalize=(v:string)=>v.trim().normalize('NFKC').toLocaleLowerCase();
 const etag=(id:string,version:number)=>`"content-asset-${id}-${version}"`;
@@ -38,6 +39,21 @@ interface ContentAssetRow extends ContentAssetStateRow {
  processing_status: ContentStatus;
  created_at: Date;
  updated_at: Date;
+}
+export interface AudioTranscriptionInput {
+ assetId: string;
+ resourceId: string;
+ rawRevisionId: string;
+}
+export interface AudioTranscriptionQueue {
+ enqueue(tx: pg.PoolClient, scope: Scope, input: AudioTranscriptionInput): Promise<void>;
+}
+export async function originalAudioResource(tx: pg.PoolClient, userId: string, assetId: string) {
+ const { rows } = await tx.query<{ resource_id: string }>(`SELECT DISTINCT r.resource_id
+  FROM content_asset_resource_refs ref JOIN resources r ON r.resource_id=ref.resource_id
+  WHERE ref.content_asset_id=$1 AND ref.usage='original' AND r.user_id=$2
+   AND r.status='ready' AND r.mime_type LIKE 'audio/%' LIMIT 2`, [assetId, userId]);
+ return rows.length === 1 ? rows[0]!.resource_id : undefined;
 }
 interface FolderRow {
  folder_id: string;
@@ -76,12 +92,13 @@ function checkContentAssetParts(values:Record<string,string>,mode:'create'|'upda
  }
 }
 export class ContentAssetService {
- constructor(readonly pool:pg.Pool,readonly secret:string,readonly config?:AppConfig,private readonly ragQuery?:RagQueryService,private readonly resourceClaims?:ResourceClaims){}
+ constructor(readonly pool:pg.Pool,readonly secret:string,readonly config?:AppConfig,private readonly ragQuery?:RagQueryService,
+  private readonly resourceClaims?:ResourceClaims,private readonly audioTranscription?:AudioTranscriptionQueue){}
  private async indexContentAsset(tx:pg.PoolClient,scope:Scope,contentAssetId:string){if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).schedule(tx,scope,contentAssetId);}
  // Serialize placements with folder tree changes. ContentAsset mutations may share the
  // fence so independent account/resource and contentAsset row locks retain their order.
  private async lockTree(tx:pg.PoolClient,userId:string,shared=false){await tx.query(`SELECT ${shared?'pg_advisory_xact_lock_shared':'pg_advisory_xact_lock'}(hashtextextended($1,0))`,[`asset-tree:${userId}`]);}
- private async findContentAsset(tx: pg.PoolClient, scope: Scope, contentAssetId: string,
+ private async findContentAsset(tx: pg.PoolClient, scope: Pick<Scope,'userId'>, contentAssetId: string,
   lock: '' | 'FOR SHARE OF asset' | 'FOR UPDATE OF asset' = '') {
   const { rows: [contentAsset] } = await tx.query<ContentAssetRow>(
    `SELECT asset.* FROM content_assets asset
@@ -110,7 +127,7 @@ export class ContentAssetService {
    'SELECT part,part_revision_id,content_markdown,content_sha256 FROM content_asset_parts WHERE content_asset_id=$1', [contentAssetId],
   );
   const currentParts = new Map(savedParts.rows.map(part => [part.part, part]));
-  const refs = await tx.query(
+  const refs = await tx.query<{resource_id:string;sha256:string|null;mime_type:string;ref_order:number;usage:string;anchor:string|null;alt:string|null}>(
    `SELECT r.resource_id,r.sha256,r.mime_type,ref.ref_order,ref.usage,ref.anchor,ref.alt
     FROM content_asset_resource_refs ref JOIN resources r ON r.resource_id=ref.resource_id AND r.user_id=$2
     WHERE ref.content_asset_id=$1 ORDER BY ref.ref_order`, [contentAssetId, scope.userId],
@@ -198,14 +215,19 @@ export class ContentAssetService {
    if (revisionId && (contentAsset.content_asset_revision_id !== revisionId || contentAsset.state !== 'active')) {
     throw new DomainError(409, 'CONTENT_ASSET_REVISION_MISMATCH');
    }
+   const resourceId = contentAsset.state === 'active' && contentAsset.asset_kind === 'audio' && contentAsset.processing_status === 'ready'
+    ? await originalAudioResource(tx, scope.userId, id) : undefined;
+   const ref = resourceId ? await findAudioTranscript(tx, id, scope.userId, resourceId, false) : undefined;
+   const audioTranscript = ref ? { transcriptionId: ref.transcriptionId, ...await readAudioTranscriptText(tx, ref) } : undefined;
    return {
     ...await this.contentAssetDto(tx, scope, id, contentAsset),
     assetKind: contentAsset.asset_kind,
     contentStatus: contentAsset.processing_status,
+    audioTranscript,
    };
   });
  }
- private async task(tx:pg.PoolClient,scope:Scope,contentAssetId:string,contentAssetRevisionId:string){
+ private async task(tx:pg.PoolClient,scope:Pick<Scope,'userId'|'traceId'>,contentAssetId:string,contentAssetRevisionId:string){
   const tagSetVersion = Number((await this.findContentAsset(tx, scope, contentAssetId))?.tag_set_version ?? 0);
   // task_inputs also contains plain text. Materialize the scoped tag jobs before
   // parsing their JSON so the planner cannot cast an unrelated task's body.
@@ -307,6 +329,34 @@ export class ContentAssetService {
   const contentAsset=await this.createContentAsset(scope,{title:input.title,folderId:input.folderId,sourceKind:'import',sourceId:input.sourceUrl,resourceRefs:input.resourceRefs,processingStatus:'ready',parts:{raw:input.content,outline:'',germination:''}},key);
   return {status:'ready' as const,contentAsset};
  }
+ private async pendingAudioAsset(tx:pg.PoolClient,userId:string,input:AudioTranscriptionInput,lock=false){
+  const {rows:[asset]}=await tx.query<ContentAssetRow>(`SELECT asset.* FROM content_assets asset
+   JOIN users u ON u.id=asset.user_id AND u.status='active' AND u.deleted_at IS NULL
+   JOIN content_asset_parts p ON p.content_asset_id=asset.content_asset_id AND p.part='raw'
+   WHERE asset.content_asset_id=$1 AND asset.user_id=$2 AND p.part_revision_id=$3
+    AND asset.asset_kind='audio' AND asset.state='active' AND asset.processing_status='processing'
+   ${lock?'FOR UPDATE OF asset':''}`,[input.assetId,userId,input.rawRevisionId]);
+  if(asset && await originalAudioResource(tx,userId,input.assetId)===input.resourceId)return asset;
+ }
+ async isAudioTranscriptionCurrent(tx:pg.PoolClient,userId:string,input:AudioTranscriptionInput){
+  return Boolean(await this.pendingAudioAsset(tx,userId,input));
+ }
+ async finishAudioTranscription(tx:pg.PoolClient,scope:Pick<Scope,'userId'|'traceId'>,input:AudioTranscriptionInput & {text:string|null}){
+  const asset=await this.pendingAudioAsset(tx,scope.userId,input,true);
+  if(!asset)return false;
+  const id=asset.content_asset_id,version=Number(asset.content_asset_revision)+1,revisionId=randomUUID();
+  const text=input.text;
+  const contentStatus:ContentStatus=text?.trim()?'ready':'failed';
+  await tx.query(`UPDATE content_assets SET processing_status=$2,content_asset_revision=$3,content_asset_revision_id=$4,
+    etag=$5,updated_at=now() WHERE content_asset_id=$1`,[id,contentStatus,version,revisionId,etag(id,version)]);
+  if(text && contentStatus==='ready'){
+   await tx.query(`UPDATE content_asset_parts SET part_revision_id=$2,revision=revision+1,content_markdown=$3,
+    content_sha256=$4,updated_at=now() WHERE content_asset_id=$1 AND part='raw'`,[id,randomUUID(),text,sha(text)]);
+   if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,revisionId);
+  }
+  await this.cursor(tx,scope.userId,'content_asset',id,'updated',false,revisionId,version,asset.content_asset_revision_id,Number(asset.content_asset_revision));
+  return true;
+ }
  async createContentAsset(scope:Scope,input:{title:string;folderId?:string|null;parts:Record<string,string>;resourceRefs?:ContentAssetResourceRef[];assetKind?:AssetKind;sourceKind?:string;sourceId?:string;processingStatus?:'ready'},key:string){return transaction(this.pool,async tx=>{
   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
@@ -318,19 +368,28 @@ export class ContentAssetService {
    checkContentAssetParts(canonicalParts,'create');
    await this.assertActiveFolder(tx, scope.userId, input.folderId ?? null);
    const id=randomUUID(),rid=randomUUID();
+   const assetKind=input.assetKind??inferAssetKind(input.sourceKind);
    const contentStatus:ContentStatus=input.processingStatus??(canonicalParts.raw?.trim()?'ready':'draft');
    await tx.query(
     'INSERT INTO content_assets(content_asset_id,user_id,title,source_kind,source_id,content_asset_revision_id,etag,folder_id,asset_kind,processing_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
-    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1),input.folderId??null,input.assetKind??inferAssetKind(input.sourceKind),contentStatus],
+    [id,scope.userId,input.title.trim(),input.sourceKind??'manual',input.sourceId??null,rid,etag(id,1),input.folderId??null,assetKind,contentStatus],
    );
    await syncContentAssetRefs(tx,scope,id,canonicalParts,input.resourceRefs);
+   const rawRevisionId=randomUUID();
    for(const part of parts){
-    const text=canonicalParts[part]??'',partRevisionId=randomUUID();
+    const text=canonicalParts[part]??'',partRevisionId=part==='raw'?rawRevisionId:randomUUID();
     await tx.query('INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,1,$4,$5)',[partRevisionId,id,part,text,sha(text)]);
    }
    await this.cursor(tx,scope.userId,'content_asset',id,'created',false,rid,1,null,null);
-   if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
-   await this.indexContentAsset(tx,scope,id);
+   const originalAudio=this.audioTranscription && assetKind==='audio' && contentStatus==='draft'
+    ? await originalAudioResource(tx,scope.userId,id) : undefined;
+   if(originalAudio && this.audioTranscription){
+    await tx.query("UPDATE content_assets SET processing_status='processing' WHERE content_asset_id=$1",[id]);
+    await this.audioTranscription.enqueue(tx,scope,{assetId:id,resourceId:originalAudio,rawRevisionId});
+   }else{
+    if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
+    await this.indexContentAsset(tx,scope,id);
+   }
    return this.contentAssetDto(tx,scope,id);
   });
  });}
@@ -360,11 +419,15 @@ export class ContentAssetService {
     checkContentAssetParts(canonicalParts);
     const changed=Object.entries(canonicalParts).filter(([part,text])=>complete[part]!==text);
     Object.assign(complete,canonicalParts);
+    const pendingAudio=asset.asset_kind==='audio' && asset.processing_status==='processing';
+    const previousAudio=pendingAudio && input.resourceRefs ? await originalAudioResource(tx,scope.userId,id) : undefined;
     const refsChanged=updatesRefs?await syncContentAssetRefs(tx,scope,id,complete,input.resourceRefs):false;
+    const supersedesAudio=pendingAudio && (Object.hasOwn(input.parts??{},'raw')
+     || Boolean(refsChanged && input.resourceRefs && previousAudio!==await originalAudioResource(tx,scope.userId,id)));
     const title=input.title?.trim()??asset.title;
     const folderId = input.folderId === undefined ? asset.folder_id : input.folderId;
     const placementChanged = folderId !== asset.folder_id;
-    if(!changed.length&&!refsChanged&&title===asset.title&&!placementChanged)return this.contentAssetDto(tx,scope,id);
+    if(!changed.length&&!refsChanged&&title===asset.title&&!placementChanged&&!supersedesAudio)return this.contentAssetDto(tx,scope,id);
     const v=Number(asset.content_asset_revision)+1,rid=randomUUID();
     await tx.query('UPDATE content_assets SET title=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,folder_id=$6,updated_at=now() WHERE content_asset_id=$1',
      [id,title,v,rid,etag(id,v),folderId]);
@@ -373,12 +436,12 @@ export class ContentAssetService {
      await tx.query('INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(content_asset_id,part) DO UPDATE SET part_revision_id=EXCLUDED.part_revision_id,revision=EXCLUDED.revision,content_markdown=EXCLUDED.content_markdown,content_sha256=EXCLUDED.content_sha256,updated_at=now()',[partRevisionId,id,part,revision,text,sha(text)]);
      }
     const rawChanged=changed.some(([part])=>part==='raw');
-    if(rawChanged){
+    if(rawChanged||supersedesAudio){
      const contentStatus:ContentStatus=complete.raw?.trim()?'ready':'draft';
      await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,contentStatus]);
     }
     await this.cursor(tx,scope.userId,'content_asset',id,'updated',false,rid,v,asset.content_asset_revision_id,Number(asset.content_asset_revision));
-    if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
+    if(this.config?.tagExtractorProvider!=='disabled' && (!pendingAudio || complete.raw?.trim()))await this.task(tx,scope,id,rid);
     if(rawChanged)await this.indexContentAsset(tx,scope,id);
     else if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleMetadataRefresh(tx,scope,id);
     return this.contentAssetDto(tx,scope,id);
@@ -423,7 +486,9 @@ export class ContentAssetService {
  });}
  private async transitionContentAsset(tx:pg.PoolClient,scope:Scope,asset:ContentAssetStateRow,restore:boolean){
   const id=asset.content_asset_id,version=Number(asset.content_asset_revision)+1,revisionId=randomUUID();
-  await tx.query('UPDATE content_assets SET state=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now() WHERE content_asset_id=$1',
+  await tx.query(`UPDATE content_assets SET state=$2,content_asset_revision=$3,content_asset_revision_id=$4,etag=$5,updated_at=now(),
+   processing_status=CASE WHEN $2='deleted' AND asset_kind='audio' AND processing_status='processing' THEN 'draft' ELSE processing_status END
+   WHERE content_asset_id=$1`,
    [id,restore?'active':'deleted',version,revisionId,etag(id,version)]);
   if(restore){
    await this.indexContentAsset(tx,scope,id);

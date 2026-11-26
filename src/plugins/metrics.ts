@@ -8,7 +8,7 @@ import { telemetryIdentity } from '../observability/identity.js';
 const methods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']);
 const taskKinds = new Set(['demo.digest', 'maintenance.check', 'storage.delete', 'content-asset.tag-extract',
   'kb.content-asset-index', 'kb.content-asset-cleanup', 'rag.document-ingest', 'rag.toc-refresh', 'rag.document-cleanup',
-  'text.ingest', 'processing.node-start']);
+  'text.ingest', 'processing.node-start', 'content-asset.transcribe']);
 const excluded = new Set(['/metrics', '/health/live', '/health/ready']);
 const durationBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 3600];
 export type TaskResult = 'success' | 'failure';

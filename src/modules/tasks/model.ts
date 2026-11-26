@@ -10,9 +10,13 @@ export interface TaskRow {
  state:TaskState; version:number; attempt_no:number; resume_count:number;max_attempts:number; lease_owner:string|null;
  reservation_id:string|null;trace_id:string;trace_context:TraceCarrier|null;
  lease_until:Date|null; external_state:'none'|'submitted'|'unknown'; result_id:string|null;
+ external_reference?:string|null; cancel_requested_at?:Date|null;
  error_code:string|null; retryable:boolean; event_sequence:number; created_at:Date; updated_at:Date;
 }
 export const terminal = (s:TaskState) => ['succeeded','failed','cancelled'].includes(s);
+export const funAsrTaskKind = 'content-asset.transcribe';
+export const funAsrTaskReference = (taskId:string) => 'funasr:'+taskId;
+export const isFunAsrTask = (t:TaskRow) => t.kind===funAsrTaskKind&&t.external_reference===funAsrTaskReference(t.id);
 // Capture policy only on INSERT; redelivery must preserve the task's original limit.
 export const newTaskMaxAttempts = () => currentRuntimeConfig()?.taskPolicy.maxAttempts ?? 3;
 export const retryDelay = (attempt:number, random=Math.random) => {const p=currentRuntimeConfig()?.taskPolicy;return Math.min(p?.retryMaxMs??60000,(p?.retryBaseMs??1000)*2**Math.min(attempt,20))*(0.75+random()*0.5);};
@@ -37,7 +41,7 @@ export async function enqueueIntent(tx:pg.PoolClient,id:string,delayMs=0) {
   ) INSERT INTO task_outbox(id,task_id,available_at) VALUES($1,$2,now()+$3*interval '1 millisecond')
   ON CONFLICT(task_id) WHERE status IN ('pending','delivering') DO UPDATE SET available_at=least(task_outbox.available_at,excluded.available_at)`,[randomUUID(),id,delayMs,carrier.traceparent?JSON.stringify(carrier):null]);
 }
-export const accountAssetTaskKinds = ['content-asset.tag-extract','kb.content-asset-index','kb.content-asset-cleanup'];
+export const accountAssetTaskKinds = ['content-asset.tag-extract','kb.content-asset-index','kb.content-asset-cleanup',funAsrTaskKind];
 export function taskDto(t:TaskRow) {
  return {taskId:t.id,taskType:t.kind,state:t.state,...(accountAssetTaskKinds.includes(t.kind)?{}:{workspaceId:t.workspace_id}),version:t.version,
   attempt:t.attempt_no-t.resume_count,resultId:t.result_id,createdAt:t.created_at.toISOString(),updatedAt:t.updated_at.toISOString(),

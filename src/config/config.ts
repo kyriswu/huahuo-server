@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, loadFeishuOtpConfig, type AliyunOtpConfig, type FeishuOtpConfig } from './sms.js';
 import { loadProcessingNodesConfig, type ProcessingNodesConfig } from './processing-nodes.js';
+import { loadFunAsrWorkflowConfig, type FunAsrWorkflowConfig } from './funasr.js';
 import { scopedConfig } from '../modules/runtime-settings/service.js';
 import { CONTENT_ASSET_EMBEDDING_MODEL, CONTENT_ASSET_EMBEDDING_PROFILE, CONTENT_ASSET_EMBEDDING_MAX_BATCH_SIZE, CONTENT_ASSET_RERANK_MODEL } from '../lib/search-index/model-profile.js';
 export const DEFAULT_CONTENT_ASSET_COLLECTION = 'huahuo_kb_content_asset_hybrid_chunks';
@@ -16,6 +17,7 @@ export interface AppConfig {
   metrics: MetricsConfig;
   telemetry: TelemetryConfig;
   processingNodes: ProcessingNodesConfig;
+  funAsr?: FunAsrWorkflowConfig;
   runtimeRevision: number;
   uploadHardMaxBytes: number;
   taskPolicy: { maxAttempts:number;retryBaseMs:number;retryMaxMs:number;concurrency:Record<QueueName,number> };
@@ -220,6 +222,7 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     metrics: loadMetricsConfig(role, env),
     telemetry: loadTelemetryConfig(env, packageVersion),
     processingNodes:loadProcessingNodesConfig(env),runtimeRevision:0,uploadHardMaxBytes,
+    funAsr: loadFunAsrWorkflowConfig(role, env, billingMode),
     taskPolicy:{maxAttempts:3,retryBaseMs:1000,retryMaxMs:60000,concurrency:{content:2,ai:1,commercial:1,maintenance:1}},
     queuePrefix,workerQueues,taskLeaseMs:integer('TASK_LEASE_MS',15000,1000,60000),taskRedeliveryMs:integer('TASK_REDELIVERY_MS',30000,1000,300000),schedulerIntervalMs:integer('SCHEDULER_INTERVAL_MS',1000,100,10000),
     demoTasks:env.ENABLE_DEMO_TASKS==='true',testTaskDelayMs:integer('TEST_TASK_DELAY_MS',0,0,5000),

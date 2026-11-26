@@ -9,7 +9,7 @@ import { StorageJobs } from '../storage/jobs.js';
 import { storageFor } from '../storage/port.js';
 import { BillingService } from '../billing/service.js';
 import { tagExtractorFor } from '../content-assets/tag-extractor.js';
-import type { TaskExecutor } from './execution.js';
+import type { ExternalTaskExecutor, TaskExecutor } from './execution.js';
 import { ContentAssetIndexJobs } from '../ingestion/jobs.js';
 import {RuntimeSettings} from '../runtime-settings/service.js';
 import {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
@@ -22,6 +22,10 @@ export const concurrency:Record<QueueName,number>={content:2,ai:1,commercial:1,m
 export class TaskWorkers {
  private refreshTimer?:NodeJS.Timeout;private refresh?:Promise<void>;
  private cleanupTimer?:NodeJS.Timeout;private cleanup?:Promise<void>;private cleanupActive=false;
+ private asrCollectionTimer?: NodeJS.Timeout;
+ private asrCollection?: Promise<void>;
+ private asrCollectionAbort?: AbortController;
+ private asrCollectionActive = false;
  private readonly uploads?:RedisTemporaryUploads;private readonly uploadCleaner?:TemporaryUploadCleaner;
  private draining?:Promise<void>;private closing?:Promise<void>;private active=0;
  private readonly nodeJobs:ProcessingNodeJobs;
@@ -32,6 +36,7 @@ export class TaskWorkers {
   private readonly rag: TaskExecutor & { close(): Promise<void> },
   metrics?: TaskMetrics,
   private readonly logger?: FastifyBaseLogger,
+  asr?: ExternalTaskExecutor & { collect?(signal?: AbortSignal): Promise<void> },
  ){
   this.nodeJobs=new ProcessingNodeJobs(pool,config);
   this.connection=new Redis(config.redisQueueUrl,{maxRetriesPerRequest:null,connectTimeout:1500,retryStrategy:n=>Math.min(n*200,2000)});
@@ -42,7 +47,7 @@ export class TaskWorkers {
     if(this.stopping)return;
     this.active++;
     try{return await withApplicationMetrics(metrics,()=>settings.run(async()=>{
-    const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config),config),tagExtractorFor(config.tagExtractorProvider),this.rag,this.contentAssetIndex,this.textIngestion,this.nodeJobs,metrics);
+    const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config),config),tagExtractorFor(config.tagExtractorProvider),this.rag,this.contentAssetIndex,this.textIngestion,this.nodeJobs,metrics,asr);
     if(typeof job.data.taskId!=='string'||!/^[a-f0-9-]{36}$/.test(job.data.taskId))return;
     if(this.stopping)return;
     const a=await engine.claim(job.data.taskId,config.instanceId);if(!a)return;
@@ -70,6 +75,7 @@ export class TaskWorkers {
   });
   const refresh=async()=>{try{await settings.run(async()=>{for(const w of this.workers){w.concurrency=config.taskPolicy.concurrency[w.name as QueueName];if(!w.isRunning()&&!this.stopping)void w.run().catch(()=>undefined);}});}catch{/* Keep last validated limits; task execution still requires a current DB snapshot. */}finally{if(!this.stopping){this.refreshTimer=setTimeout(()=>{this.refresh=refresh();},5000);this.refreshTimer.unref();}}};
   this.refresh=refresh();
+  if (asr?.collect && config.workerQueues.includes('content')) this.startAsrCollection(asr.collect.bind(asr));
   if(config.storageDriver==='aliyun-oss'&&config.workerQueues.includes('maintenance')){
    this.uploads=new RedisTemporaryUploads(config);
    this.uploadCleaner=new TemporaryUploadCleaner(pool,storageFor(config),this.uploads,config);
@@ -85,18 +91,40 @@ export class TaskWorkers {
    this.cleanupTimer=setTimeout(()=>{this.cleanup=cleanup();},5000);this.cleanupTimer.unref();
   }
  }
+ private startAsrCollection(collect: (signal: AbortSignal) => Promise<void>) {
+  const controller = new AbortController();
+  this.asrCollectionAbort = controller;
+  const run = async () => {
+   if (controller.signal.aborted) return;
+   this.asrCollectionActive = true;
+   try { await collect(controller.signal); }
+   catch {
+    if (!controller.signal.aborted) this.logger?.warn({ code: 'FUNASR_ALLOCATION_CLEANUP_DEFERRED' }, 'FunASR allocation cleanup deferred');
+   } finally {
+    this.asrCollectionActive = false;
+    if (!controller.signal.aborted) schedule();
+   }
+  };
+  const schedule = () => {
+   this.asrCollectionTimer = setTimeout(() => { this.asrCollection = run(); }, 2000);
+   this.asrCollectionTimer.unref();
+  };
+  schedule();
+ }
  healthy(){return !this.stopping&&this.workers.every(w=>w.isRunning());}
- activeJobs(){return this.active+Number(this.cleanupActive);}
+ activeJobs(){return this.active+Number(this.cleanupActive)+Number(this.asrCollectionActive);}
  drain(){
   if(this.draining)return this.draining;
   this.stopping=true;if(this.refreshTimer)clearTimeout(this.refreshTimer);
   if(this.cleanupTimer)clearTimeout(this.cleanupTimer);this.uploadCleaner?.stop();
+  if (this.asrCollectionTimer) clearTimeout(this.asrCollectionTimer);
+  this.asrCollectionAbort?.abort();
   // Local pause stops fetching immediately, while preserving active job lock/lease renewal.
   this.draining=Promise.all(this.workers.map(w=>w.pause(true))).then(()=>undefined);
   return this.draining;
  }
  close(){
-  this.closing??=(async()=>{await this.drain();await this.refresh;await this.cleanup;await Promise.all(this.workers.map(w=>w.close()));await this.uploads?.close();await this.rag.close();await this.textIngestion.close();await this.nodeJobs.close();this.connection.disconnect();})();
+  this.closing??=(async()=>{await this.drain();await Promise.all([this.refresh,this.cleanup,this.asrCollection]);await Promise.all(this.workers.map(w=>w.close()));await this.uploads?.close();await this.rag.close();await this.textIngestion.close();await this.nodeJobs.close();this.connection.disconnect();})();
   return this.closing;
  }
 }

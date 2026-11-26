@@ -2,7 +2,7 @@ import type pg from 'pg';
 import {resolveTraceId} from '../../lib/trace.js';
 import { randomUUID } from 'node:crypto';
 import { DomainError, transaction } from '../identity/store.js';
-import { queues, type TaskRow, type QueueName, enqueueIntent,event,retryDelay,newTaskMaxAttempts } from './model.js';
+import { queues, type TaskRow, type QueueName, enqueueIntent,event,retryDelay,newTaskMaxAttempts,funAsrTaskKind,isFunAsrTask } from './model.js';
 import { finalizeUnsuccessfulTaskTx } from './reservations.js';
 import { withApplicationMetrics, type TaskMetrics } from '../../plugins/metrics.js';
 export interface Delivery {id:string;task_id:string;queue:QueueName;attempts:number;}
@@ -21,7 +21,8 @@ export class TaskScheduler {
   const candidates=()=>this.pool.query<{id:string;updated_at:string}>(`SELECT id,updated_at::text AS updated_at FROM tasks
    WHERE state IN ('running','cancel_requested') AND (lease_until<now() OR lease_until IS NULL)
     AND ($1::timestamptz IS NULL OR (updated_at,id)>($1,$2::uuid))
-   ORDER BY updated_at,id LIMIT 50`,[this.recoveryAfter?.updated_at??null,this.recoveryAfter?.id??null]);
+    AND (state='running' OR kind<>$3 OR lease_owner IS NOT NULL)
+   ORDER BY updated_at,id LIMIT 50`,[this.recoveryAfter?.updated_at??null,this.recoveryAfter?.id??null,funAsrTaskKind]);
   let page=await candidates();
   if(!page.rowCount&&this.recoveryAfter){this.recoveryAfter=undefined;page=await candidates();}
   this.recoveryAfter=page.rows.at(-1);
@@ -41,9 +42,10 @@ export class TaskScheduler {
  }
  private async recoverOne(id:string){return this.transaction(async tx=>{
   const row=(await tx.query<TaskRow>(`SELECT * FROM tasks WHERE id=$1 AND state IN ('running','cancel_requested')
-   AND (lease_until<clock_timestamp() OR lease_until IS NULL) FOR UPDATE SKIP LOCKED`,[id])).rows[0];
+   AND (lease_until<clock_timestamp() OR lease_until IS NULL)
+   AND (state='running' OR kind<>$2 OR lease_owner IS NOT NULL) FOR UPDATE SKIP LOCKED`,[id,funAsrTaskKind])).rows[0];
   if(!row)return false;
-  const managed=(row as TaskRow&{external_reference:string}).external_reference?.match(/^(xberg-(bound|job|cancelling):|node-start:)/);
+  const managed=row.external_reference?.match(/^(xberg-(bound|job|cancelling):|node-start:)/)||isFunAsrTask(row);
   const state=managed?'reconciling':row.external_state!=='none'?'reconciling':row.state==='cancel_requested'?'cancelled':row.attempt_no-row.resume_count>=row.max_attempts?'failed':'queued';
   await tx.query("UPDATE task_attempts SET state='abandoned',finished_at=now() WHERE task_id=$1 AND attempt_no=$2 AND state='running'",[row.id,row.attempt_no]);
   if(state==='failed')await finalizeUnsuccessfulTaskTx(tx,row,{state,errorCode:'ATTEMPTS_EXHAUSTED',retryable:true});
@@ -60,9 +62,12 @@ export class TaskScheduler {
    (t.state IN ('queued','retry_scheduled') AND t.external_state='none') OR
    (t.state IN ('waiting_external','reconciling') AND (
     (t.kind IN ('rag.document-ingest','text.ingest') AND (t.external_reference LIKE 'xberg-bound:%' OR t.external_reference LIKE 'xberg-job:%' OR t.external_reference LIKE 'xberg-cancelling:%')) OR
-    (t.kind='processing.node-start' AND t.external_reference LIKE 'node-start:%'))))
+    (t.kind='processing.node-start' AND t.external_reference LIKE 'node-start:%') OR
+    (t.kind=$2 AND t.external_reference='funasr:'||t.id::text))) OR
+   (t.state='cancel_requested' AND t.kind=$2 AND t.external_reference='funasr:'||t.id::text
+     AND (t.lease_until IS NULL OR t.lease_until<now())))
    AND NOT EXISTS(SELECT 1 FROM task_outbox o WHERE o.task_id=t.id AND (o.status IN ('pending','delivering') OR o.sent_at>now()-$1*interval '1 millisecond'))
-   ORDER BY t.created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,[this.redeliveryMs]);
+   ORDER BY t.created_at LIMIT 50 FOR UPDATE SKIP LOCKED`,[this.redeliveryMs,funAsrTaskKind]);
   for(const t of pending.rows){
    // Repair the same delivery instead of adding another PG row and Redis job
    // while its worker is unavailable. Explicit retries/continuations still
