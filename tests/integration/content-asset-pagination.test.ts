@@ -114,13 +114,15 @@ it('filters before pagination, returns every kind and binds cursors to the filte
   const f = await fixture(), ids = await seed(f, 43);
   const images = ids.filter((_, i) => i % 2 === 0);
   await root.query("UPDATE content_assets SET asset_kind='image' WHERE content_asset_id=ANY($1::uuid[])", [images]);
+  const fileId = ids[1]!;
+  await root.query("UPDATE content_assets SET asset_kind='file' WHERE content_asset_id=$1", [fileId]);
   // UPDATE touches updated_at, so read the final ordering from the fixture.
   const expected = (await root.query<{content_asset_id: string}>(
     "SELECT content_asset_id FROM content_assets WHERE user_id=$1 AND asset_kind='image' ORDER BY updated_at DESC,content_asset_id",
     [f.scope.userId],
   )).rows.map(row => row.content_asset_id);
   const app = await buildApiServer({config});
-  const get = (query: Record<string, string>) => app.inject({url: '/api/v1/content-assets', headers: fixtureScopeHeaders(f.bearer), query});
+  const get = (query: Record<string, string | string[]>) => app.inject({url: '/api/v1/content-assets', headers: fixtureScopeHeaders(f.bearer), query});
   try {
     const first = await get({assetKind: 'image'});
     expect(first.statusCode, first.body).toBe(200);
@@ -133,7 +135,18 @@ it('filters before pagination, returns every kind and binds cursors to the filte
     expect((await get({assetKind: 'audio'})).json().data).toEqual({assetKinds, items: [], nextCursor: null});
     const all = (await get({})).json().data;
     expect(all.assetKinds).toEqual(assetKinds);
-    const invalidQueries: Record<string, string>[] = [
+    const mixed = await get({assetKind: ['image', 'file']});
+    expect(mixed.statusCode, mixed.body).toBe(200);
+    const mixedPage = mixed.json().data;
+    expect(mixedPage.items).toHaveLength(20);
+    const tail = await get({assetKind: ['file', 'image', 'image'], cursor: mixedPage.nextCursor});
+    expect(tail.statusCode, tail.body).toBe(200);
+    expect(tail.json().data.nextCursor).toBeNull();
+    const combined = [...mixedPage.items, ...tail.json().data.items];
+    expect(combined.map(item => item.contentAssetId).sort()).toEqual([...images, fileId].sort());
+    expect((await get({assetKind: ['image', 'unknown']})).statusCode).toBe(400);
+    const invalidQueries: Record<string, string | string[]>[] = [
+      {cursor: mixedPage.nextCursor, assetKind: ['image', 'audio']},
       {cursor: page.nextCursor}, {cursor: page.nextCursor, assetKind: 'file'}, {cursor: all.nextCursor, assetKind: 'image'},
     ];
     for (const query of invalidQueries) {

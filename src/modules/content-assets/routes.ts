@@ -1,7 +1,7 @@
 import { LinkError, LinkExtractor } from '../../lib/link-extraction/index.js';
 import { extractionTimeoutMs } from './link-import.js';
 import { JustOneApiAdapter } from '../../integrations/justone-api.js';
-import {type AssetKind, AssetKindSchema,AssetKindsSchema} from '../../contracts/asset-kind.js';
+import {assetKinds, type AssetKind, AssetKindSchema,AssetKindsSchema} from '../../contracts/asset-kind.js';
 import {ContentStatusSchema} from '../../contracts/content-status.js';
 import { readTrustedScope } from '../identity/trusted-scope.js';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -73,10 +73,10 @@ export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:Con
  app.get('/api/v1/folders/:folderId',{preHandler:guard,schema:{params:fp,querystring:empty,response:{200:Envelope(folder),...errors}}},async req=>success(await contentAssets.getFolder(scope(req),(req.params as {folderId:string}).folderId),req.id));
  for(const op of ['update','move'] as const){const url=op==='update'?'/api/v1/folders/:folderId':'/api/v1/folders/:folderId/move';app[op==='update'?'patch':'post'](url,{preHandler:guard,schema:{params:fp,body:op==='update'?Type.Object({displayName:Text(120)},Strict):Type.Object({parentFolderId:Type.Union([Id,Type.Null()])},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const p=req.params as {folderId:string};const b=req.body as {displayName?:string;parentFolderId?:string|null};const etag=String(req.headers['if-match']??'');return success(op==='update'?await contentAssets.updateFolder(scope(req),p.folderId,b.displayName!,etag,idempotencyKey(req,'required')!):await contentAssets.moveFolder(scope(req),p.folderId,b.parentFolderId??null,etag,idempotencyKey(req,'required')!),req.id);});}
  for(const action of ['delete','restore'] as const)app[action==='delete'?'delete':'post'](`/api/v1/folders/:folderId${action==='restore'?'/restore':''}`,{preHandler:guard,schema:{params:fp,body:empty,querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const p=req.params as {folderId:string};return success(await contentAssets.deleteFolder(scope(req),p.folderId,String(req.headers['if-match']??''),idempotencyKey(req,'required')!,action==='restore'),req.id);});
- app.get<{Querystring: {cursor?: string; assetKind?: AssetKind}}>('/api/v1/content-assets', {
+ app.get<{Querystring: {cursor?: string; assetKind?: AssetKind[]}}>('/api/v1/content-assets', {
   preHandler: guard,
   schema: {
-   querystring: Type.Object({cursor: Type.Optional(Type.String({minLength: 1, maxLength: 512})), assetKind: Type.Optional(AssetKindSchema)}, Strict),
+   querystring: Type.Object({cursor: Type.Optional(Type.String({minLength: 1, maxLength: 512})), assetKind: Type.Optional(Type.Array(AssetKindSchema, {minItems: 1, maxItems: assetKinds.length, description: '多选时重复传 assetKind，例如 assetKind=image&assetKind=audio。'}))}, Strict),
    response: {200: Envelope(Type.Object({
     items: Type.Array(contentAssetListItem, {maxItems: CONTENT_ASSET_PAGE_SIZE}),
     nextCursor: Type.Union([Type.String(), Type.Null()]),

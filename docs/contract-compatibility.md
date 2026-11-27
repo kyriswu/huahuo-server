@@ -396,7 +396,7 @@ App commit 仍为 `20f61b78887f9288d1fd3227f326e6374d516f27`，工作树 clean�
 
 创建、列表、详情和搜索统一使用 `assetKind` 的五个值 `creative`（自由创作）、`image`（图片）、`audio`（音频）、`file`（文件）、`link`（链接）。列表在 `data.items[]` 的每一项返回，详情在 `data` 返回。创建时优先使用显式 `assetKind`，缺省时从 `sourceKind` 推断。带来源网址的导入文件仍为 `file`。搜索可通过 `assetKinds` 按一个或多个类型筛选，最多五项。 [资产路由](../src/modules/content-assets/routes.ts)
 
-`GET /api/v1/content-assets` 可传单值查询参数 `assetKind`，省略时查询全部类型。每页（包括空页）的 `data.assetKinds` 均返回完整枚举 `["audio","image","file","creative","link"]`。翻页须保持相同筛选条件，切换类型时省略游标重新查询；旧的无筛选游标继续适用。非法类型或游标与筛选条件不匹配返回 400。
+`GET /api/v1/content-assets` 支持单选（`?assetKind=image`）和多选（`?assetKind=image&assetKind=audio`）。多选最多传五项，返回匹配任一所选类型的资产，省略时查询全部类型。每页（包括空页）的 `data.assetKinds` 均返回完整枚举 `["audio","image","file","creative","link"]`。翻页须保持相同类型集合，顺序和重复值不影响游标。切换集合时省略游标重新查询。已有单选及无筛选游标继续适用。非法类型或游标与筛选条件不匹配返回 400。App 当前的 `CDContentAssetRepository.list` 仅传可选游标，继续读取全部类型。2026-11-27 已通过隔离 PostgreSQL 和 Redis 的 15 项资产分页集成测试，并回读确认 [Apifox 资产列表](https://app.apifox.com/project/8965877/apis/api-539018656) 的查询参数。
 
 资产列表在 `data.items[]` 的每项返回 `contentStatus`，资产详情在 `data` 返回。该字段由服务端维护，取值为 `draft`、`processing`、`ready`、`failed`。前端可结合 `assetKind` 和 `contentStatus` 选择对应的内容和状态展示。 [资产内容状态](content-assets.md#资产内容状态)
 

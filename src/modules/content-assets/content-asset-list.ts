@@ -9,9 +9,9 @@ export const CONTENT_ASSET_PREVIEW_LENGTH = 200;
 const previewSourceLength = 2048;
 const markdown = new MarkdownIt({ html: true });
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/iu;
-interface Cursor { assetKind?: AssetKind; userId: string; updatedAt: string; contentAssetId: string }
+interface Cursor { assetKind?: string; userId: string; updatedAt: string; contentAssetId: string }
 
-function decodeCursor(value: string | undefined, userId: string, assetKind?: AssetKind): Cursor | undefined {
+function decodeCursor(value: string | undefined, userId: string, assetKind?: string): Cursor | undefined {
   if (value === undefined) return;
   try {
     if (!/^[A-Za-z0-9_-]{1,512}$/u.test(value)) throw new Error();
@@ -51,14 +51,16 @@ interface ContentAssetListRow {
 }
 
 /** Called after session authorization, on the same transaction connection. */
-export async function listContentAssetPage(tx: pg.PoolClient, userId: string, cursor?: string, assetKind?: AssetKind) {
+export async function listContentAssetPage(tx: pg.PoolClient, userId: string, cursor?: string, selectedKinds?: AssetKind[]) {
+  const kinds = selectedKinds && [...new Set(selectedKinds)].sort();
+  // Single selections retain the assetKind value encoded by older cursors.
+  const assetKind = kinds?.join(',');
   const after = decodeCursor(cursor, userId, assetKind);
   // The time upper bound lets content_assets_scope start at the requested page, including
   // deep pages. The UUID breaks timestamp ties without depending on anchor existence.
   const boundary = after ? 'AND asset.updated_at <= $2::timestamptz AND (asset.updated_at < $2::timestamptz OR asset.content_asset_id > $3::uuid)' : '';
-  const params = after ? [userId, after.updatedAt, after.contentAssetId] : [userId];
-  const kindFilter = assetKind === undefined ? '' : `AND asset.asset_kind = $${params.length + 1}`;
-  if (assetKind !== undefined) params.push(assetKind);
+  const params: (string | AssetKind[])[] = after ? [userId, after.updatedAt, after.contentAssetId] : [userId];
+  const kindFilter = kinds === undefined ? '' : `AND asset.asset_kind = ANY($${params.push(kinds)}::text[])`;
   const result = await tx.query<ContentAssetListRow>(`SELECT page.*,
     coalesce((SELECT next_cursor::text FROM account_content_state WHERE user_id=$1), '0') AS content_cursor,
     folder.folder_id AS active_folder_id,
