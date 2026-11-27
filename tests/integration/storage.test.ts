@@ -1,3 +1,4 @@
+import { ContentAssetService } from '../../src/modules/content-assets/service.js';
 import { beforeAll, beforeEach, afterAll, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { access, rm } from 'node:fs/promises';
@@ -108,6 +109,117 @@ describe('temporary uploads: real Redis/PostgreSQL, local OSS test double', () =
     await root.query('UPDATE runtime_configuration SET "values"=\'{}\',revision=revision+1');
     await Promise.all([pool.end(), root.end(), worker.end()]);
     await rm(directory, { recursive: true, force: true }); vi.restoreAllMocks();
+  });
+
+  it('archives one asset per recorder source, preserves deletion and fences old upload receipts', async () => {
+    const user = await fixture(), stranger = await fixture();
+    const assets = new ContentAssetService(pool, config.appTokenSecret!, config, undefined, claims);
+    const deviceId = 'SN.' + randomUUID();
+    const bind = async () => {
+      const id = randomUUID();
+      await root.query(`INSERT INTO recorder_bindings(binding_id,user_id,device_id,model_code,generation_mode,transfer_mode)
+        VALUES($1,$2,$3,'fixture','manual','manual')`, [id,user.userId,deviceId]);
+      return id;
+    };
+    const bindingId = await bind();
+    const recordingKey = '001:甲/乙.';
+    const info = {fileName:'测试.m4a',mimeType:'audio/mp4',sizeBytes:BigInt(bytes.length),bindingId,recordingKey};
+    const upload = await storage.createUpload(user.scope,info,randomUUID());
+    await expect(storage.createUpload(stranger.scope,info,randomUUID())).rejects.toMatchObject({code:'RECORDER_BINDING_NOT_FOUND'});
+    await adapter.uploadPart(upload.uploadUrl,bytes);
+    await storage.complete(user.scope,upload.uploadId,randomUUID());
+    const input = {uploadId:upload.uploadId,recordingKey};
+    await expect(assets.archiveRecording(user.scope,bindingId,{...input,recordingKey:'other'},randomUUID()))
+      .rejects.toMatchObject({code:'RECORDING_UPLOAD_MISMATCH'});
+    await expect(claim(user,upload.uploadId)).rejects.toMatchObject({code:'RECORDING_UPLOAD_MISMATCH'});
+    await expect(assets.createContentAsset(user.scope,{sourceKind:'recorder_card',assetKind:'audio',title:'forged',parts:{raw:''}},randomUUID()))
+      .rejects.toMatchObject({code:'CONTENT_ASSET_SOURCE_RESERVED'});
+    const [first,second] = await Promise.all([1,2].map(()=>assets.archiveRecording(user.scope,bindingId,input,randomUUID())));
+    expect(first).toMatchObject({status:'synced',resourceId:upload.uploadId,processing:{stage:'pending'}});
+    expect(second).toEqual(first);
+    expect(await databaseCounts(user.userId)).toMatchObject({resources:1,reservations:1,tasks:0});
+    const id = first!.contentAssetId!;
+    const page = await assets.listContentAssets(user.scope,undefined,undefined,bindingId);
+    expect(page.items).toMatchObject([{contentAssetId:id,title:'测试.m4a',processing:{stage:'pending'}}]);
+    const detail = await assets.getContentAsset(user.scope,id);
+    expect(detail).toMatchObject({assetKind:'audio',processing:{stage:'pending'}});
+    await assets.deleteContentAsset(user.scope,id,detail.etag,randomUUID());
+    const {items} = await assets.checkRecordings(user.scope,bindingId,[recordingKey,'missing']);
+    expect(items.map(item=>item.status)).toEqual(['deleted','not_synced']);
+    expect(await assets.archiveRecording(user.scope,bindingId,input,randomUUID())).toMatchObject({status:'deleted',contentAssetId:id});
+    const late = await storage.createUpload(user.scope,{...info,recordingKey:'late'},randomUUID());
+    await adapter.uploadPart(late.uploadUrl,bytes);
+    await storage.complete(user.scope,late.uploadId,randomUUID());
+    await root.query('UPDATE recorder_bindings SET unbound_at=now() WHERE binding_id=$1',[bindingId]);
+    await expect(storage.playback(user.scope,late.uploadId)).rejects.toMatchObject({code:'RESOURCE_NOT_FOUND'});
+    await expect(storage.recover(user.scope,late.uploadId)).rejects.toMatchObject({code:'RECORDER_BINDING_NOT_FOUND'});
+    const next = await bind();
+    await expect(assets.archiveRecording(user.scope,bindingId,input,randomUUID())).rejects.toMatchObject({code:'RECORDER_BINDING_NOT_FOUND'});
+    await expect(assets.archiveRecording(user.scope,next,{uploadId:late.uploadId,recordingKey:'late'},randomUUID()))
+      .rejects.toMatchObject({code:'RECORDING_UPLOAD_MISMATCH'});
+    expect((await assets.checkRecordings(user.scope,next,[recordingKey])).items[0]).toMatchObject({status:'deleted',contentAssetId:id});
+    await expect(assets.checkRecordings(stranger.scope,next,[recordingKey])).rejects.toMatchObject({code:'RECORDER_BINDING_NOT_FOUND'});
+    const deleted = await assets.getContentAsset(user.scope,id);
+    await assets.deleteContentAsset(user.scope,id,deleted.etag,randomUUID(),true);
+    expect((await assets.checkRecordings(user.scope,next,[recordingKey])).items[0]).toMatchObject({status:'synced',contentAssetId:id});
+    expect((await storage.playback(user.scope,upload.uploadId)).resourceId).toBe(upload.uploadId);
+  });
+
+  it('does not complete a recorder receipt if the card is unbound during OSS completion', async () => {
+    const user = await fixture(), bindingId = randomUUID();
+    await root.query(`INSERT INTO recorder_bindings(binding_id,user_id,device_id,model_code,transfer_mode)
+      VALUES($1,$2,$3,'fixture','manual')`, [bindingId,user.userId,randomUUID()]);
+    const upload = await storage.createUpload(user.scope,{fileName:'offline.m4a',mimeType:'audio/mp4',sizeBytes:BigInt(bytes.length),
+      bindingId,recordingKey:'offline'},randomUUID());
+    await adapter.uploadPart(upload.uploadUrl,bytes);
+    const entered=deferred(), resume=deferred(), original=adapter.completeUpload.bind(adapter);
+    const complete=vi.spyOn(adapter,'completeUpload').mockImplementationOnce(async (...args)=>{
+      entered.resolve(); await resume.promise; await original(...args);
+    });
+    try {
+      const pending=storage.complete(user.scope,upload.uploadId,randomUUID());
+      await entered.promise;
+      await root.query('UPDATE recorder_bindings SET unbound_at=now() WHERE binding_id=$1',[bindingId]);
+      resume.resolve();
+      await expect(pending).rejects.toMatchObject({code:'RECORDER_BINDING_NOT_FOUND'});
+      expect((await uploads.get(upload.uploadId))?.status).toBe('initiated');
+      expect(await databaseCounts(user.userId)).toMatchObject({resources:0,reservations:0});
+    } finally {resume.resolve();complete.mockRestore();}
+  });
+
+  it('serves persisted recording state through the app when automatic transcription is unavailable', async () => {
+    const user = await fixture();
+    const bindingId = randomUUID(), recordingKey = 'sample';
+    await root.query(`INSERT INTO recorder_bindings(binding_id,user_id,device_id,model_code,transfer_mode)
+      VALUES($1,$2,$3,'fixture','auto')`, [bindingId,user.userId,randomUUID()]);
+    const upload = await storage.createUpload(user.scope,{fileName:'sample.m4a',mimeType:'audio/mp4',sizeBytes:BigInt(bytes.length),bindingId,recordingKey},randomUUID());
+    await adapter.uploadPart(upload.uploadUrl,bytes);
+    await storage.complete(user.scope,upload.uploadId,randomUUID());
+    const app = await buildApiServer({config: {...config,funAsr:undefined}});
+    const headers = fixtureScopeHeaders(user.bearer);
+    const base = '/api/v1/recorder-bindings/' + bindingId + '/recordings';
+    try {
+      const confirmed = await app.inject({method:'POST',url:base,headers:{...headers,'x-idempotency-key':randomUUID()},payload:{uploadId:upload.uploadId,recordingKey}});
+      expect(confirmed.statusCode,confirmed.body).toBe(200);
+      expect(confirmed.json().data).toMatchObject({status:'synced',resourceId:upload.resourceId,processing:{
+        stage:'failed',failedStage:'transcription',errorCode:'RECORDING_TRANSCRIPTION_UNAVAILABLE',allowedActions:['retry'],
+      }});
+      const status = await app.inject({method:'POST',url:base+'/sync-status',headers,payload:{recordingKeys:[recordingKey]}});
+      expect(status.statusCode,status.body).toBe(200);
+      expect(status.json().data.items).toMatchObject([{status:'synced',contentAssetId:confirmed.json().data.contentAssetId}]);
+      const page = await app.inject({method:'GET',url:'/api/v1/content-assets?bindingId='+bindingId,headers});
+      expect(page.statusCode,page.body).toBe(200);
+      expect(page.json().data.items).toMatchObject([{contentAssetId:confirmed.json().data.contentAssetId,originalResourceId:upload.resourceId,processing:{stage:'failed'}}]);
+      const detail = await app.inject({method:'GET',url:'/api/v1/content-assets/'+confirmed.json().data.contentAssetId,headers});
+      expect(detail.statusCode,detail.body).toBe(200);
+      expect(detail.json().data.content.resources).toMatchObject([{resourceId:upload.resourceId,usage:'original',url:expect.any(String)}]);
+      const playback = await app.inject({method:'GET',url:'/api/v1/media/resources/'+upload.resourceId+'/playback',headers});
+      expect(playback.statusCode,playback.body).toBe(200);
+      expect(playback.json().data.resourceId).toBe(upload.resourceId);
+      const stranger = await fixture();
+      const denied = await app.inject({method:'GET',url:'/api/v1/media/resources/'+upload.resourceId+'/playback',headers:fixtureScopeHeaders(stranger.bearer)});
+      expect(denied.statusCode).toBe(404);
+    } finally {await app.close();}
   });
 
   it('keeps admission, progress recovery and completed receipts in Redis without business database writes', async () => {

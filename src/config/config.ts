@@ -1,8 +1,10 @@
+import { loadRecordingOutlineConfig, type RecordingOutlineSettings } from './recording-outline.js';
 import type { QueueName } from '../modules/tasks/model.js';
 import { loadMetricsConfig, type MetricsConfig } from './metrics.js';
 import { loadTelemetryConfig, type TelemetryConfig } from './telemetry.js';
 import { packageVersion } from '../observability/identity.js';
 import { loadAgentBaseUrl, loadApiServiceBaseUrl } from './service-addresses.js';
+import { loadRecorderVerifier, type RecorderVerifierConfig } from './recorder-verifier.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { loadAliyunOtpConfig, loadFeishuOtpConfig, type AliyunOtpConfig, type FeishuOtpConfig } from './sms.js';
@@ -18,6 +20,7 @@ export interface AppConfig {
   telemetry: TelemetryConfig;
   processingNodes: ProcessingNodesConfig;
   funAsr?: FunAsrWorkflowConfig;
+  recordingOutline?: RecordingOutlineSettings;
   runtimeRevision: number;
   uploadHardMaxBytes: number;
   taskPolicy: { maxAttempts:number;retryBaseMs:number;retryMaxMs:number;concurrency:Record<QueueName,number> };
@@ -41,6 +44,7 @@ export interface AppConfig {
   appPublicBaseUrl: string;
   apiServiceBaseUrl?: string;
   agentBaseUrl?: string;
+  recorderVerifier?: RecorderVerifierConfig;
   storageQuotaBytes:number;
   tagExtractorProvider: 'deterministic' | 'disabled' | 'llm' | 'dify';
   storageS3?: { endpoint:string; region:string; bucket:string; accessKeyId:string; secretAccessKey:string; maxBytes:number };
@@ -220,9 +224,11 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
   return scopedConfig({
     apiServiceBaseUrl: loadApiServiceBaseUrl(env),
     agentBaseUrl: role === 'api-server' ? loadAgentBaseUrl(env) : undefined,
+    recorderVerifier: role === 'api-server' ? loadRecorderVerifier(env) : undefined,
     metrics: loadMetricsConfig(role, env),
     telemetry: loadTelemetryConfig(env, packageVersion),
     processingNodes:loadProcessingNodesConfig(env),runtimeRevision:0,uploadHardMaxBytes,
+    recordingOutline: role==='worker' ? loadRecordingOutlineConfig(env) : undefined,
     funAsr: loadFunAsrWorkflowConfig(role, env, billingMode),
     taskPolicy:{maxAttempts:3,retryBaseMs:1000,retryMaxMs:60000,concurrency:{content:2,ai:1,commercial:1,maintenance:1}},
     queuePrefix,workerQueues,taskLeaseMs:integer('TASK_LEASE_MS',15000,1000,60000),taskRedeliveryMs:integer('TASK_REDELIVERY_MS',30000,1000,300000),schedulerIntervalMs:integer('SCHEDULER_INTERVAL_MS',1000,100,10000),

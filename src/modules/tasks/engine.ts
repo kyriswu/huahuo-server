@@ -1,3 +1,5 @@
+import { RecordingOutlineJobs, failRecordingOutlineRun } from '../funasr/recording-outline.js';
+import { recordingOutlineKind } from '../funasr/recording-status.js';
 import type { TextIngestionJobs } from '../text-ingestion/jobs.js';
 import type pg from 'pg';
 import type { StorageJobs } from '../storage/jobs.js';
@@ -27,6 +29,7 @@ export class TaskEngine {
   readonly nodeJobs?: ProcessingNodeJobs,
   readonly metrics?: TaskMetrics,
   readonly asr?: ExternalTaskExecutor,
+  readonly recordingOutline: TaskExecutor = new RecordingOutlineJobs(pool),
  ){}
  private transaction<T>(operation:(tx:pg.PoolClient)=>Promise<T>){return withApplicationMetrics(this.metrics,()=>transaction(this.pool,operation));}
  private recordAttempt(kind:string,result:TaskResult){try{this.metrics?.recordTaskAttempt(kind,result);}catch{/* Diagnostics cannot replace a committed attempt result. */}}
@@ -68,7 +71,10 @@ export class TaskEngine {
   const retry=retryable&&t.attempt_no-t.resume_count<t.max_attempts&&t.external_state==='none',delay=retryDelay(t.attempt_no-t.resume_count);
   const state=t.external_state!=='none'?'reconciling':retry?'retry_scheduled':'failed';
   await tx.query("UPDATE task_attempts SET state='failed',error_code=$3,finished_at=now() WHERE task_id=$1 AND attempt_no=$2",[t.id,a.attempt,code]);
-  if(state==='failed')await finalizeUnsuccessfulTaskTx(tx,t,{state,errorCode:code,retryable});
+  if(state==='failed'){
+   if(t.kind===recordingOutlineKind)await failRecordingOutlineRun(tx,t.id,code);
+   await finalizeUnsuccessfulTaskTx(tx,t,{state,errorCode:code,retryable});
+  }
   else{
    await tx.query("UPDATE tasks SET state=$2,error_code=$3,retryable=$4,lease_until=NULL,lease_owner=NULL,version=version+1,available_at=now()+$5*interval '1 millisecond' WHERE id=$1",[t.id,state,code,retryable,delay]);
    if(retry)await enqueueIntent(tx,t.id,delay);await event(tx,t.id);
@@ -111,6 +117,7 @@ export class TaskEngine {
    if(!this.asr)throw new Error('FUNASR_WORKER_NOT_CONFIGURED');
    return this.asr.execute(a);
   }
+  if(a.task.kind===recordingOutlineKind){const result=await this.recordingOutline.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind==='processing.node-start'&&this.nodeJobs){const result=await this.nodeJobs.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind==='text.ingest'&&this.textIngestion){const result=await this.textIngestion.execute(a);return this.finish(a,result.digest,result.bytes);}
   if(a.task.kind.startsWith('storage.')&&this.storage){const result=await this.storage.execute(a);return this.finish(a,result.digest,result.bytes);}

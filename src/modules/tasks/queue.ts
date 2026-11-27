@@ -1,3 +1,5 @@
+import { RecordingOutlineJobs } from '../funasr/recording-outline.js';
+import { ServiceRecordingOutlineProvider } from '../funasr/outline-provider.js';
 import { TextIngestionJobs } from '../text-ingestion/jobs.js';
 import { Worker } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -38,6 +40,7 @@ export class TaskWorkers {
   private readonly logger?: FastifyBaseLogger,
   asr?: ExternalTaskExecutor & { collect?(signal?: AbortSignal): Promise<void> },
  ){
+  const outline = new RecordingOutlineJobs(pool,config.recordingOutline ? new ServiceRecordingOutlineProvider(config.recordingOutline) : undefined);
   this.nodeJobs=new ProcessingNodeJobs(pool,config);
   this.connection=new Redis(config.redisQueueUrl,{maxRetriesPerRequest:null,connectTimeout:1500,retryStrategy:n=>Math.min(n*200,2000)});
   this.connection.on('error',()=>undefined);this.contentAssetIndex=new ContentAssetIndexJobs(pool,config);this.textIngestion=new TextIngestionJobs(pool,config);const settings=new RuntimeSettings(pool,config);
@@ -47,7 +50,7 @@ export class TaskWorkers {
     if(this.stopping)return;
     this.active++;
     try{return await withApplicationMetrics(metrics,()=>settings.run(async()=>{
-    const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config),config),tagExtractorFor(config.tagExtractorProvider),this.rag,this.contentAssetIndex,this.textIngestion,this.nodeJobs,metrics,asr);
+    const engine=new TaskEngine(pool,config.taskLeaseMs,new BillingService(pool,config),new StorageJobs(pool,storageFor(config),config),tagExtractorFor(config.tagExtractorProvider),this.rag,this.contentAssetIndex,this.textIngestion,this.nodeJobs,metrics,asr,outline);
     if(typeof job.data.taskId!=='string'||!/^[a-f0-9-]{36}$/.test(job.data.taskId))return;
     if(this.stopping)return;
     const a=await engine.claim(job.data.taskId,config.instanceId);if(!a)return;

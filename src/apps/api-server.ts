@@ -33,7 +33,15 @@ import { PgEvents } from '../lib/pg-events.js';
 import { FunAsrStore, transcriptionQueue } from '../modules/funasr/store.js';
 import { registerFunAsrTranscripts } from '../modules/funasr/transcript-routes.js';
 import { FunAsrTranscripts } from '../modules/funasr/transcript.js';
-export async function buildApiServer(options: BuildOptions & IdentityOptions & { linkExtractor?: LinkExtractor; ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'> }) {
+import { registerRecorderBindingRoutes } from '../modules/recorder-bindings/routes.js';
+import { RecorderBindingService, type RecorderBindingVerifier } from '../modules/recorder-bindings/service.js';
+import { HttpRecorderBindingVerifier } from '../modules/recorder-bindings/verifier.js';
+import { RecordingProcessing, registerRecordingProcessing } from '../modules/funasr/recording-processing.js';
+export async function buildApiServer(options: BuildOptions & IdentityOptions & {
+ linkExtractor?: LinkExtractor;
+ ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'>;
+ recorderBindingVerifier?: RecorderBindingVerifier;
+}) {
  if(options.config.role!=='api-server')throw new Error('INVALID_API_ROLE');
  const dependencies=options.dependencies??createDependencies(options.config);
  const pool=dependencies.pool??poolFor(options.config);
@@ -80,8 +88,11 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  });
  app.addHook('onClose',async()=>{await ragQuery.close();});
  const funAsr=options.config.funAsr?.role==='api-server'?options.config.funAsr:undefined;
- const assets=new ContentAssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims,
-  funAsr ? transcriptionQueue(funAsr.taskCredits,billing) : undefined);
+ const transcription=funAsr ? transcriptionQueue(funAsr.taskCredits,billing) : undefined;
+ const assets=new ContentAssetService(pool,options.config.appTokenSecret!,options.config,ragQuery,resourceClaims,transcription);
+ const verifier=options.recorderBindingVerifier ?? (options.config.recorderVerifier && new HttpRecorderBindingVerifier(options.config.recorderVerifier));
+ registerRecorderBindingRoutes(app, new RecorderBindingService(pool,options.config.appTokenSecret!,verifier));
+ registerRecordingProcessing(app,new RecordingProcessing(pool,options.config.appTokenSecret!,transcription));
  registerInternalRoutes(app,{identity,callbacks,ragQuery,settings,
   ...(funAsr ? { funAsr: { store: new FunAsrStore(pool,assets), secret: funAsr.callbackSecret } } : {})});
  registerAiTemplateRoutes(app, new AiTemplateRuns(pool), new AiTemplateAgentClient(options.config.agentBaseUrl));

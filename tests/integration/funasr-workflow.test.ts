@@ -242,6 +242,30 @@ async function workflow(early: boolean, longRecording = false) {
 }
 
 describe('callback-first FunASR with isolated PostgreSQL, Redis and a loopback provider', () => {
+  it('queues one recorder outline for the newly transcribed raw revision when the callback is replayed', async () => {
+    const scenario = await workflow(true);
+    // Seed the post-archive source before dispatch; this fixture uses local storage
+    // so it can run the real ASR worker without a recording card or a cloud bucket.
+    const sourceId = [randomUUID(),'sample.wav'].map(value => Buffer.from(value).toString('base64url')).join('.');
+    const {rows: [asset]} = await root.query<{user_id: string}>(`UPDATE content_assets
+      SET source_kind='recorder_card',source_id=$2 WHERE content_asset_id=$1 RETURNING user_id`, [scenario.contentAssetId,sourceId]);
+    const {rows: [before]} = await root.query<{part_revision_id: string}>(
+      "SELECT part_revision_id FROM content_asset_parts WHERE content_asset_id=$1 AND part='raw'",[scenario.contentAssetId]);
+    const outlines = async () => (await root.query<{id: string; external_reference: string; intents: number}>(`
+      SELECT t.id,t.external_reference,count(o.id)::int AS intents FROM tasks t
+      LEFT JOIN task_outbox o ON o.task_id=t.id WHERE t.kind='content-asset.recording-outline' AND t.user_id=$1
+      GROUP BY t.id`, [asset!.user_id])).rows;
+
+    expect(await outlines()).toEqual([]);
+    const writtenRevision = await scenario.finish();
+    expect(scenario.funasr.calls.callback).toBe(204);
+    expect(writtenRevision).not.toBe(before!.part_revision_id);
+    const queued = await outlines();
+    expect(queued).toEqual([{id:expect.any(String),external_reference:`recording-outline:${scenario.contentAssetId}:${writtenRevision}`,intents:1}]);
+    expect(await scenario.funasr.deliver()).toBe(204);
+    expect(await outlines()).toEqual(queued);
+  }, 20_000);
+
   it('stores an authenticated callback delivered before 202, rejects a bad signature and applies duplicates once', async () => {
     const scenario = await workflow(true);
     const revision = await scenario.finish();

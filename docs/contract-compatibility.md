@@ -1,5 +1,9 @@
 # Server 契约与阶段记录
 
+## v0.2.0 录音卡（2026-11-27）
+
+新增 8 条录音卡和处理接口。上传凭证支持关联录音卡，资产列表可按绑定筛选，详情可在转写失败时播放原音。 [接口与验收记录](acceptance/recorder-v020.md)
+
 ## 创作页链接导入（2026-11-25）
 
 新增 POST /api/v1/link-extractions。链接类型资产允许保留外部 Markdown 图片 URL，涉及资产创建、PATCH 更新和 PUT 正文。新接口使用标准鉴权、幂等键与 envelope。 [验收记录](acceptance/link-extraction.md)

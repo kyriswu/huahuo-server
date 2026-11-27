@@ -47,6 +47,11 @@ function create(kind, args) {
   // Capture the immutable ID before start so failed starts are also cleaned up.
   resources.push(resource);
   inspectOwned(resource);
+  // Docker Desktop can expose host scripts as executable on a noexec bind mount.
+  // Copy the same bootstrap into this disposable container before its first start.
+  if (kind === 'postgres') {
+    docker(['cp', join(root, 'infra/postgres/init') + '/.', id + ':/docker-entrypoint-initdb.d/'], 'TEST_BOOTSTRAP_COPY_FAILED');
+  }
   docker(['start', id], 'TEST_CONTAINER_START_FAILED');
   return resource;
 }
@@ -73,7 +78,7 @@ try {
   for (const role of ['BOOTSTRAP', 'MIGRATOR', 'API', 'ADMIN', 'WORKER', 'SCHEDULER']) variables[`POSTGRES_${role === 'BOOTSTRAP' ? '' : `${role}_`}PASSWORD`] = randomBytes(32).toString('hex');
   writeFileSync(credentialsPath, Object.entries(variables).map(([key, value]) => `${key}=${value}`).join('\n'), { mode: 0o600, flag: 'wx' });
 
-  const postgres = create('postgres', ['--tmpfs', '/var/lib/postgresql/data:rw', '--env-file', credentialsPath, '--mount', `type=bind,src=${join(root, 'infra/postgres/init')},dst=/docker-entrypoint-initdb.d,readonly`, '-p', '127.0.0.1::5432', PG_IMAGE]);
+  const postgres = create('postgres', ['--tmpfs', '/var/lib/postgresql/data:rw', '--env-file', credentialsPath, '-p', '127.0.0.1::5432', PG_IMAGE]);
   const redis = create('redis', ['--tmpfs', '/data:rw', '-p', '127.0.0.1::6379', REDIS_IMAGE, 'redis-server', '--save', '', '--appendonly', 'no']);
   const milvus = withMilvus ? create('milvus', ['--tmpfs', '/var/lib/milvus:rw', '-e', 'ETCD_USE_EMBED=true',
     '-e', 'ETCD_DATA_DIR=/var/lib/milvus/etcd', '-e', 'COMMON_STORAGETYPE=local', '-e', 'DEPLOY_MODE=STANDALONE',

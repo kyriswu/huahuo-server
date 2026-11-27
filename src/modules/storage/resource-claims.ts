@@ -1,3 +1,4 @@
+import type { RecordingUpload } from '../recorder-sync/source.js';
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { AppConfig } from '../../config/config.js';
@@ -10,7 +11,7 @@ export class ResourceClaims {
  async lockAccount(tx:pg.PoolClient,scope:Scope):Promise<void>{
   if(!(await tx.query("SELECT id FROM users WHERE id=$1 AND status='active' AND deleted_at IS NULL FOR UPDATE",[scope.userId])).rowCount)throw new DomainError(401,'UNAUTHORIZED');
  }
- async ensure(tx:pg.PoolClient,scope:Scope,workspaceId:string|undefined,resourceIds:readonly string[]):Promise<void>{
+ async ensure(tx:pg.PoolClient,scope:Scope,workspaceId:string|undefined,resourceIds:readonly string[], recording?: RecordingUpload):Promise<void>{
   const ids=[...new Set(resourceIds.map(id=>id.toLowerCase()))].sort();if(!ids.length)return;
   if(ids.length>1000||ids.some(id=>!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/u.test(id)))throw new DomainError(400,'RESOURCE_IDS_INVALID');
   await this.lockAccount(tx,scope);
@@ -19,12 +20,19 @@ export class ResourceClaims {
    SELECT pg_advisory_xact_lock(hashtextextended('storage-upload:'||id::text,0)) FROM ordered`,[ids]);
   const existing=(await tx.query<{resource_id:string;user_id:string;status:string}>('SELECT resource_id,user_id,status FROM resources WHERE resource_id=ANY($1::uuid[]) ORDER BY resource_id FOR UPDATE',[ids])).rows;
   if(existing.some(row=>row.user_id!==scope.userId||row.status!=='ready'))throw new DomainError(404,'RESOURCE_NOT_FOUND');
+  if(recording && existing.length)throw new DomainError(409,'RECORDING_UPLOAD_MISMATCH');
   const found=new Set(existing.map(row=>row.resource_id)),missing=ids.filter(id=>!found.has(id));if(!missing.length)return;
   const receipts=await Promise.all(missing.map(id=>this.uploads.get(id)));
   for(const [index,receipt]of receipts.entries()){
+   if(recording && (!receipt || (receipt.userId===scope.userId && receipt.expiresAt<=Date.now())))
+    throw new DomainError(410,'UPLOAD_TOKEN_EXPIRED');
+   if(recording && receipt?.userId===scope.userId && receipt.status!=='completed')
+    throw new DomainError(409,'UPLOAD_NOT_READY');
    if(!receipt||receipt.id!==missing[index]||receipt.userId!==scope.userId||receipt.status!=='completed'||receipt.expiresAt<=Date.now()
     ||!receipt.object||receipt.object.uploadSessionId!==receipt.id||receipt.object.bytes!==receipt.sizeBytes||!receipt.object.version
     ||receipt.object.contentType.split(';',1)[0]!.trim().toLowerCase()!==receipt.mimeType.toLowerCase())throw new DomainError(404,'RESOURCE_NOT_FOUND');
+   if(receipt.bindingId !== recording?.bindingId || receipt.recordingKey !== recording?.recordingKey
+     || (recording && !receipt.mimeType.startsWith('audio/')))throw new DomainError(409,'RECORDING_UPLOAD_MISMATCH');
    if(receipt.storageDriver!=='aliyun-oss'||this.config.storageDriver!=='aliyun-oss'||receipt.storageBucket!==this.config.storageAliyunOss?.bucket)throw new DomainError(409,'RESOURCE_STORAGE_MISMATCH');
   }
   const completed=receipts.filter(receipt=>receipt!==undefined),added=completed.reduce((sum,r)=>sum+BigInt(r.sizeBytes),0n);

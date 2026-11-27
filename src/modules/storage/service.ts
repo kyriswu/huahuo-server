@@ -1,3 +1,5 @@
+import { assertRecordingKey } from '../recorder-sync/source.js';
+import { requireActiveRecorderBinding } from '../recorder-bindings/service.js';
 import { idempotent } from '../../lib/idempotency.js';
 import type pg from 'pg';
 import { storageJob } from './jobs.js';
@@ -10,7 +12,7 @@ import { findUploadedObject, validateUploadedObject, withUploadLock } from './up
 const uuid=(value:string)=>/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/iu.test(value);
 const dto=(r:Record<string,unknown>)=>({resourceId:String(r.resource_id),fileName:String(r.file_name),mimeType:String(r.mime_type),sizeBytes:Number(r.size_bytes),sha256:typeof r.sha256==='string'?r.sha256:null});
 const temporaryDto=(r:TemporaryUpload)=>({resourceId:r.id,fileName:r.fileName,mimeType:r.mimeType,sizeBytes:r.sizeBytes,sha256:null});
-export interface UploadInput {fileName:string;mimeType:string;sizeBytes:bigint;workspaceId?:string;}
+export interface UploadInput {fileName:string;mimeType:string;sizeBytes:bigint;workspaceId?:string;bindingId?:string;recordingKey?:string;}
 
 /** Uploads are temporary Redis receipts. Only a later business transaction claims a resource. */
 export class StorageService {
@@ -44,12 +46,13 @@ export class StorageService {
   if(workspaceId&&!(await client.query("SELECT 1 FROM workspaces WHERE id=$1 AND user_id=$2 AND state='ready'",[workspaceId,scope.userId])).rowCount)
    throw new DomainError(404,'WORKSPACE_NOT_FOUND');
  }
- private async owned(client:pg.PoolClient,scope:Scope,id:string,workspaceId?:string){
+ private async owned(client:pg.PoolClient,scope:Scope,id:string,workspaceId?:string,requireBinding=true){
   if(!uuid(id))throw new DomainError(400,'UPLOAD_ID_INVALID');
   await this.authorize(client,scope,workspaceId);
   const upload=await this.uploads.get(id);
   if(!upload||upload.userId!==scope.userId)throw new DomainError(404,'UPLOAD_NOT_FOUND');
 
+  if(requireBinding && upload.bindingId)await requireActiveRecorderBinding(client,scope.userId,upload.bindingId);
   if(upload.storageDriver!==this.config.storageDriver||upload.storageBucket!==this.config.storageAliyunOss?.bucket)
    throw new DomainError(503,'DIRECT_UPLOAD_NOT_CONFIGURED');
   return upload;
@@ -66,15 +69,25 @@ export class StorageService {
  }
  async createUpload(scope:Scope,input:UploadInput,key:string){
   if(!key)throw new DomainError(400,'IDEMPOTENCY_KEY_REQUIRED');
-  this.validate(input);const direct=this.direct();
+  this.validate(input);
+  let recording: { bindingId: string; recordingKey: string } | undefined;
+  if (input.bindingId !== undefined || input.recordingKey !== undefined) {
+   if (!input.fileName.trim() || !input.bindingId || !uuid(input.bindingId) || !input.recordingKey || !input.mimeType.toLowerCase().startsWith('audio/')) {
+    throw new DomainError(400,'RECORDING_UPLOAD_INVALID');
+   }
+   assertRecordingKey(input.recordingKey);
+   recording = { bindingId: input.bindingId.toLowerCase(), recordingKey: input.recordingKey };
+  }
+  const direct=this.direct();
   // Temporary files have no account-space charge or reservation. A later
   // business claim checks permanent capacity and records usage in its transaction.
   const admitted=await transaction(this.pool,async tx=>{
    await assertScope(tx,scope);
+   if (recording) await requireActiveRecorderBinding(tx,scope.userId,recording.bindingId,true);
    if(!(await tx.query("SELECT id FROM users WHERE id=$1 AND status='active' AND deleted_at IS NULL FOR SHARE",[scope.userId])).rowCount)
     throw new DomainError(401,'UNAUTHORIZED');
    await this.authorize(tx,scope,input.workspaceId);
-   return this.uploads.admit({userId:scope.userId,fileName:input.fileName,mimeType:input.mimeType.toLowerCase(),sizeBytes:Number(input.sizeBytes),storageDriver:'aliyun-oss',storageBucket:this.config.storageAliyunOss!.bucket},key);
+   return this.uploads.admit({...recording,userId:scope.userId,fileName:input.fileName,mimeType:input.mimeType.toLowerCase(),sizeBytes:Number(input.sizeBytes),storageDriver:'aliyun-oss',storageBucket:this.config.storageAliyunOss!.bucket},key);
   });
   return withUploadLock(this.pool,admitted.id,async client=>{
    // A business claim may have committed and removed the receipt after admission.
@@ -90,6 +103,7 @@ export class StorageService {
     }catch(error){throw new DomainError(503,'UPLOAD_INITIALIZATION_UNAVAILABLE',false,{cause:error});}
    }
    await this.authorize(client,scope,input.workspaceId);
+   if(upload.bindingId)await requireActiveRecorderBinding(client,scope.userId,upload.bindingId);
    const seconds=Math.max(1,Math.min(3600,Math.floor((upload.expiresAt-Date.now())/1000)));
    const signed=await direct.sign(upload.id,upload.remoteUploadId,upload.mimeType,upload.sizeBytes,seconds);
    return {uploadId:upload.id,resourceId:upload.id,uploadRequired:true,uploadUrl:signed.url,method:'PUT' as const,headers:signed.headers,
@@ -136,6 +150,7 @@ export class StorageService {
     if(!object)throw new DomainError(409,'UPLOAD_NOT_READY');
     validateUploadedObject(upload,object);
     await this.authorize(client,scope,workspaceId);
+    if(upload.bindingId)await requireActiveRecorderBinding(client,scope.userId,upload.bindingId);
     this.active(upload);
     upload.object=object;upload.status='completed';await this.uploads.save(upload);
    }catch(error){
@@ -152,7 +167,7 @@ export class StorageService {
   return withUploadLock(this.pool,id,async client=>{
    await this.authorize(client,scope);
    if((await client.query('SELECT 1 FROM resources WHERE resource_id=$1 AND user_id=$2',[id,scope.userId])).rowCount)throw new DomainError(409,'UPLOAD_ALREADY_CLAIMED');
-   const upload=await this.owned(client,scope,id);
+   const upload=await this.owned(client,scope,id,undefined,false);
    upload.status='cancelled';await this.uploads.save(upload);
    return {uploadId:id,status:'cancel_pending' as const};
   });
@@ -175,7 +190,19 @@ export class StorageService {
   const pending=(await Promise.all(unique.filter(id=>!registered.has(id)).map(id=>this.uploads.get(id))))
    .filter((upload):upload is TemporaryUpload=>Boolean(upload&&upload.userId===scope.userId&&upload.status==='completed'&&upload.object&&upload.expiresAt>Date.now()
     &&upload.storageDriver==='aliyun-oss'&&upload.storageBucket===bucket));
-  for(const upload of pending)rows.push({resource_id:upload.id,mime_type:upload.mimeType,file_name:upload.fileName,size_bytes:upload.object!.bytes,object_key:upload.id,object_version:upload.object!.version});
+  // A scoped receipt can preview its temporary object only during the issuing binding.
+  // Permanent account-owned resources remain playable after the card is unbound.
+  const bindingIds=[...new Set(pending.flatMap(upload=>upload.bindingId?[upload.bindingId]:[]))];
+  const activeBindings=new Set<string>();
+  if(bindingIds.length){
+   const bindings=await transaction(this.pool,async tx=>{
+    await this.authorize(tx,scope,workspaceId);
+    return tx.query<{binding_id:string}>(`SELECT binding_id FROM recorder_bindings
+     WHERE user_id=$1 AND binding_id=ANY($2::uuid[]) AND unbound_at IS NULL`,[scope.userId,bindingIds]);
+   });
+   for(const row of bindings.rows)activeBindings.add(row.binding_id);
+  }
+  for(const upload of pending.filter(item=>!item.bindingId || activeBindings.has(item.bindingId)))rows.push({resource_id:upload.id,mime_type:upload.mimeType,file_name:upload.fileName,size_bytes:upload.object!.bytes,object_key:upload.id,object_version:upload.object!.version});
   const exp=Date.now()+15*60_000;
   return Promise.all(rows.map(async row=>({resourceId:row.resource_id,url:await signUrl(row.object_key,900,{contentDisposition:`inline; filename="${row.file_name.replace(/[^A-Za-z0-9._-]/gu,'_')}"`,contentEncoding:'identity',version:row.object_version}),mimeType:row.mime_type,fileName:row.file_name,sizeBytes:Number(row.size_bytes),expiresAt:new Date(exp).toISOString()})));
  }

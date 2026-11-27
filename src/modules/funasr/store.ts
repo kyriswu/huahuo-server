@@ -7,6 +7,7 @@ import type { AudioTranscriptionInput, ContentAssetService } from '../content-as
 import { DomainError, transaction, type Scope } from '../identity/store.js';
 import { wakeExternalTaskTx } from '../tasks/external-continuation.js';
 import { enqueueIntent, event, funAsrTaskKind, funAsrTaskReference, hash, newTaskMaxAttempts, terminal, type TaskRow } from '../tasks/model.js';
+import { enqueueRecordingOutline } from './recording-outline.js';
 import { persistAudioTranscript } from './transcript-data.js';
 
 export interface FunAsrJob {
@@ -24,9 +25,12 @@ export const assetInput = (job: FunAsrJob): AudioTranscriptionInput => ({
 export function transcriptionQueue(credits: number, billing: BillingService) {
   return { async enqueue(tx: pg.PoolClient, scope: Scope, input: AudioTranscriptionInput) {
     const taskId = randomUUID();
-    await tx.query(`INSERT INTO tasks(id,user_id,kind,queue,state,trace_id,max_attempts,external_reference)
-      VALUES($1,$2,$3,'content','queued',$4,$5,$6)`,
-    [taskId, scope.userId, funAsrTaskKind, resolveTraceId(scope.traceId), newTaskMaxAttempts(), funAsrTaskReference(taskId)]);
+    const inputId = input.language !== undefined ? randomUUID() : null;
+    if (inputId) await tx.query('INSERT INTO task_inputs(id,user_id,body) VALUES($1,$2,$3)',
+      [inputId,scope.userId,JSON.stringify({language:input.language})]);
+    await tx.query(`INSERT INTO tasks(id,user_id,kind,queue,state,trace_id,max_attempts,external_reference,input_id)
+      VALUES($1,$2,$3,'content','queued',$4,$5,$6,$7)`,
+    [taskId, scope.userId, funAsrTaskKind, resolveTraceId(scope.traceId), newTaskMaxAttempts(), funAsrTaskReference(taskId),inputId]);
     await tx.query(`INSERT INTO funasr_jobs(task_id,submission_id,asset_id,resource_id,raw_revision_id) VALUES($1,$2,$3,$4,$5)`,
       [taskId, randomUUID(), input.assetId, input.resourceId, input.rawRevisionId]);
     if (credits > 0) {
@@ -88,6 +92,12 @@ export class FunAsrStore {
     if (saved) await persistAudioTranscript(tx, {
       assetId: job.asset_id, resourceId: job.resource_id, transcriptionId: job.task_id, transcript: saved,
     });
+    if (saved) {
+      const source = (await tx.query<{ revision: string }>(`SELECT p.part_revision_id AS revision
+        FROM content_assets a JOIN content_asset_parts p ON p.content_asset_id=a.content_asset_id AND p.part='raw'
+        WHERE a.content_asset_id=$1 AND a.user_id=$2 AND a.source_kind='recorder_card'`,[job.asset_id,task.user_id])).rows[0];
+      if (source) await enqueueRecordingOutline(tx,task.user_id!,task.trace_id,job.asset_id,source.revision);
+    }
     await tx.query(`UPDATE funasr_jobs SET remote_task_id=$2,event_id=$3,event_hash=$4,delivery=$5,
        transcript=$6,error_code=$7,asset_applied=$8,segment_count=$9,speaker_ids=$10 WHERE task_id=$1`,
     [job.task_id, receipt.taskId, receipt.eventId, digest, delivery,

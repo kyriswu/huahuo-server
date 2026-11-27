@@ -8,6 +8,8 @@ export const TEMPORARY_UPLOAD_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 export interface TemporaryUploadInput {
   userId: string;
+  bindingId?: string;
+  recordingKey?: string;
   fileName: string;
   mimeType: string;
   sizeBytes: number;
@@ -68,7 +70,7 @@ local raw = redis.call('GET', KEYS[1])
 if not raw then return {-1} end
 local previous = cjson.decode(raw)
 local next = cjson.decode(ARGV[1])
-local immutable = {'id','userId','fileName','mimeType','sizeBytes','storageDriver','storageBucket','createdAt','expiresAt','idempotencyHash','requestHash'}
+local immutable = {'id','userId','fileName','mimeType','sizeBytes','storageDriver','storageBucket','createdAt','expiresAt','idempotencyHash','requestHash','bindingId','recordingKey'}
 for _, field in ipairs(immutable) do
   if previous[field] ~= next[field] then return {-2} end
 end
@@ -135,6 +137,10 @@ function recordFrom(value: unknown): TemporaryUpload {
       || !Number.isSafeInteger(record.createdAt) || !Number.isSafeInteger(record.expiresAt) || record.expiresAt <= record.createdAt
       || !['initiated', 'completed', 'cancelled'].includes(record.status)
       || !/^[a-f0-9]{64}$/u.test(record.idempotencyHash) || !/^[a-f0-9]{64}$/u.test(record.requestHash)) throw new Error('UPLOAD_RECORD_INVALID');
+    if(record.bindingId !== undefined || record.recordingKey !== undefined) {
+      if(typeof record.bindingId !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/iu.test(record.bindingId)
+        || typeof record.recordingKey !== 'string' || !record.recordingKey.trim() || Buffer.byteLength(record.recordingKey)>256) throw new Error('UPLOAD_RECORD_INVALID');
+    }
     validId(record.id);
     if (record.status === 'completed' && !record.object) throw new Error('UPLOAD_COMPLETED_OBJECT_MISSING');
     if (record.object && (!Number.isSafeInteger(record.object.bytes) || record.object.bytes < 0
@@ -194,6 +200,7 @@ export class RedisTemporaryUploads implements TemporaryUploadStore {
     const fields: TemporaryUploadInput = {
       userId: input.userId, fileName: input.fileName, mimeType: input.mimeType,
       sizeBytes: input.sizeBytes, storageDriver: input.storageDriver, storageBucket: input.storageBucket,
+      ...(input.bindingId ? { bindingId: input.bindingId, recordingKey: input.recordingKey } : {}),
     };
     const idempotencyHash = hash(JSON.stringify([input.userId, key]));
     const record = { ...fields, id: randomUUID(), status: 'initiated', idempotencyHash, requestHash: hash(JSON.stringify(fields)) };

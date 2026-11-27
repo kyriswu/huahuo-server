@@ -1,3 +1,7 @@
+## v0.2.0 录音卡（2026-11-27）
+
+本轮只读核对 App 提交 `3f7b663`。`lib/features/home/data/cd_content_asset_repository.dart` 以 `recording` 创建普通录音，`pigeons/cd_recording/cd_external_recording_api.dart` 定义本地音频拼接。录音卡云端入库另用专属接口。 [接口与验收记录](acceptance/recorder-v020.md)
+
 ## 创作页链接导入（2026-11-25）
 
 UNVERIFIED_APP。本机同级 ../huahuo-ai 不存在。待核对创作页对 POST /api/v1/link-extractions、业务错误提示及外部图片 URL 的消费。 [验收记录](acceptance/link-extraction.md)

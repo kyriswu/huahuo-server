@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "id": "20261125-funasr-transcription-local",
+  "id": "20261127-recorder-local",
   "baseRevision": "e6ad2b2cb1f4fe9547a3f45399481063a609c515",
   "services": ["api-server", "admin", "worker", "scheduler"],
   "database": {
@@ -8,17 +8,22 @@
       "0002_funasr_transcription.sql",
       "0003_funasr_transcript_edits.sql",
       "0004_content_asset_audio_transcripts.sql",
-      "0005_materialize_legacy_audio_transcript_edits.sql"
+      "0005_materialize_legacy_audio_transcript_edits.sql",
+      "0006_recorder_bindings.sql"
     ],
-    "verifySql": "scripts/release/changes/20261125-funasr-transcription-local/verify-db.sql",
+    "verifySql": "scripts/release/changes/20261127-recorder-local/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "以当前 test 提交作为隔离 CI 演练基线。0005 仅处理有旧单段修订、尚无当前转写且原音频仍匹配的资产，并保留当前转写记录。实际环境迁移账本、行数和发布基准待发布恢复时核对。"
+      "reason": "以当前 test 提交作为隔离 CI 演练基线。0005 仅处理有旧单段修订、尚无当前转写且原音频仍匹配的资产，并保留当前转写记录。0006 新建绑定表，并建立录音来源及任务索引；旧音频无需写入。实际环境迁移账本、行数和发布基准待发布恢复时核对。"
     }
   },
   "configuration": {
     "mode": "candidate",
     "changes": [
+      { "key": "RECORDER_VERIFIER_URL", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": false },
+      { "key": "RECORDER_VERIFIER_TOKEN", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": false },
+      { "key": "RECORDING_OUTLINE_SERVICE_URL", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "RECORDING_OUTLINE_SERVICE_TOKEN", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
       { "key": "FUNASR_COMPUTE_PROVIDER", "operation": "add", "roles": ["api-server", "worker"], "required": false, "hasDefault": true },
       { "key": "FUNASR_CALLBACK_SECRET", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": false },
       { "key": "FUNASR_TASK_CREDITS", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": true },
@@ -45,8 +50,8 @@
       { "key": "FUNASR_TASK_TIMEOUT_MS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true },
       { "key": "FUNASR_IDLE_MS", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": true }
     ],
-    "reviewedFiles": [".env.example", "compose.yaml", "src/config/config.ts", "src/config/funasr.ts"],
-    "verifyFile": "scripts/release/changes/20261125-funasr-transcription-local/verify-config.mjs"
+    "reviewedFiles": [".env.example", "compose.yaml", "src/config/config.ts", "src/config/funasr.ts", "src/config/recorder-verifier.ts", "src/config/recording-outline.ts", ".env.compose.cloud.example", ".env.compose.local.example", ".env.host.example"],
+    "verifyFile": "scripts/release/changes/20261127-recorder-local/verify-config.mjs"
   },
   "dependencies": [],
   "backfill": {

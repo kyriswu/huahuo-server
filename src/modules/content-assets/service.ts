@@ -1,3 +1,7 @@
+import { enqueueRecordingTranscription } from '../funasr/recording-transcription.js';
+import { requireActiveRecorderBinding } from '../recorder-bindings/service.js';
+import { RECORDER_SOURCE_KIND, recordingSourceId, recordingStatuses } from '../recorder-sync/source.js';
+import { readRecordingProcessing, readRecordingProcessingBatch } from '../funasr/recording-status.js';
 import { importLink } from './link-import.js';
 import type { LinkExtractor } from '../../lib/link-extraction/index.js';
 import {inferAssetKind} from './asset-kind.js';
@@ -47,6 +51,7 @@ export interface AudioTranscriptionInput {
  assetId: string;
  resourceId: string;
  rawRevisionId: string;
+ language?: 'auto';
 }
 export interface AudioTranscriptionQueue {
  enqueue(tx: pg.PoolClient, scope: Scope, input: AudioTranscriptionInput): Promise<void>;
@@ -223,7 +228,50 @@ export class ContentAssetService {
    return { items, nextCursor: rows.length > ASSET_TAG_PAGE_SIZE ? items[ASSET_TAG_PAGE_SIZE - 1]!.normalizedName : null };
   });
  }
- async listContentAssets(scope:Scope,cursor?:string,selectedKinds?:AssetKind[]){return transaction(this.pool,async tx=>{await assertScope(tx,scope);return listContentAssetPage(tx,scope.userId,cursor,selectedKinds);});}
+ async listContentAssets(scope:Scope,cursor?:string,selectedKinds?:AssetKind[],bindingId?:string){
+  return transaction(this.pool,async tx=>{
+   await assertScope(tx,scope);
+   const binding=bindingId ? await requireActiveRecorderBinding(tx,scope.userId,bindingId) : undefined;
+   const page=await listContentAssetPage(tx,scope.userId,cursor,selectedKinds,binding);
+   const recorderIds=page.items.filter(item=>item.sourceKind===RECORDER_SOURCE_KIND).map(item=>item.contentAssetId);
+   if(!recorderIds.length)return page;
+   const states=await readRecordingProcessingBatch(tx,scope.userId,recorderIds);
+   return {...page,items:page.items.map(item=>({...item,processing:states.get(item.contentAssetId)}))};
+  });
+ }
+ async checkRecordings(scope:Scope,bindingId:string,recordingKeys:string[]){
+  return transaction(this.pool,async tx=>{
+   await assertScope(tx,scope);
+   const binding=await requireActiveRecorderBinding(tx,scope.userId,bindingId,true);
+   return {items:await recordingStatuses(tx,scope.userId,binding.deviceId,recordingKeys)};
+  });
+ }
+ async archiveRecording(scope:Scope,bindingId:string,input:{uploadId:string;recordingKey:string;title?:string},key:string){
+  return transaction(this.pool,async tx=>{
+   await assertScope(tx,scope);
+   const binding=await requireActiveRecorderBinding(tx,scope.userId,bindingId,true);
+   const sourceId=recordingSourceId(binding.deviceId,input.recordingKey);
+   await this.lockTree(tx,scope.userId,true);
+   await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify(['recorder-source',scope.userId,sourceId])]);
+   const lookup=async()=> (await recordingStatuses(tx,scope.userId,binding.deviceId,[input.recordingKey]))[0]!;
+   await idempotent(tx,this.secret,scope.userId,'recorder.archive',key,{bindingId,...input},async()=>{
+    const saved=await lookup();
+    if(saved.contentAssetId)return saved.contentAssetId;
+    if(!this.resourceClaims)throw new DomainError(503,'RECORDING_UPLOAD_UNAVAILABLE');
+    if(binding.generationMode==='auto' && binding.transcriptionLanguage!=='auto')throw new DomainError(409,'RECORDING_LANGUAGE_UNSUPPORTED');
+    await this.resourceClaims.ensure(tx,scope,undefined,[input.uploadId],{bindingId:binding.bindingId,recordingKey:input.recordingKey});
+    const original=await tx.query<{file_name:string}>('SELECT file_name FROM resources WHERE resource_id=$1 AND user_id=$2',[input.uploadId,scope.userId]);
+    const asset=await this.createAssetInTransaction(tx,scope,{
+     title:input.title??original.rows[0]!.file_name,assetKind:'audio',sourceKind:RECORDER_SOURCE_KIND,sourceId,
+     resourceRefs:[{resourceId:input.uploadId,usage:'original'}],parts:{raw:''},
+    },undefined,binding.generationMode);
+    return asset.contentAssetId;
+   });
+   const current=await lookup();
+   const processing=current.status==='synced' && current.contentAssetId ? await readRecordingProcessing(tx,scope.userId,current.contentAssetId) : undefined;
+   return {...current,processing};
+  });
+ }
  async getContentAsset(scope: Scope, id: string, revisionId?: string) {
   return transaction(this.pool, async tx => {
    await assertScope(tx, scope);
@@ -241,6 +289,7 @@ export class ContentAssetService {
     ...await this.contentAssetDto(tx, scope, id, contentAsset),
     assetKind: contentAsset.asset_kind,
     contentStatus: contentAsset.processing_status,
+    ...(contentAsset.source_kind===RECORDER_SOURCE_KIND && contentAsset.state==='active' ? {processing:await readRecordingProcessing(tx,scope.userId,id)} : {}),
     audioTranscript,
    };
   });
@@ -384,12 +433,13 @@ export class ContentAssetService {
   },signal);
  }
  async createContentAsset(scope:Scope,input:CreateAssetInput,key:string){
+  if(input.sourceKind===RECORDER_SOURCE_KIND)throw new DomainError(400,'CONTENT_ASSET_SOURCE_RESERVED');
   return transaction(this.pool,tx=>this.createAssetInTransaction(tx,scope,input,key));
  }
- private async createAssetInTransaction(tx:pg.PoolClient,scope:Scope,input:CreateAssetInput,key?:string){
+ private async createAssetInTransaction(tx:pg.PoolClient,scope:Scope,input:CreateAssetInput,key?:string,recordingMode?:'manual'|'auto'){
   await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
-  await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
+  if (!recordingMode) await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
   const prepared=await normalizeOwnedImageParts(tx,scope,input.parts,this.config,this.resourceClaims,undefined,(input.assetKind??inferAssetKind(input.sourceKind))==='link');
   const normalized={...input,parts:prepared.parts,imageOrigins:prepared.imageOrigins};
   return idempotent(tx,this.secret,scope.userId,'content-asset.create',key,normalized,async()=>{
@@ -410,12 +460,18 @@ export class ContentAssetService {
     await tx.query('INSERT INTO content_asset_parts(part_revision_id,content_asset_id,part,revision,content_markdown,content_sha256) VALUES($1,$2,$3,1,$4,$5)',[partRevisionId,id,part,text,sha(text)]);
    }
    await this.cursor(tx,scope.userId,'content_asset',id,'created',false,rid,1,null,null);
-   const originalAudio=this.audioTranscription && assetKind==='audio' && contentStatus==='draft'
-    ? await originalAudioResource(tx,scope.userId,id) : undefined;
-   if(originalAudio && this.audioTranscription){
+   const originalAudio = assetKind === 'audio' && contentStatus === 'draft' && (recordingMode === 'auto' || (!recordingMode && this.audioTranscription))
+    ? await originalAudioResource(tx, scope.userId, id) : undefined;
+   if (recordingMode === 'auto') {
+    if (!originalAudio) throw new DomainError(409,'RECORDING_UPLOAD_MISMATCH');
+    const status = await enqueueRecordingTranscription(tx, scope, {
+     assetId: id, resourceId: originalAudio, rawRevisionId, language: 'auto',
+    }, this.audioTranscription);
+    await tx.query('UPDATE content_assets SET processing_status=$2 WHERE content_asset_id=$1',[id,status]);
+   } else if (originalAudio && this.audioTranscription) {
     await tx.query("UPDATE content_assets SET processing_status='processing' WHERE content_asset_id=$1",[id]);
     await this.audioTranscription.enqueue(tx,scope,{assetId:id,resourceId:originalAudio,rawRevisionId});
-   }else{
+   } else if (recordingMode !== 'manual') {
     if(this.config?.tagExtractorProvider!=='disabled')await this.task(tx,scope,id,rid);
     await this.indexContentAsset(tx,scope,id);
    }
@@ -451,6 +507,11 @@ export class ContentAssetService {
     Object.assign(complete,canonicalParts);
     const pendingAudio=asset.asset_kind==='audio' && asset.processing_status==='processing';
     const previousAudio=pendingAudio && input.resourceRefs ? await originalAudioResource(tx,scope.userId,id) : undefined;
+    if (asset.source_kind===RECORDER_SOURCE_KIND && input.resourceRefs) {
+     const originals=input.resourceRefs.filter(ref=>ref.usage==='original');
+     if(originals.length!==1 || originals[0]!.resourceId.toLowerCase()!==await originalAudioResource(tx,scope.userId,id))
+      throw new DomainError(409,'RECORDING_ORIGINAL_IMMUTABLE');
+    }
     const refsChanged=updatesRefs?await syncContentAssetRefs(tx,scope,id,complete,input.resourceRefs):false;
     const supersedesAudio=pendingAudio && (Object.hasOwn(input.parts??{},'raw')
      || Boolean(refsChanged && input.resourceRefs && previousAudio!==await originalAudioResource(tx,scope.userId,id)));

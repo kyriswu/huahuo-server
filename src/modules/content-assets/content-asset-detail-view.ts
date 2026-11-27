@@ -35,7 +35,9 @@ function displaySourceUrl(asset: Omit<Detail, 'audioTranscript'>) {
 export async function contentAssetDisplayContent(
   storage: StorageService, scope: Scope, asset: Omit<Detail, 'audioTranscript'>, transcript: Detail['audioTranscript'],
 ) {
-  if (asset.state !== 'active' || asset.contentStatus === 'processing' || asset.contentStatus === 'failed') return null;
+  if (asset.state !== 'active') return null;
+  const processingIncomplete = asset.contentStatus === 'processing' || asset.contentStatus === 'failed';
+  if (processingIncomplete && asset.sourceKind !== 'recorder_card') return null;
 
   const raw = asset.parts.raw?.contentMarkdown ?? '';
   const text = transcript?.text ?? (asset.assetKind === 'creative' || raw.trim() ? raw : null);

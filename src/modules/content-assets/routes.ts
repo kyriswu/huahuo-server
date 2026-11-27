@@ -1,3 +1,5 @@
+import { registerRecorderSyncRoutes } from '../recorder-sync/routes.js';
+import { RecordingProcessingSchema } from '../funasr/recording-status.js';
 import { LinkError, LinkExtractor } from '../../lib/link-extraction/index.js';
 import { extractionTimeoutMs } from './link-import.js';
 import { JustOneApiAdapter } from '../../integrations/justone-api.js';
@@ -44,13 +46,14 @@ const createContentAssetBody = Type.Object({
  })),
 }, Strict);
 const contentAssetDetail=Type.Object({
- assetKind:AssetKindSchema,contentStatus:ContentStatusSchema,content:Type.Union([ContentAssetDisplayContentSchema,Type.Null()]),
+ processing:Type.Optional(RecordingProcessingSchema),assetKind:AssetKindSchema,contentStatus:ContentStatusSchema,content:Type.Union([ContentAssetDisplayContentSchema,Type.Null()]),
 },{additionalProperties:true});
-const contentAssetListItem=Type.Object({contentAssetId:Id,folderId:Type.Union([Id,Type.Null()]),title:Type.String(),state:Type.Literal('active'),contentAssetRevisionId:Id,etag:Type.String(),contentCursor:Type.String(),assetKind:AssetKindSchema,contentStatus:ContentStatusSchema,sourceKind:Type.String(),sourceRef:Type.Union([Type.Object({kind:Type.String(),id:Type.String()},Strict),Type.Null()]),createdAt:Type.String({format:'date-time'}),updatedAt:Type.String({format:'date-time'}),preview:Type.String({maxLength:CONTENT_ASSET_PREVIEW_LENGTH})},Strict);
+const contentAssetListItem=Type.Object({originalResourceId:Type.Optional(Id),processing:Type.Optional(RecordingProcessingSchema),contentAssetId:Id,folderId:Type.Union([Id,Type.Null()]),title:Type.String(),state:Type.Literal('active'),contentAssetRevisionId:Id,etag:Type.String(),contentCursor:Type.String(),assetKind:AssetKindSchema,contentStatus:ContentStatusSchema,sourceKind:Type.String(),sourceRef:Type.Union([Type.Object({kind:Type.String(),id:Type.String()},Strict),Type.Null()]),createdAt:Type.String({format:'date-time'}),updatedAt:Type.String({format:'date-time'}),preview:Type.String({maxLength:CONTENT_ASSET_PREVIEW_LENGTH})},Strict);
 const tag=Type.Object({tagId:Id,displayName:Type.String(),normalizedName:Type.String(),source:Type.Union([Type.Literal('manual'),Type.Literal('extracted')])},Strict);
 const tagView=Type.Object({contentAssetId:Id,tags:Type.Array(tag),tagSetVersion:Type.Integer(),tagEtag:Type.String(),manualOverride:Type.Boolean(),suggestions:Type.Array(Type.Object({suggestionId:Id,contentAssetRevisionId:Id,labels:Type.Array(Type.String()),provider:Type.String(),status:Type.String(),createdAt:Type.String()},Strict)),contentAssetEtag:Type.String(),processingStatus:Type.String(),extraction:Type.Union([Type.Null(),Type.Object({taskId:Id,status:Type.String(),outcome:Type.Union([Type.String(),Type.Null()]),provider:Type.Union([Type.String(),Type.Null()]),errorCode:Type.Union([Type.String(),Type.Null()])},Strict)])},Strict);
 export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:ContentAssetService,storage:StorageService,
  extractor = new LinkExtractor(new JustOneApiAdapter(contentAssets.config?.justOneApiToken),{huahuoHost:contentAssets.config?.huahuoShareHost})){const guard=auth;
+ registerRecorderSyncRoutes(app,contentAssets);
  app.post<{Body:{url:string}}>('/api/v1/link-extractions',{
   preHandler:guard,schema:{body:Type.Object({url:Type.String({minLength:1,maxLength:4096})},Strict),querystring:empty,
    response:{200:Envelope(Type.Object({title:Type.String(),platform:Type.String(),contentType:Type.String(),markdown:Type.String(),contentAssetId:Id},Strict)),...errors,403:ErrorSchema,422:ErrorSchema,504:ErrorSchema}},
@@ -73,17 +76,17 @@ export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:Con
  app.get('/api/v1/folders/:folderId',{preHandler:guard,schema:{params:fp,querystring:empty,response:{200:Envelope(folder),...errors}}},async req=>success(await contentAssets.getFolder(scope(req),(req.params as {folderId:string}).folderId),req.id));
  for(const op of ['update','move'] as const){const url=op==='update'?'/api/v1/folders/:folderId':'/api/v1/folders/:folderId/move';app[op==='update'?'patch':'post'](url,{preHandler:guard,schema:{params:fp,body:op==='update'?Type.Object({displayName:Text(120)},Strict):Type.Object({parentFolderId:Type.Union([Id,Type.Null()])},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const p=req.params as {folderId:string};const b=req.body as {displayName?:string;parentFolderId?:string|null};const etag=String(req.headers['if-match']??'');return success(op==='update'?await contentAssets.updateFolder(scope(req),p.folderId,b.displayName!,etag,idempotencyKey(req,'required')!):await contentAssets.moveFolder(scope(req),p.folderId,b.parentFolderId??null,etag,idempotencyKey(req,'required')!),req.id);});}
  for(const action of ['delete','restore'] as const)app[action==='delete'?'delete':'post'](`/api/v1/folders/:folderId${action==='restore'?'/restore':''}`,{preHandler:guard,schema:{params:fp,body:empty,querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const p=req.params as {folderId:string};return success(await contentAssets.deleteFolder(scope(req),p.folderId,String(req.headers['if-match']??''),idempotencyKey(req,'required')!,action==='restore'),req.id);});
- app.get<{Querystring: {cursor?: string; assetKind?: AssetKind[]}}>('/api/v1/content-assets', {
+ app.get<{Querystring: {cursor?: string; assetKind?: AssetKind[]; bindingId?:string}}>('/api/v1/content-assets', {
   preHandler: guard,
   schema: {
-   querystring: Type.Object({cursor: Type.Optional(Type.String({minLength: 1, maxLength: 512})), assetKind: Type.Optional(Type.Array(AssetKindSchema, {minItems: 1, maxItems: assetKinds.length, description: '多选时重复传 assetKind，例如 assetKind=image&assetKind=audio。'}))}, Strict),
+   querystring: Type.Object({bindingId:Type.Optional(Id),cursor: Type.Optional(Type.String({minLength: 1, maxLength: 512})), assetKind: Type.Optional(Type.Array(AssetKindSchema, {minItems: 1, maxItems: assetKinds.length, description: '多选时重复传 assetKind，例如 assetKind=image&assetKind=audio。'}))}, Strict),
    response: {200: Envelope(Type.Object({
     items: Type.Array(contentAssetListItem, {maxItems: CONTENT_ASSET_PAGE_SIZE}),
     nextCursor: Type.Union([Type.String(), Type.Null()]),
     assetKinds: AssetKindsSchema,
    }, Strict)), ...errors},
   },
- }, async req => success(await contentAssets.listContentAssets(scope(req), req.query.cursor, req.query.assetKind), req.id));
+ }, async req => success(await contentAssets.listContentAssets(scope(req), req.query.cursor, req.query.assetKind, req.query.bindingId), req.id));
  app.post('/api/v1/content-asset-imports',{bodyLimit:EDITABLE_MARKDOWN_BODY_LIMIT,preHandler:guard,schema:{body:Type.Object({title:Text(240),mimeType:Type.Union([Type.Literal('text/plain'),Type.Literal('text/markdown')]),content:Type.String({minLength:1,maxLength:EDITABLE_MARKDOWN_MAX_CHARS}),folderId:Type.Optional(Type.Union([Id,Type.Null()])),sourceUrl:Type.Optional(Type.String({maxLength:2048})),resourceRefs:Type.Optional(Type.Array(Type.Object({resourceId:Id,usage:Text(64)},Strict),{maxItems:100}))},Strict),querystring:empty,response:{200:Type.Any(),...errors}}},async req=>{const result=await contentAssets.importContentAsset(scope(req),req.body as Parameters<ContentAssetService['importContentAsset']>[1],idempotencyKey(req,'required')!);return success({...result,contentAsset:await contentAssetView(req,result.contentAsset)},req.id);});
  app.post('/api/v1/content-assets',{bodyLimit:EDITABLE_MARKDOWN_BODY_LIMIT,preHandler:guard,schema:{body:createContentAssetBody,querystring:empty,response:{200:Envelope(contentAsset),...errors}}},async req=>{return success(await contentAssetView(req,await contentAssets.createContentAsset(scope(req),req.body as Parameters<ContentAssetService['createContentAsset']>[1],idempotencyKey(req,'required')!)),req.id);});
  app.get<{Params:{contentAssetId:string};Querystring:{revisionId?:string}}>('/api/v1/content-assets/:contentAssetId',{
