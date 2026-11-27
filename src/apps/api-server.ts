@@ -1,4 +1,3 @@
-import type { LinkExtractor } from '../lib/link-extraction/index.js';
 import { TextIngestionService } from '../modules/text-ingestion/service.js';
 import { registerTextIngestionRoutes } from '../modules/text-ingestion/routes.js';
 import { registerTaskRoutes } from '../modules/tasks/routes.js';
@@ -38,7 +37,6 @@ import { RecorderBindingService, type RecorderBindingVerifier } from '../modules
 import { HttpRecorderBindingVerifier } from '../modules/recorder-bindings/verifier.js';
 import { RecordingProcessing, registerRecordingProcessing } from '../modules/funasr/recording-processing.js';
 export async function buildApiServer(options: BuildOptions & IdentityOptions & {
- linkExtractor?: LinkExtractor;
  ragQueryDependencies?: Omit<RagQueryDependencies, 'resolveImages'>;
  recorderBindingVerifier?: RecorderBindingVerifier;
 }) {
@@ -96,7 +94,7 @@ export async function buildApiServer(options: BuildOptions & IdentityOptions & {
  registerInternalRoutes(app,{identity,callbacks,ragQuery,settings,
   ...(funAsr ? { funAsr: { store: new FunAsrStore(pool,assets), secret: funAsr.callbackSecret } } : {})});
  registerAiTemplateRoutes(app, new AiTemplateRuns(pool), new AiTemplateAgentClient(options.config.agentBaseUrl));
- registerContentAssetRoutes(app,assets,storageService,options.linkExtractor);
+ registerContentAssetRoutes(app,assets,storageService);
  registerFunAsrTranscripts(app,new FunAsrTranscripts(pool,options.config.appTokenSecret!));
  registerRagRoutes(app,new RagIngestionRepository(pool,options.config,resourceClaims),storageService.storage,ragQuery);
  registerTaskRoutes(app,new TaskService(pool,options.config.appTokenSecret!,options.config.billingMode === 'disabled' ? undefined : billing),options.config.demoTasks);return app;

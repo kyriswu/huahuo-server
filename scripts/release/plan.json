@@ -9,17 +9,20 @@
       "0003_funasr_transcript_edits.sql",
       "0004_content_asset_audio_transcripts.sql",
       "0005_materialize_legacy_audio_transcript_edits.sql",
-      "0006_recorder_bindings.sql"
+      "0006_recorder_bindings.sql",
+      "0007_link_import_asset_results.sql"
     ],
     "verifySql": "scripts/release/changes/20261127-recorder-local/verify-db.sql",
     "dataChange": {
       "mode": "inline",
-      "reason": "以当前 test 提交作为隔离 CI 演练基线。0005 仅处理有旧单段修订、尚无当前转写且原音频仍匹配的资产，并保留当前转写记录。0006 新建绑定表，并建立录音来源及任务索引；旧音频无需写入。实际环境迁移账本、行数和发布基准待发布恢复时核对。"
+      "reason": "以当前 test 提交作为隔离 CI 演练基线。0005 仅处理有旧单段修订、尚无当前转写且原音频仍匹配的资产，并保留当前转写记录。0006 新建绑定表，并建立录音来源及任务索引；旧音频无需写入。0007 在 tasks 上允许账号级链接提取任务，在 content_jobs 增加来源平台和内容类型字段；已有作业的两个字段可为空，无需回填。实际环境迁移账本、行数和发布基准待发布恢复时核对。"
     }
   },
   "configuration": {
     "mode": "candidate",
     "changes": [
+      { "key": "JUSTONE_API_TOKEN", "operation": "change", "roles": ["worker"], "required": false, "hasDefault": false },
+      { "key": "HUAHUO_SHARE_HOST", "operation": "change", "roles": ["api-server", "worker"], "required": false, "hasDefault": false },
       { "key": "RECORDER_VERIFIER_URL", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": false },
       { "key": "RECORDER_VERIFIER_TOKEN", "operation": "add", "roles": ["api-server"], "required": false, "hasDefault": false },
       { "key": "RECORDING_OUTLINE_SERVICE_URL", "operation": "add", "roles": ["worker"], "required": false, "hasDefault": false },
@@ -60,7 +63,7 @@
   },
   "compatibility": {
     "database": false,
-    "api": true,
+    "api": false,
     "tasks": false,
     "configuration": false
   },

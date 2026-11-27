@@ -2,7 +2,6 @@ import { enqueueRecordingTranscription } from '../funasr/recording-transcription
 import { requireActiveRecorderBinding } from '../recorder-bindings/service.js';
 import { RECORDER_SOURCE_KIND, recordingSourceId, recordingStatuses } from '../recorder-sync/source.js';
 import { readRecordingProcessing, readRecordingProcessingBatch } from '../funasr/recording-status.js';
-import { importLink } from './link-import.js';
 import type { LinkExtractor } from '../../lib/link-extraction/index.js';
 import {inferAssetKind} from './asset-kind.js';
 import type { AssetKind } from '../../contracts/asset-kind.js';
@@ -104,7 +103,7 @@ type CreateAssetInput = {title:string;folderId?:string|null;parts:Record<string,
 export class ContentAssetService {
  constructor(readonly pool:pg.Pool,readonly secret:string,readonly config?:AppConfig,private readonly ragQuery?:RagQueryService,
   private readonly resourceClaims?:ResourceClaims,private readonly audioTranscription?:AudioTranscriptionQueue){}
- private async indexContentAsset(tx:pg.PoolClient,scope:Scope,contentAssetId:string){if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).schedule(tx,scope,contentAssetId);}
+ private async indexContentAsset(tx:pg.PoolClient,scope:Scope,contentAssetId:string){if(this.config?.kb.contentAssetEnabled)await new ContentAssetIndexService(this.pool,this.config).scheduleForOwner(tx,scope,contentAssetId);}
  // Serialize placements with folder tree changes. ContentAsset mutations may share the
  // fence so independent account/resource and contentAsset row locks retain their order.
  private async lockTree(tx:pg.PoolClient,userId:string,shared=false){await tx.query(`SELECT ${shared?'pg_advisory_xact_lock_shared':'pg_advisory_xact_lock'}(hashtextextended($1,0))`,[`asset-tree:${userId}`]);}
@@ -326,7 +325,7 @@ export class ContentAssetService {
   if(!asset)throw new DomainError(404,'CONTENT_ASSET_NOT_FOUND');
   const tags=await tx.query(`SELECT t.tag_id,t.display_name,t.normalized_name,membership.source FROM content_asset_tags membership JOIN asset_tags t ON t.tag_id=membership.tag_id AND t.user_id=$2 WHERE membership.content_asset_id=$1 ORDER BY t.normalized_name,t.tag_id`,[contentAssetId,scope.userId]);
   const suggestions=await tx.query(`SELECT suggestion_id,content_asset_revision_id,labels,provider,status,created_at FROM content_asset_tag_suggestions WHERE content_asset_id=$1 AND user_id=$2 AND status='pending' AND content_asset_revision_id=$3 AND expected_tag_set_version=$4 ORDER BY created_at DESC LIMIT 10`,[contentAssetId,scope.userId,asset.content_asset_revision_id,asset.tag_set_version]);
-  const job=(await tx.query(`SELECT c.task_id,c.outcome,c.provider,t.state,t.error_code FROM content_jobs c JOIN tasks t ON t.id=c.task_id WHERE c.content_asset_id=$1 AND t.user_id=$2 AND t.workspace_id IS NULL ORDER BY t.created_at DESC,t.id DESC LIMIT 1`,[contentAssetId,scope.userId])).rows[0];
+  const job=(await tx.query(`SELECT c.task_id,c.outcome,c.provider,t.state,t.error_code FROM content_jobs c JOIN tasks t ON t.id=c.task_id WHERE c.content_asset_id=$1 AND c.operation='tag_extract' AND t.user_id=$2 AND t.workspace_id IS NULL ORDER BY t.created_at DESC,t.id DESC LIMIT 1`,[contentAssetId,scope.userId])).rows[0];
   const processingStatus=asset.processing_status==='ready'?'ready':'needs-processing';
   return {contentAssetId,tags:tags.rows.map(x=>({tagId:x.tag_id,displayName:x.display_name,normalizedName:x.normalized_name,source:x.source})),tagSetVersion:Number(asset.tag_set_version),tagEtag:`"tags-${contentAssetId}-${asset.tag_set_version}"`,manualOverride:asset.tag_manual_override,suggestions:suggestions.rows.map(x=>({suggestionId:x.suggestion_id,contentAssetRevisionId:x.content_asset_revision_id,labels:x.labels as string[],provider:x.provider,status:x.status,createdAt:x.created_at.toISOString()})),contentAssetEtag:asset.etag,processingStatus,extraction:job?{taskId:job.task_id as string,status:job.state as string,outcome:job.outcome as string|null,provider:job.provider as string|null,errorCode:job.error_code as string|null}:null};
  }
@@ -424,20 +423,19 @@ export class ContentAssetService {
   await this.cursor(tx,scope.userId,'content_asset',id,'updated',false,revisionId,version,asset.content_asset_revision_id,Number(asset.content_asset_revision));
   return true;
  }
- async importLinkAsset(scope: Scope, url: string, key: string, extractor: LinkExtractor, signal: AbortSignal) {
-  return importLink(this.pool,this.secret,scope,key,url,() => extractor.extract(url,signal), async (tx,body) => {
-   const asset = await this.createAssetInTransaction(tx,scope,{
-    title:body.title, sourceKind:'link', assetKind:'link', sourceId:url, parts:{raw:body.markdown}
-   });
-   return {...body, contentAssetId:asset.contentAssetId};
-  },signal);
+ async saveExtractedLink(tx: pg.PoolClient, scope: Scope, url: string, body: Awaited<ReturnType<LinkExtractor['extract']>>) {
+  const owner = await tx.query("SELECT id FROM users WHERE id=$1 AND status='active' AND deleted_at IS NULL FOR SHARE", [scope.userId]);
+  if (!owner.rowCount) throw new DomainError(404, 'LINK_OWNER_UNAVAILABLE');
+  return this.createAssetInTransaction(tx,scope,{
+   title:body.title, sourceKind:'link', assetKind:'link', sourceId:url, parts:{raw:body.markdown}
+  });
  }
  async createContentAsset(scope:Scope,input:CreateAssetInput,key:string){
   if(input.sourceKind===RECORDER_SOURCE_KIND)throw new DomainError(400,'CONTENT_ASSET_SOURCE_RESERVED');
-  return transaction(this.pool,tx=>this.createAssetInTransaction(tx,scope,input,key));
+  return transaction(this.pool,async tx=>{await assertScope(tx,scope);return this.createAssetInTransaction(tx,scope,input,key);});
  }
  private async createAssetInTransaction(tx:pg.PoolClient,scope:Scope,input:CreateAssetInput,key?:string,recordingMode?:'manual'|'auto'){
-  await assertScope(tx,scope);await this.lockTree(tx,scope.userId,true);
+  await this.lockTree(tx,scope.userId,true);
   checkContentAssetParts(input.parts,'input');
   if (!recordingMode) await this.resourceClaims?.ensure(tx,scope,undefined,(input.resourceRefs??[]).filter(ref=>ref.usage!=='inline-image').map(ref=>ref.resourceId));
   const prepared=await normalizeOwnedImageParts(tx,scope,input.parts,this.config,this.resourceClaims,undefined,(input.assetKind??inferAssetKind(input.sourceKind))==='link');

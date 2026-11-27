@@ -9,7 +9,7 @@ function adapter(...results: unknown[]) {
   return {fetchImpl,extractor:new LinkExtractor(new JustOneApiAdapter('fixture',fetchImpl))};
 }
 
-describe('synchronous link extraction', () => {
+describe('link extraction', () => {
   it('matches whole hostnames without a network request', () => {
     expect(identifyPlatform('https://b23.tv/example')).toBe('bilibili');
     expect(identifyPlatform('https://xhslink.com/example')).toBe('xiaohongshu');
@@ -30,11 +30,55 @@ describe('synchronous link extraction', () => {
     const preview = adapter({title:'试读',html:'<mp-pay-preview><p>试读片段</p></mp-pay-preview>'});
     await expect(preview.extractor.extract(articleUrl,signal())).rejects.toMatchObject({code:'LINK_PAID_CONTENT'});
   });
-  it('resolves a short link through the injected provider and uses the gallery endpoint',async()=>{
-    const id='1234567890abcdef12345678';
-    const {extractor,fetchImpl}=adapter({redirect_url:'https://www.xiaohongshu.com/explore/'+id},[{note_list:[{id,title:'图文',desc:'正文',type:'normal',images_list:[{url:'https://img.example/a'}]}]}]);
-    expect(await extractor.extract('https://xhslink.com/share',signal())).toMatchObject({title:'图文',markdown:'正文\n\n![](<https://img.example/a>)'});
+  it.each([
+    ['xiaohongshu','https://xhslink.cn/o/2bAkESpPg3C','https://www.xiaohongshu.com/discovery/item/6b043504000000001f016668','noteId','6b043504000000001f016668'],
+    ['douyin','https://v.douyin.com/_89n-5G2ZuQ/','https://www.iesdouyin.com/share/video/7703532570956352778/','videoId','7703532570956352778'],
+    ['bilibili','https://b23.tv/p8tN7iB','https://www.bilibili.com/video/BV1XJxf69Ed3?p=2','bvid','BV1XJxf69Ed3'],
+  ])('extracts the %s work ID from the first redirect without following it', async (_platform,original,target,key,id) => {
+    const fetchImpl=vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null,{status:302,headers:{location:target}}))
+      .mockResolvedValueOnce(Response.json({code:1}));
+    const extractor=new LinkExtractor(new JustOneApiAdapter('fixture',fetchImpl));
+    await expect(extractor.extract(original,signal())).rejects.toMatchObject({code:'LINK_PROVIDER_UNAVAILABLE'});
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [first,init]=fetchImpl.mock.calls[0]!;
+    const [detail]=fetchImpl.mock.calls[1]!;
+    expect(String(first)).toBe(original);
+    expect(init).toMatchObject({method:'GET',redirect:'manual',credentials:'omit'});
+    expect(init?.headers).toBeUndefined();
+    const request=new URL(String(detail));
+    expect(request.hostname).toBe('api.justoneapi.com');
+    expect(request.searchParams.get(key)).toBe(id);
+  });
+
+  it.each([200,302])('falls back to the provider when a %i response has no usable destination',async status=>{
+    const id='1234567890abcdef12345678', original='https://xhslink.com/share?from=app';
+    const fetchImpl=vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null,{status,headers:status===302?{location:'/intermediate'}:{}}))
+      .mockResolvedValueOnce(Response.json({code:0,data:{redirect_url:'https://www.xiaohongshu.com/explore/'+id}}))
+      .mockResolvedValueOnce(Response.json({code:0,data:[{note_list:[{id,title:'图文',desc:'正文',type:'normal',images_list:[{url:'https://img.example/a'}]}]}]}));
+    const extractor=new LinkExtractor(new JustOneApiAdapter('fixture',fetchImpl));
+    expect(await extractor.extract(original,signal())).toMatchObject({title:'图文',markdown:'正文\n\n![](<https://img.example/a>)'});
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    const transfer=new URL(String(fetchImpl.mock.calls[1]![0]));
+    expect(transfer.pathname).toBe('/api/xiaohongshu/share-url-transfer/v1');
+    expect(transfer.searchParams.get('shareUrl')).toBe(original);
+  });
+
+  it.each(['https://www.douyin.com/video/123','https://www.bilibili.com.example.org/video/BV123'])(
+    'stops on an unexpected redirect target %s', async location=>{
+      const fetchImpl=vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null,{status:301,headers:{location}}));
+      const extractor=new LinkExtractor(new JustOneApiAdapter('fixture',fetchImpl));
+      await expect(extractor.extract('https://b23.tv/example',signal())).rejects.toMatchObject({code:'LINK_ACCESS_UNKNOWN'});
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+  it('does not start a provider lookup after task cancellation',async()=>{
+    const controller=new AbortController();
+    const fetchImpl=vi.fn<typeof fetch>(async()=>{controller.abort();throw controller.signal.reason;});
+    const extractor=new LinkExtractor(new JustOneApiAdapter('fixture',fetchImpl));
+    await expect(extractor.extract('https://b23.tv/example',controller.signal)).rejects.toMatchObject({name:'AbortError'});
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
   it('classifies restrictions before transcription',async()=>{
     const paid=adapter({videoData:{rights:{pay:1}}});

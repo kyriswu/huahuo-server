@@ -1,5 +1,6 @@
 WITH expected_indexes(table_name, index_name) AS (
-  VALUES ('recorder_bindings', 'recorder_bindings_active_device'),
+  VALUES ('content_jobs', 'content_jobs_content_asset_idx'),
+         ('recorder_bindings', 'recorder_bindings_active_device'),
          ('recorder_bindings', 'recorder_bindings_active_user'),
          ('recorder_bindings', 'recorder_bindings_user_device_history'),
          ('content_assets', 'content_assets_recorder_source'),
@@ -35,9 +36,15 @@ WITH expected_indexes(table_name, index_name) AS (
          ('content_asset_audio_transcripts', 'huahuo_admin', false),
          ('content_asset_audio_transcripts', 'huahuo_scheduler', false)
 )
+SELECT 'link_import_uses_asset_results' AS check_name,
+  to_regclass('public.link_extraction_jobs') IS NULL AND
+  has_column_privilege('huahuo_worker','public.content_jobs','source_platform','INSERT') AND
+  has_column_privilege('huahuo_api','public.content_jobs','source_content_type','SELECT') AS ok
+UNION ALL
 SELECT 'asr_tasks_account_scoped' AS check_name, EXISTS (
   SELECT 1 FROM pg_constraint
   WHERE conrelid='public.tasks'::regclass AND conname='tasks_check' AND convalidated
+    AND pg_get_constraintdef(oid) LIKE '%''content-asset.link-extract''::text%'
     AND pg_get_constraintdef(oid) LIKE '%''content-asset.transcribe''::text%'
     AND pg_get_constraintdef(oid) LIKE '%''content-asset.recording-outline''::text%'
 ) AS ok

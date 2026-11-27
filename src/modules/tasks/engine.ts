@@ -1,3 +1,4 @@
+import type { LinkExtractionJobs } from '../content-assets/link-import.js';
 import { RecordingOutlineJobs, failRecordingOutlineRun } from '../funasr/recording-outline.js';
 import { recordingOutlineKind } from '../funasr/recording-status.js';
 import type { TextIngestionJobs } from '../text-ingestion/jobs.js';
@@ -5,7 +6,7 @@ import type pg from 'pg';
 import type { StorageJobs } from '../storage/jobs.js';
 import { randomUUID } from 'node:crypto';
 import { transaction } from '../identity/store.js';
-import { type TaskRow, hash, event, enqueueIntent, retryDelay,parserRequestId,funAsrTaskKind,isFunAsrTask } from './model.js';
+import { type TaskRow, hash, event, enqueueIntent, retryDelay,linkExtractionKind,parserRequestId,funAsrTaskKind,isFunAsrTask } from './model.js';
 import {ParserExecutionDeferred} from '../../lib/document-parser-machine/index.js';
 import type {ProcessingNodeJobs} from '../processing-nodes/jobs.js';
 import { UnavailableTagExtractor, extractBoundedTags, validateTagLabels, type TagExtractor } from '../content-assets/tag-extractor.js';
@@ -30,6 +31,7 @@ export class TaskEngine {
   readonly metrics?: TaskMetrics,
   readonly asr?: ExternalTaskExecutor,
   readonly recordingOutline: TaskExecutor = new RecordingOutlineJobs(pool),
+  readonly linkJobs?: LinkExtractionJobs,
  ){}
  private transaction<T>(operation:(tx:pg.PoolClient)=>Promise<T>){return withApplicationMetrics(this.metrics,()=>transaction(this.pool,operation));}
  private recordAttempt(kind:string,result:TaskResult){try{this.metrics?.recordTaskAttempt(kind,result);}catch{/* Diagnostics cannot replace a committed attempt result. */}}
@@ -113,6 +115,10 @@ export class TaskEngine {
   try{const result=await this.executeOwned(a);a.stepOutcome??='stale';return result;}catch(error){if(error instanceof ParserExecutionDeferred)return this.defer(a,error.delayMs);throw error;}
  }
  private async executeOwned(a:Attempt){
+  if(a.task.kind===linkExtractionKind){
+   if (!this.linkJobs) throw new Error('LINK_WORKER_NOT_CONFIGURED');
+   return this.linkJobs.execute(a,this);
+  }
   if(a.task.kind===funAsrTaskKind){
    if(!this.asr)throw new Error('FUNASR_WORKER_NOT_CONFIGURED');
    return this.asr.execute(a);

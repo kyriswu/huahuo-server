@@ -124,7 +124,6 @@ services:
       HUAHUO_AGENT_BASE_URL: ${HUAHUO_AGENT_BASE_URL:-}
       RECORDER_VERIFIER_URL: ${RECORDER_VERIFIER_URL:-}
       RECORDER_VERIFIER_TOKEN: ${RECORDER_VERIFIER_TOKEN:-}
-      JUSTONE_API_TOKEN: ${JUSTONE_API_TOKEN:-}
       HUAHUO_SHARE_HOST: ${HUAHUO_SHARE_HOST:-}
       APP_TOKEN_SECRET: ${APP_TOKEN_SECRET:?Generate a development secret}
       ENABLE_DEMO_TASKS: ${ENABLE_DEMO_TASKS:-false}
@@ -204,6 +203,8 @@ services:
     command: ['node', '--enable-source-maps', 'dist/entrypoints/worker.js']
     environment:
       <<: [*app-env, *processing-nodes-env]
+      JUSTONE_API_TOKEN: ${JUSTONE_API_TOKEN:-}
+      HUAHUO_SHARE_HOST: ${HUAHUO_SHARE_HOST:-}
       WORKER_QUEUES: ${WORKER_QUEUES:-content,ai,commercial,maintenance}
       FUNASR_COMPUTE_PROVIDER: ${FUNASR_COMPUTE_PROVIDER:-disabled}
       FUNASR_COMPUTE_FIXED_BASE_URL: ${FUNASR_COMPUTE_FIXED_BASE_URL:-}

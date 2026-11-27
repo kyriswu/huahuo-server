@@ -1,9 +1,19 @@
 import { DomainError } from '../domain-error.js';
 
+const shortHosts = {
+  xiaohongshu: ['xhslink.cn', 'xhslink.com', 'www.xhslink.com'],
+  bilibili: ['b23.tv'],
+  douyin: ['v.douyin.com'],
+} as const;
+
+export function isPlatformShortHost(platform: keyof typeof shortHosts, hostname: string): boolean {
+  return (shortHosts[platform] as readonly string[]).includes(hostname);
+}
+
 const hosts = {
-  xiaohongshu: ['www.xiaohongshu.com', 'xiaohongshu.com', 'xhslink.com', 'www.xhslink.com'],
-  bilibili: ['www.bilibili.com', 'm.bilibili.com', 'bilibili.com', 'b23.tv'],
-  douyin: ['www.douyin.com', 'douyin.com', 'v.douyin.com', 'www.iesdouyin.com'],
+  xiaohongshu: ['www.xiaohongshu.com', 'xiaohongshu.com', ...shortHosts.xiaohongshu],
+  bilibili: ['www.bilibili.com', 'm.bilibili.com', 'bilibili.com', ...shortHosts.bilibili],
+  douyin: ['www.douyin.com', 'douyin.com', 'www.iesdouyin.com', ...shortHosts.douyin],
   wechat: ['mp.weixin.qq.com'],
   xiaoyuzhou: ['www.xiaoyuzhoufm.com', 'xiaoyuzhoufm.com'],
 } as const;
@@ -31,6 +41,9 @@ const errors = {
   LINK_ASR_UNAVAILABLE: [503, '暂不可转写'],
   LINK_EXTRACTION_TIMEOUT: [504, '链接解析超时'],
 } as const;
+export function linkFailureMessage(code: string): string {
+  return Object.hasOwn(errors, code) ? errors[code as keyof typeof errors][1] : '链接导入失败';
+}
 export class LinkError extends DomainError {
   readonly userMessage: string;
   constructor(code: keyof typeof errors) {

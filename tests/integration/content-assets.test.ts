@@ -1,3 +1,4 @@
+import { LinkExtractionJobs } from '../../src/modules/content-assets/link-import.js';
 import {LinkError,LinkExtractor} from '../../src/lib/link-extraction/index.js';
 import {beforeAll,afterAll,describe,it,expect,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
@@ -22,63 +23,60 @@ async function fixture(){
  return {userId,workspaceId,bearer,scope:{userId,sessionId,traceId:randomUUID()}};
 }
 async function makeContentAsset(u:Awaited<ReturnType<typeof fixture>>){return contentAssets.createContentAsset(u.scope,{title:'素材',parts:{raw:'正文 alpha'}},randomUUID());}
-async function jobFor(contentAssetId:string){return String((await root.query('SELECT task_id FROM content_jobs WHERE content_asset_id=$1',[contentAssetId])).rows[0].task_id);}
+async function jobFor(contentAssetId:string){return String((await root.query("SELECT task_id FROM content_jobs WHERE content_asset_id=$1 AND operation='tag_extract'",[contentAssetId])).rows[0].task_id);}
 describe('P06 personal contentAssets, revisions and search',()=>{beforeAll(()=>migrate(loadConfig('migrate',{...process.env,APP_ENV:'test',DATABASE_URL:migrationUrl})));afterAll(async()=>{await Promise.all([pool.end(),root.end(),worker.end()]);});
-it('returns synchronous Markdown and authorized link assets, with explicit provider errors',async()=>{
+it('accepts once, returns the current asset and fences duplicate delivery and cross-user reads',async()=>{
  const f=await fixture(), other=await fixture();
+ const raw='A ![](<https://cdn.example/cover>) B';
  const resolve=vi.fn(async (_platform: unknown, url:string)=>{
   if(url.endsWith('/paid')) throw new LinkError('LINK_PAID_CONTENT');
   if(url.endsWith('/video')) return {title:'video',nodes:[{kind:'media' as const,id:'p1',format:'video' as const}]};
-  return {title:'article',nodes:[{kind:'markdown' as const,value:'A ![](<https://cdn.example/cover>) B'}]};
+  return {title:'article',nodes:[{kind:'markdown' as const,value:raw}]};
  });
- const api=await buildApiServer({config:cfg,linkExtractor:new LinkExtractor({resolve})});
+ const jobs=new LinkExtractionJobs(new ContentAssetService(worker,'',{...cfg,tagExtractorProvider:'disabled'}),new LinkExtractor({resolve}));
+ const api=await buildApiServer({config:cfg});
  const path='/api/v1/link-extractions', origin='https://mp.weixin.qq.com/s';
- const headers={...fixtureScopeHeaders(f.bearer),'x-idempotency-key':randomUUID()};
+ const headers=fixtureScopeHeaders(f.bearer);
+ const post=(url:string,key:string=randomUUID())=>api.inject({method:'POST',url:path,headers:{...headers,'x-idempotency-key':key},payload:{url}});
+ const get=(id:string,h=headers)=>api.inject({url:path+'/'+id,headers:h});
+ const run=async(id:string)=>{
+  const attempt=await engine.claim(id,randomUUID());
+  expect(attempt).toBeTruthy();
+  await jobs.execute(attempt!,engine);
+  expect(await engine.claim(id,randomUUID())).toBeNull();
+ };
  try {
   expect((await api.inject({method:'POST',url:path,payload:{url:origin}})).statusCode).toBe(401);
+  expect((await post('https://unknown.example')).statusCode).toBe(400);
+  const key=randomUUID(),[first,again]=await Promise.all([post(origin,key),post(origin,key)]);
+  expect(first.statusCode,first.body).toBe(202);
+  expect(again.json().data).toEqual(first.json().data);
+  const {taskId}=first.json().data;
+  expect((await get(taskId)).json().data).toEqual({taskId,state:'queued'});
+  expect((await post(origin+'/other',key)).statusCode).toBe(409);
+  expect((await get(taskId,fixtureScopeHeaders(other.bearer))).statusCode).toBe(404);
   expect(resolve).not.toHaveBeenCalled();
-  for (const [suffix,code,message] of [['paid',422,'付费内容不可导入'],['video',503,'暂不可转写']] as const) {
-   const response=await api.inject({method:'POST',url:path,headers:{...headers,'x-idempotency-key':randomUUID()},payload:{url:origin+'/'+suffix}});
-   expect(response.statusCode,response.body).toBe(code);
-   expect(response.json().error.message).toBe(message);
+  for(const [suffix,code] of [['paid','LINK_PAID_CONTENT'],['video','LINK_ASR_UNAVAILABLE']]){
+   const id=(await post(origin+'/'+suffix)).json().data.taskId;
+   await run(id);
+   expect((await get(id)).json().data).toMatchObject({state:'failed',error:{code,retryable:false}});
   }
-  expect((await pool.query('SELECT COUNT(*)::int n FROM content_assets WHERE user_id=$1',[f.userId])).rows[0].n).toBe(0);
-  const request={method:'POST' as const,url:path,headers,payload:{url:origin}};
-  const result=await api.inject(request);
-  expect(result.statusCode,result.body).toBe(200);
-  const data=result.json().data;
-  expect((await api.inject(request)).json().data).toEqual(data);
-  expect(resolve).toHaveBeenCalledTimes(3);
-  const detailPath='/api/v1/content-assets/'+data.contentAssetId;
-  const detail=await api.inject({url:detailPath,headers:fixtureScopeHeaders(f.bearer)});
-  expect(detail.json().data.parts.raw.contentMarkdown).toBe(data.markdown);
-  expect((await api.inject({url:detailPath,headers:fixtureScopeHeaders(other.bearer)})).statusCode).toBe(404);
+  await run(taskId);
+  const {result,state}=(await get(taskId)).json().data;
+  expect(state).toBe('succeeded');
+  expect(result).toMatchObject({markdown:raw,title:'article',platform:'wechat',contentType:'article'});
+  const tags=await contentAssets.contentAssetTags(f.scope,result.contentAssetId);
+  expect(tags.extraction).toBeNull();
+  const asset=await contentAssets.getContentAsset(f.scope,result.contentAssetId);
+  expect(asset.parts.raw?.contentMarkdown).toBe(raw);
+  const edited=await contentAssets.updateContentAsset(f.scope,result.contentAssetId,{title:'新标题',parts:{raw:raw+' edited'}},asset.etag,randomUUID());
+  expect((await get(taskId)).json().data.result).toEqual({...result,title:'新标题',markdown:raw+' edited'});
+  expect((await get(taskId,fixtureScopeHeaders(other.bearer))).statusCode).toBe(404);
+  expect((await post(origin,key)).json().data).toEqual({taskId});
+  expect((await pool.query('SELECT count(*)::int n FROM content_assets WHERE user_id=$1',[f.userId])).rows[0].n).toBe(1);
+  await contentAssets.deleteContentAsset(f.scope,result.contentAssetId,edited.etag,randomUUID());
+  expect((await get(taskId)).statusCode).toBe(404);
  } finally {await api.close();}
-});
-it('commits the link asset and replay together and preserves external images on later edits',async()=>{
- const f=await fixture(),key=randomUUID(),url='https://mp.weixin.qq.com/s/example';
- const service=new ContentAssetService(pool,cfg.appTokenSecret!,{...cfg,kb:{...cfg.kb,contentAssetEnabled:false}});
- const raw='intro\n\n![image](https://img.example/a.jpg)';
- let unblock!:()=>void, entered!:()=>void;
- const gate=new Promise<void>(resolve=>{unblock=resolve;});
- const started=new Promise<void>(resolve=>{entered=resolve;});
- const resolve=vi.fn(async()=>{entered();await gate;return {title:'article',nodes:[{kind:'markdown' as const,value:raw}]};});
- const extractor=new LinkExtractor({resolve});
- const submit=(input=url)=>service.importLinkAsset(f.scope,input,key,extractor,AbortSignal.timeout(10000));
- const pending=submit();
- await started;
- try { await expect(submit()).rejects.toMatchObject({code:'LINK_EXTRACTION_IN_PROGRESS'}); }
- finally { unblock(); }
- const result=await pending;
- expect(await submit()).toEqual(result);
- expect(resolve).toHaveBeenCalledTimes(1);
- await expect(submit(url+'?other=1')).rejects.toMatchObject({code:'IDEMPOTENCY_CONFLICT'});
- const asset=await service.getContentAsset(f.scope,result.contentAssetId);
- expect(asset).toMatchObject({assetKind:'link',parts:{raw:{contentMarkdown:raw}}});
- const edited=await service.updateContentAsset(f.scope,asset.contentAssetId,{parts:{raw:raw+' edited'}},asset.etag,randomUUID());
- expect(edited.parts.raw?.contentMarkdown).toContain('https://img.example/a.jpg');
- expect(await submit()).toEqual(result);
- expect((await pool.query('SELECT count(*)::int n FROM content_assets WHERE user_id=$1',[f.userId])).rows[0].n).toBe(1);
 });
 it('skips disabled automatic tags while preserving ContentAsset saves, content events, indexing and explicit request outcomes',async()=>{
  const u=await fixture(),settings:typeof cfg={...cfg,tagExtractorProvider:'disabled',kb:{...cfg.kb,contentAssetEnabled:true},rag:{...cfg.rag,providerMode:'mock'}};

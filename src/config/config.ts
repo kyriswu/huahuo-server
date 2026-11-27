@@ -245,7 +245,8 @@ export function loadConfig(role: Role, env: Env = process.env): AppConfig {
     schemaMinVersion: integer('DB_SCHEMA_MIN_VERSION', 1, 1, 99999), instanceId: randomUUID(), logLevel,
     connectDeadlineMs: integer('DATABASE_CONNECT_DEADLINE_MS', 60000, 1000, 120000),
     migrationLockTimeoutMs: integer('MIGRATION_LOCK_TIMEOUT_MS', 10000, 100, 60000),
-    ...(role === 'api-server' ? {justOneApiToken:env.JUSTONE_API_TOKEN?.trim(),huahuoShareHost:env.HUAHUO_SHARE_HOST?.trim().toLowerCase()} : {}),
+    ...(role === 'worker' ? {justOneApiToken:env.JUSTONE_API_TOKEN?.trim()} : {}),
+    ...(role === 'api-server' || role === 'worker' ? {huahuoShareHost:env.HUAHUO_SHARE_HOST?.trim().toLowerCase()} : {}),
     appTokenSecret: env.APP_TOKEN_SECRET,
     adminSessionSecret: env.ADMIN_SESSION_SECRET,
     jwt: {

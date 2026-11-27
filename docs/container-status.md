@@ -2,9 +2,9 @@
 
 新增迁移 `0006_recorder_bindings.sql`。API 读取设备验证配置，Worker 读取纲要服务配置。隔离测试使用临时 PostgreSQL、Redis 和仓库初始化脚本。 [接口与验收记录](acceptance/recorder-v020.md)
 
-## 创作页链接导入（2026-11-25）
+## 创作页链接导入（2026-11-27）
 
-链接导入在 api-server 的同步请求内执行。JUSTONE_API_TOKEN 和可选 HUAHUO_SHARE_HOST 仅传给该角色。本轮使用隔离 PostgreSQL/Redis 验收，未发布。 [验收记录](acceptance/link-extraction.md)
+API 受理和查询，Scheduler 投递，Worker 提取。JUSTONE_API_TOKEN 移至 Worker，HUAHUO_SHARE_HOST 由 API 与 Worker 共用。切换前停止旧 API、排空旧 Worker，并将数据库迁移至 0007。 [验收记录](acceptance/link-extraction.md)
 
 ## 发布保护安装与原地复核（2026-11-17）
 

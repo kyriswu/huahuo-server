@@ -41,7 +41,8 @@ export async function enqueueIntent(tx:pg.PoolClient,id:string,delayMs=0) {
   ) INSERT INTO task_outbox(id,task_id,available_at) VALUES($1,$2,now()+$3*interval '1 millisecond')
   ON CONFLICT(task_id) WHERE status IN ('pending','delivering') DO UPDATE SET available_at=least(task_outbox.available_at,excluded.available_at)`,[randomUUID(),id,delayMs,carrier.traceparent?JSON.stringify(carrier):null]);
 }
-export const accountAssetTaskKinds = ['content-asset.tag-extract','kb.content-asset-index','kb.content-asset-cleanup',funAsrTaskKind,'content-asset.recording-outline'];
+export const linkExtractionKind = 'content-asset.link-extract';
+export const accountAssetTaskKinds = [linkExtractionKind,'content-asset.tag-extract','kb.content-asset-index','kb.content-asset-cleanup',funAsrTaskKind,'content-asset.recording-outline'];
 export function taskDto(t:TaskRow) {
  return {taskId:t.id,taskType:t.kind,state:t.state,...(accountAssetTaskKinds.includes(t.kind)?{}:{workspaceId:t.workspace_id}),version:t.version,
   attempt:t.attempt_no-t.resume_count,resultId:t.result_id,createdAt:t.created_at.toISOString(),updatedAt:t.updated_at.toISOString(),

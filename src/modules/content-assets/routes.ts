@@ -1,8 +1,6 @@
 import { registerRecorderSyncRoutes } from '../recorder-sync/routes.js';
 import { RecordingProcessingSchema } from '../funasr/recording-status.js';
-import { LinkError, LinkExtractor } from '../../lib/link-extraction/index.js';
-import { extractionTimeoutMs } from './link-import.js';
-import { JustOneApiAdapter } from '../../integrations/justone-api.js';
+import { submitLink, readLinkTask } from './link-import.js';
 import {assetKinds, type AssetKind, AssetKindSchema,AssetKindsSchema} from '../../contracts/asset-kind.js';
 import {ContentStatusSchema} from '../../contracts/content-status.js';
 import { readTrustedScope } from '../identity/trusted-scope.js';
@@ -51,25 +49,23 @@ const contentAssetDetail=Type.Object({
 const contentAssetListItem=Type.Object({originalResourceId:Type.Optional(Id),processing:Type.Optional(RecordingProcessingSchema),contentAssetId:Id,folderId:Type.Union([Id,Type.Null()]),title:Type.String(),state:Type.Literal('active'),contentAssetRevisionId:Id,etag:Type.String(),contentCursor:Type.String(),assetKind:AssetKindSchema,contentStatus:ContentStatusSchema,sourceKind:Type.String(),sourceRef:Type.Union([Type.Object({kind:Type.String(),id:Type.String()},Strict),Type.Null()]),createdAt:Type.String({format:'date-time'}),updatedAt:Type.String({format:'date-time'}),preview:Type.String({maxLength:CONTENT_ASSET_PREVIEW_LENGTH})},Strict);
 const tag=Type.Object({tagId:Id,displayName:Type.String(),normalizedName:Type.String(),source:Type.Union([Type.Literal('manual'),Type.Literal('extracted')])},Strict);
 const tagView=Type.Object({contentAssetId:Id,tags:Type.Array(tag),tagSetVersion:Type.Integer(),tagEtag:Type.String(),manualOverride:Type.Boolean(),suggestions:Type.Array(Type.Object({suggestionId:Id,contentAssetRevisionId:Id,labels:Type.Array(Type.String()),provider:Type.String(),status:Type.String(),createdAt:Type.String()},Strict)),contentAssetEtag:Type.String(),processingStatus:Type.String(),extraction:Type.Union([Type.Null(),Type.Object({taskId:Id,status:Type.String(),outcome:Type.Union([Type.String(),Type.Null()]),provider:Type.Union([Type.String(),Type.Null()]),errorCode:Type.Union([Type.String(),Type.Null()])},Strict)])},Strict);
-export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:ContentAssetService,storage:StorageService,
- extractor = new LinkExtractor(new JustOneApiAdapter(contentAssets.config?.justOneApiToken),{huahuoHost:contentAssets.config?.huahuoShareHost})){const guard=auth;
+export function registerContentAssetRoutes(app:FastifyInstance,contentAssets:ContentAssetService,storage:StorageService){const guard=auth;
  registerRecorderSyncRoutes(app,contentAssets);
  app.post<{Body:{url:string}}>('/api/v1/link-extractions',{
   preHandler:guard,schema:{body:Type.Object({url:Type.String({minLength:1,maxLength:4096})},Strict),querystring:empty,
-   response:{200:Envelope(Type.Object({title:Type.String(),platform:Type.String(),contentType:Type.String(),markdown:Type.String(),contentAssetId:Id},Strict)),...errors,403:ErrorSchema,422:ErrorSchema,504:ErrorSchema}},
+   response:{202:Envelope(Type.Object({taskId:Id},Strict)),...errors}},
  },async(req,reply)=>{
-  const disconnected=new AbortController();
-  const close=()=>disconnected.abort();
-  reply.raw.once('close',close);
-  const signal=AbortSignal.any([disconnected.signal,AbortSignal.timeout(extractionTimeoutMs)]);
-  try {
-   const data=await contentAssets.importLinkAsset(scope(req),req.body.url,idempotencyKey(req,'required')!,extractor,signal);
-   return success(data,req.id);
-  } catch(error) {
-   if(signal.aborted) throw new LinkError('LINK_EXTRACTION_TIMEOUT');
-   throw error;
-  } finally { reply.raw.off('close',close); }
+  const receipt=await submitLink(contentAssets,scope(req),idempotencyKey(req,'required')!,req.body.url);
+  return reply.code(202).send(success(receipt,req.id));
  });
+ app.get<{Params:{taskId:string}}>('/api/v1/link-extractions/:taskId',{
+  preHandler:guard,schema:{params:Type.Object({taskId:Id},Strict),querystring:empty,
+   response:{200:Envelope(Type.Object({
+    taskId:Id,state:Type.String(),
+    result:Type.Optional(Type.Object({title:Type.String(),platform:Type.String(),contentType:Type.String(),markdown:Type.String(),contentAssetId:Id},Strict)),
+    error:Type.Optional(Type.Object({code:Type.String(),userMessage:Type.String(),retryable:Type.Boolean()},Strict)),
+   },Strict)),...errors}},
+ },async req=>success(await readLinkTask(contentAssets.pool,storage,scope(req),req.params.taskId),req.id));
  const contentAssetView=async<T extends Awaited<ReturnType<ContentAssetService['createContentAsset']>>>(req:FastifyRequest,value:T)=>(await contentAssetImageViews(storage,scope(req),[value]))[0]!;
  app.get('/api/v1/folders',{preHandler:guard,schema:{querystring:empty,response:{200:Envelope(Type.Object({folders:Type.Array(folder)})),...errors}}},async req=>success(await contentAssets.listFolders(scope(req)),req.id));
  app.post('/api/v1/folders',{preHandler:guard,schema:{body:Type.Object({displayName:Text(120),parentFolderId:Type.Optional(Type.Union([Id,Type.Null()]))},Strict),querystring:empty,response:{200:Envelope(folder),...errors}}},async req=>{const b=req.body as {displayName:string;parentFolderId?:string|null};return success(await contentAssets.createFolder(scope(req),b,idempotencyKey(req,'required')!),req.id);});

@@ -1,5 +1,5 @@
 import { ServiceHttpClient, readJsonResponse } from './http-client.js';
-import { identifyPlatform, imageMarkdown, LinkError, plainText, type LinkNode, type LinkProvider, type Platform } from '../lib/link-extraction/index.js';
+import { identifyPlatform, isPlatformShortHost, imageMarkdown, LinkError, plainText, type LinkNode, type LinkProvider, type Platform } from '../lib/link-extraction/index.js';
 import { articleNodes } from '../lib/link-extraction/wechat.js';
 
 function object(value: unknown): Record<string, unknown> {
@@ -58,9 +58,20 @@ const endpoints = {
   bilibili:{ path:'bilibili/get-video-detail/v2', key:'bvid', id:/\/video\/(BV[\da-zA-Z]+)(?:\/|$)/u },
   douyin:{ path:'douyin/get-video-detail/v2', key:'videoId', id:/\/(?:video|note|slides)\/(\d+)(?:\/|$)/u },
 };
+function redirectWorkId(platform: keyof typeof endpoints, target: URL) {
+  try {
+    if (identifyPlatform(target.href) === platform) {
+      return isPlatformShortHost(platform,target.hostname) ? undefined : endpoints[platform].id.exec(target.pathname)?.[1];
+    }
+  } catch (error) {
+    if (!(error instanceof LinkError)) throw error;
+  }
+  throw new LinkError('LINK_ACCESS_UNKNOWN');
+}
+
 export class JustOneApiAdapter implements LinkProvider {
   private readonly http: ServiceHttpClient;
-  constructor(private readonly token?: string, fetchImpl?: typeof fetch) {
+  constructor(private readonly token?: string, private readonly fetchImpl: typeof fetch = fetch) {
     this.http = new ServiceHttpClient({fetchImpl});
   }
   private async get(path: string, key: string, value: string, signal: AbortSignal) {
@@ -80,6 +91,46 @@ export class JustOneApiAdapter implements LinkProvider {
       throw new LinkError('LINK_PROVIDER_UNAVAILABLE');
     }
   }
+  // Read only the platform's first response. Do not send provider credentials or trace headers.
+  private async firstRedirect(url: URL, signal: AbortSignal): Promise<URL | undefined> {
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(4000)]);
+    let response: Response | undefined;
+    try {
+      response = await this.fetchImpl(url, {method:'GET',redirect:'manual',credentials:'omit',signal:deadline});
+      const location = response.headers.get('location');
+      if ([301,302,303,307,308].includes(response.status) && location) return new URL(location,url);
+    } catch {
+      signal.throwIfAborted();
+      // A malformed Location, short timeout or network failure can use the provider resolver.
+    } finally {
+      await response?.body?.cancel().catch(() => undefined);
+    }
+  }
+
+  private async workId(platform: keyof typeof endpoints, original: string, signal: AbortSignal) {
+    if (identifyPlatform(original) !== platform) throw new LinkError('LINK_UNSUPPORTED');
+    const source = new URL(original);
+    const pattern = endpoints[platform].id;
+    if (isPlatformShortHost(platform,source.hostname)) {
+      const target = await this.firstRedirect(source,signal);
+      if (target) {
+        const id = redirectWorkId(platform,target);
+        if (id) return id;
+      }
+    } else {
+      const id = pattern.exec(source.pathname)?.[1];
+      if (id) return id;
+    }
+
+    signal.throwIfAborted();
+    const result = object(await this.get(platform + '/share-url-transfer/v1','shareUrl',original,signal));
+    const target = string(result.redirect_url);
+    const url = URL.parse(target);
+    const id = url && redirectWorkId(platform,url);
+    if (!id) throw new LinkError('LINK_ACCESS_UNKNOWN');
+    return id;
+  }
+
   async resolve(platform: Platform, original: string, signal: AbortSignal) {
     if (platform === 'wechat') {
       const article = object(await this.get('weixin/get-article-detail/v6','articleUrl',original,signal));
@@ -88,15 +139,9 @@ export class JustOneApiAdapter implements LinkProvider {
       return {title:string(article.title),nodes:articleNodes(string(article.html))};
     }
     if (platform === 'huahuo' || platform === 'xiaoyuzhou') throw new LinkError('LINK_SOURCE_UNAVAILABLE');
+    if (!this.token) throw new LinkError('LINK_PROVIDER_UNAVAILABLE');
     const endpoint = endpoints[platform];
-    let id = endpoint.id.exec(new URL(original).pathname)?.[1];
-    if (!id) {
-      const result = object(await this.get(platform + '/share-url-transfer/v1','shareUrl',original,signal));
-      const target = string(result.redirect_url);
-      if (!target || identifyPlatform(target) !== platform) throw new LinkError('LINK_ACCESS_UNKNOWN');
-      id = endpoint.id.exec(new URL(target).pathname)?.[1];
-    }
-    if (!id) throw new LinkError('LINK_ACCESS_UNKNOWN');
+    const id = await this.workId(platform,original,signal);
     const data = await this.get(endpoint.path, endpoint.key, id, signal);
     if (platform === 'bilibili') return mapBilibili(data,id);
     if (platform === 'douyin') return mapDouyin(data,id);

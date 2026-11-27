@@ -13,6 +13,9 @@ export class ContentAssetIndexService {
  constructor(readonly pool:pg.Pool,readonly config:AppConfig){}
  async schedule(tx:pg.PoolClient,scope:Scope,contentAssetId:string){
   await assertScope(tx,scope);
+  return this.scheduleForOwner(tx,scope,contentAssetId);
+ }
+ async scheduleForOwner(tx:pg.PoolClient,scope:Scope,contentAssetId:string){
   const state=await sourceState(tx,{source_type:'content_asset',source_id:contentAssetId,user_id:scope.userId},true);
   if(state.deleted||!state.revision){await this.scheduleCleanup(tx,scope,contentAssetId);return;}
   if(Array.from(state.content!).length>this.config.rag.plainTextMaxChars)throw new DomainError(413,'RAG_PLAIN_TEXT_TOO_LARGE');
